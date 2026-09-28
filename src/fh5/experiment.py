@@ -368,7 +368,7 @@ def run_experiment(
         "invalid_packets": packet_count - len(samples),
         "segments": segment + bool(samples),
     }
-    if (directory / "control.json").exists():
+    if metadata.get("control_source") == "calibration" or (directory / "control.json").exists():
         summary["control"] = read_control(directory, samples)
     write_report(
         report_path,

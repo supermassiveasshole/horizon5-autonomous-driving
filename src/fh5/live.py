@@ -53,6 +53,8 @@ class LiveEnvironment:
         self._active = False
         self._last_send = self.now_ns()
         self._closed = False
+        self._release_failures = 0
+        self._detached = False
         self._worker = threading.Thread(target=self._watch, daemon=True, name="fh5-input-watchdog")
         self._worker.start()
 
@@ -77,7 +79,7 @@ class LiveEnvironment:
 
     def send(self, command: Command) -> None:
         with self._lock:
-            if self._closed:
+            if self._closed or self._detached:
                 raise OSError("Controller is closed")
             if command != NEUTRAL:
                 reason = self._fault
@@ -88,14 +90,18 @@ class LiveEnvironment:
                 if reason:
                     self._trip(reason)
                     raise OSError(f"Input inhibited: {reason}")
-            self.controller.send(command)
+            try:
+                self.controller.send(command)
+            except Exception:
+                self._active = True  # A failed call may have partially applied its report.
+                self._trip("interface_error")
+                raise
             self._active = command != NEUTRAL
             self._last_send = self.now_ns()
 
     def _trip(self, reason: str) -> None:
         # Called with the lock held; latch even if the neutral write fails.
         self._fault = reason
-        self._active = False
         event: dict[str, Any] = {
             "reason": reason,
             "issued_ns": self.now_ns(),
@@ -104,9 +110,23 @@ class LiveEnvironment:
         }
         try:
             self.controller.send(NEUTRAL)
+            self._active = False
             event["status"] = "sent"
         except Exception as error:
             event["error"] = str(error)
+            self._active = True
+            self._release_failures += 1
+            if self._release_failures >= 3:
+                # A returning driver error is recoverable enough to attempt detach.
+                try:
+                    self.controller.close()
+                    event["detach_status"] = "closed"
+                except Exception as close_error:
+                    event["detach_status"] = "failed"
+                    event["detach_error"] = str(close_error)
+                finally:
+                    self._detached = True
+                    self._active = False
         finally:
             event["returned_ns"] = self.now_ns()
             self.events.append(event)
@@ -117,7 +137,9 @@ class LiveEnvironment:
                 if not self._active:
                     continue
                 try:
-                    if self.desktop.stop_requested():
+                    if self._fault:
+                        self._trip(self._fault)
+                    elif self.desktop.stop_requested():
                         self._trip("user_stop")
                     elif not self.desktop.focused():
                         self._trip("focus_lost")
@@ -133,7 +155,8 @@ class LiveEnvironment:
         self._worker.join()
         with self._lock:
             self._closed = True
-            self.controller.close()
+            if not self._detached:
+                self.controller.close()
 
 
 class WindowsDesktop:

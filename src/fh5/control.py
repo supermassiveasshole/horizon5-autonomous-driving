@@ -105,6 +105,19 @@ def run_control(request: Control, environment: ControlEnvironment) -> RunResult:
         environment.close()
 
 
+def _sample_stop_reason(sample: dict[str, Any], config: dict[str, Any]) -> str | None:
+    if not sample["is_race_on"]:
+        return "inactive"
+    if (
+        sample["car_ordinal"] != config["expected_car_ordinal"]
+        or sample["car_performance_index"] != config["expected_pi"]
+    ):
+        return "vehicle_changed"
+    if sample["speed_kmh"] >= config["max_speed_kmh"]:
+        return "speed_limit"
+    return None
+
+
 def _run_control(
     request: Control, environment: ControlEnvironment, config: dict[str, Any]
 ) -> RunResult:
@@ -196,15 +209,7 @@ def _run_control(
                         else:
                             game_advanced_ns = sample["received_monotonic_ns"]
                         if started is not None:
-                            if not sample["is_race_on"]:
-                                reason = "inactive"
-                            elif (
-                                sample["car_ordinal"] != config["expected_car_ordinal"]
-                                or sample["car_performance_index"] != config["expected_pi"]
-                            ):
-                                reason = "vehicle_changed"
-                            elif sample["speed_kmh"] >= config["max_speed_kmh"]:
-                                reason = "speed_limit"
+                            reason = _sample_stop_reason(sample, config) or reason
                         latest = sample
                     if frame.fault:
                         reason = frame.fault
@@ -218,15 +223,8 @@ def _run_control(
                         > config["telemetry_timeout_s"] * 1e9
                     ):
                         reason = "telemetry_stale"
-                    elif not latest["is_race_on"]:
-                        reason = "inactive"
-                    elif (
-                        latest["car_ordinal"] != config["expected_car_ordinal"]
-                        or latest["car_performance_index"] != config["expected_pi"]
-                    ):
-                        reason = "vehicle_changed"
-                    elif latest["speed_kmh"] >= config["max_speed_kmh"]:
-                        reason = "speed_limit"
+                    elif sample_reason := _sample_stop_reason(latest, config):
+                        reason = sample_reason
                     elif now - game_advanced_ns > config["telemetry_timeout_s"] * 1e9:
                         reason = "game_time_stalled"
                     if started is None:
@@ -288,9 +286,11 @@ def _run_control(
                         environment.close()
                     except Exception as error:
                         result.update(stop_reason="interface_error", close_error=str(error))
-                    (request.output_dir / "control.json").write_text(
+                    final_summary = request.output_dir / "control-final.tmp"
+                    final_summary.write_text(
                         json.dumps(result, indent=2, allow_nan=False) + "\n", encoding="utf-8"
                     )
+                    final_summary.replace(request.output_dir / "control.json")
 
     return run_experiment(
         Record(request.config_file, request.output_dir, environment.source_kind), packets=stream()
@@ -299,11 +299,19 @@ def _run_control(
 
 def read_control(directory: Path, samples: list[dict[str, Any]]) -> dict[str, Any]:
     """Recover command evidence independently of a successful final summary write."""
-    result = json.loads((directory / "control.json").read_text(encoding="utf-8"))
-    if not isinstance(result, dict) or result.get("version") != 1:
+    errors = []
+    try:
+        result = json.loads((directory / "control.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError) as error:
+        result = {"version": 1, "stop_reason": "incomplete", "release_sent": False}
+        errors.append(f"Control summary unavailable: {error}")
+    if (
+        not isinstance(result, dict)
+        or type(result.get("version")) is not int
+        or result["version"] != 1
+    ):
         raise ValueError("Unsupported control recording version")
     commands = []
-    errors = []
     try:
         lines = (directory / "commands.jsonl").read_bytes().splitlines()
     except OSError as error:
@@ -317,9 +325,33 @@ def read_control(directory: Path, samples: list[dict[str, Any]]) -> dict[str, An
             for field in ("issued_ns", "returned_ns"):
                 if type(command.get(field)) is not int or command[field] < 0:
                     raise ValueError("Invalid command time")
+            if command["returned_ns"] < command["issued_ns"]:
+                raise ValueError("Command time moved backwards")
+            for name in ("target", "sent"):
+                value = command.get(name)
+                if name == "sent" and command["status"] == "failed" and value is None:
+                    continue
+                if not isinstance(value, dict):
+                    raise ValueError("Invalid command values")
+                for axis, low, high in [
+                    ("steer_i16", -32767, 32767),
+                    ("throttle_u8", 0, 255),
+                    ("brake_u8", 0, 255),
+                ]:
+                    if type(value.get(axis)) is not int or not low <= value[axis] <= high:
+                        raise ValueError("Invalid command axis")
             commands.append(command)
         except (ValueError, UnicodeDecodeError) as error:
             errors.append(f"Command line {index + 1}: {error}")
+    if result.get("stop_reason") != "running" and commands != result.get("commands"):
+        errors.append("Command journal differs from the finalized record")
+    if result.get("release_sent") and (
+        not commands
+        or commands[-1].get("owner") != "stop_guard"
+        or commands[-1].get("status") != "sent"
+        or commands[-1].get("sent") != asdict(Command(0, 0, 0))
+    ):
+        errors.append("Final release command evidence is missing")
     result["commands"] = commands
     result["artifact_errors"] = errors
     if errors or result.get("stop_reason") == "running":

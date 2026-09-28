@@ -5,6 +5,7 @@ import threading
 import time
 from pathlib import Path
 
+import pytest
 from test_control import control_config
 from test_experiment import sample_packet
 
@@ -31,14 +32,32 @@ class Pad:
 
     def close(self) -> None:
         self.closed = True
+        self.closed_at = time.monotonic()
 
 
-def test_watchdog_releases_during_blocked_control_loop(tmp_path: Path) -> None:
-    pad = Pad()
+@pytest.mark.parametrize("failures", [0, 1, 10])
+def test_watchdog_releases_during_blocked_control_loop(tmp_path: Path, failures: int) -> None:
+    class FaultyPad(Pad):
+        remaining_failures = failures
+
+        def send(self, command: Command) -> None:
+            if (
+                self.remaining_failures
+                and command == Command(0, 0, 0)
+                and any(c.throttle_u8 for _, c in self.sent)
+            ):
+                self.remaining_failures -= 1
+                raise OSError("transient release failure")
+            super().send(command)
+
+    pad = FaultyPad()
 
     class SlowEnvironment(LiveEnvironment):
+        stalled = False
+
         def read(self, period_s: float):
-            if any(command.throttle_u8 for _, command in pad.sent):
+            if not self.stalled and any(command.throttle_u8 for _, command in pad.sent):
+                self.stalled = True
                 time.sleep(0.4)
             return super().read(period_s)
 
@@ -66,10 +85,21 @@ def test_watchdog_releases_during_blocked_control_loop(tmp_path: Path) -> None:
         finally:
             finished.set()
             feeder.join()
-    assert result.summary["control"]["stop_reason"] == "watchdog_timeout"
-    assert result.summary["control"]["adapter_events"][0]["status"] == "sent"
+    assert result.summary["control"]["stop_reason"] == (
+        "interface_error" if failures == 10 else "watchdog_timeout"
+    )
+    events = result.summary["control"]["adapter_events"]
+    assert events[0]["status"] == ("failed" if failures else "sent")
     first_active = next(i for i, (_, command) in enumerate(pad.sent) if command.throttle_u8)
     active_at = pad.sent[first_active][0]
+    if failures == 10:
+        assert len(events) == 3
+        assert events[-1]["detach_status"] == "closed"
+        assert pad.closed
+        assert 0.2 < pad.closed_at - active_at < 0.4
+        assert result.summary["control"]["release_sent"] is False
+        return
+    assert events[-1]["status"] == "sent"
     released_at, command = pad.sent[first_active + 1]
     assert command == Command(0, 0, 0)
     assert 0.2 < released_at - active_at < 0.4

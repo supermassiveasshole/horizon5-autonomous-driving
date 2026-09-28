@@ -204,6 +204,33 @@ def test_interrupted_control_journal_replays_as_incomplete(tmp_path: Path) -> No
     assert control["artifact_errors"]
 
 
+@pytest.mark.parametrize("tail", ["missing_release", "empty"])
+def test_whole_line_journal_loss_cannot_preserve_release_success(tmp_path: Path, tail: str) -> None:
+    run_dir = tmp_path / "lost-journal"
+    run_experiment(Control(control_config(tmp_path), run_dir), environment=GameFixture())
+    journal = run_dir / "commands.jsonl"
+    rows = journal.read_text().splitlines()
+    journal.write_text("\n".join(rows[:-1]) + "\n" if tail == "missing_release" else "")
+    replay = run_experiment(Replay(run_dir, tmp_path / "lost.html"))
+    assert replay.summary["control"]["stop_reason"] == "incomplete"
+    assert replay.summary["control"]["release_sent"] is False
+
+
+@pytest.mark.parametrize("damage", ["torn", "missing"])
+def test_damaged_control_summary_preserves_command_evidence(tmp_path: Path, damage: str) -> None:
+    run_dir = tmp_path / "damaged-summary"
+    original = run_experiment(Control(control_config(tmp_path), run_dir), environment=GameFixture())
+    path = run_dir / "control.json"
+    if damage == "torn":
+        path.write_text('{"version": 1, "stop_reason":')
+    else:
+        path.unlink()
+    replay = run_experiment(Replay(run_dir, tmp_path / "damaged.html"))
+    assert replay.summary["control"]["stop_reason"] == "incomplete"
+    assert replay.summary["control"]["release_sent"] is False
+    assert replay.summary["control"]["commands"] == original.summary["control"]["commands"]
+
+
 def test_observed_response_delay_uses_telemetry_not_send_return_time(tmp_path: Path) -> None:
     class ResponsiveGame(GameFixture):
         def read(self, period_s: float) -> ControlInput:
