@@ -45,6 +45,8 @@ uv run --locked --extra control --extra events fh5 event --config runs/t03-menu-
 
 实测重开步骤为 `driving: START → pause_map: RIGHT → pause_exit: DOWN → pause_restart: A → confirm: A → ready: A`；成绩页则为 `finish: X → confirm: A → ready: A`。每步的页面名称对应独立模板；菜单布局或初始选中项不同会停止。`ready` 只证明页面类型，不能证明所选蓝图、辅助或调校正确，这些条件须另外核对。
 
+暂停菜单模板不要包含随车辆位置移动的地图内容。第 2 版实测发现旧选中边框图块带入了地图，赛途中误判为未知；现使用左侧和顶部的固定选中边框，加上菜单文字共同识别，阈值仍为 0.045。校准记录见 `runs/t03-menu-profile-v2/pause-template-r2-checks.json`；旧运行保存的模板保持不变。
+
 除原始遥测外，保存 `event-config.json`、`event-assets/`、`frames/`、逐条刷盘的 `event-journal.jsonl` 与最终 `event-run.json`。回放核对原始遥测/画面/资产哈希、日志与最终摘要；缺失或损坏时从可读事件前缀恢复尝试列表，报告证据不完整，不补造释放成功。哈希用于发现损坏和不一致，不是对整个目录的防篡改签名。逐帧记录会占用较多磁盘，实机适配器须选择足以识别的低分辨率并测量吞吐。
 
 `fh5 replay <run> --report <new-report.html>` 可离线查看尝试和菜单动作。`unattended_verified` 始终为 false；真实条件和剩余验收项见 [T03 验证记录](validation/t03-event.md)。

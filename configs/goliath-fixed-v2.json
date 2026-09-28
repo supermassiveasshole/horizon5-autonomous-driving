@@ -1,0 +1,56 @@
+{
+  "schema_version": 1,
+  "control_source": "unknown",
+  "snapshot": {
+    "vehicle": {
+      "value": "2011 Lamborghini Sesto Elemento",
+      "status": "verified",
+      "evidence": "docs/validation/t03-event.md; live vehicle header"
+    },
+    "variant": {
+      "value": "Forza Edition; CarOrdinal 2941; X 999",
+      "status": "verified",
+      "evidence": "docs/validation/t02-control.md; blueprint starting grid"
+    },
+    "tune": {
+      "value": "Current BEST FOR SESTOFE by IMG BIRD (2021/11/14); unchanged",
+      "status": "user_reported"
+    },
+    "assists": {
+      "value": "Automatic shifting; simulation steering; ABS/TCS/STM off; full driving line; cosmetic damage; rewind enabled; launch control off",
+      "status": "verified",
+      "evidence": "docs/validation/t03-event.md; official-assists.jpg"
+    },
+    "event": {
+      "value": "Goliath blueprint 105657219; official route and checkpoints required; 1 lap; 54.6 km; Drivatars off; traffic off",
+      "status": "verified",
+      "evidence": "docs/validation/t03-event.md; runs/t03-fixed-environment-v2/blueprint-card.jpg and blueprint-fixed-settings.png"
+    },
+    "environment": {
+      "value": "Settings screen: dry season; custom weather/time; clear; early morning; fixed time progression. Blueprint loaded and one off-start restart observed; long-run environment consistency unverified.",
+      "status": "verified",
+      "evidence": "docs/validation/t03-event.md; runs/t03-fixed-environment-v2/blueprint-fixed-settings.png; SHA256 0ca2ad90f5540094f681d3a095e5baf11e2176c6eab2c9025064aa934fb7c28d"
+    }
+  },
+  "event_profile": {
+    "version": 1,
+    "blueprint_share_code": "105657219",
+    "expected_car_ordinal": 2941,
+    "expected_pi": 999,
+    "drivatars": 0,
+    "traffic": false,
+    "laps": 1,
+    "season": "dry",
+    "weather": "clear",
+    "time_of_day": "early_morning",
+    "time_progression": "fixed",
+    "rewind_enabled": true,
+    "rewind_allowed_in_valid_evaluation": false,
+    "conditions_verified": false,
+    "unattended_verified": false,
+    "conditions_revision": 2,
+    "blueprint_binding_verified": true,
+    "loaded_event_verified": true,
+    "off_start_restart_observed": true
+  }
+}
