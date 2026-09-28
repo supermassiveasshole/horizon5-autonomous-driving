@@ -37,7 +37,7 @@ td{overflow-wrap:anywhere}summary{cursor:pointer;font-weight:600}code{font-size:
 </div><div class="readout" id="readout"></div>
 </section>
 <div class="charts">
-<section class="panel"><h2>轨迹 · 世界 X/Z</h2><canvas id="trajectory" aria-label="按连续片段绘制的轨迹"></canvas><small>单位 m；跳变和断流处断开。视图方向仍需实机标定。</small></section>
+<section class="panel"><h2>轨迹 · 世界 X/Z</h2><canvas id="trajectory" aria-label="按连续片段绘制的轨迹"></canvas><small>单位 m；仅绘制活动状态位置，异常处断开。方向待实机标定。</small></section>
 <section class="panel"><h2>车速与接收时间</h2><canvas id="speed" aria-label="车速随接收时间的变化"></canvas><small>单位 km/h；时间来自接收端单调时钟。</small></section>
 </div>
 <section class="panel"><h2 id="event-title">异常与状态事件</h2><div class="table-wrap"><table><thead><tr><th>数据包</th><th>类型</th><th>说明</th></tr></thead><tbody id="events"></tbody></table></div></section>
@@ -50,7 +50,7 @@ td{overflow-wrap:anywhere}summary{cursor:pointer;font-weight:600}code{font-size:
 const data=JSON.parse(document.getElementById("recording-data").textContent);
 const samples=data.samples, meta=data.metadata, summary=data.summary;
 const el=id=>document.getElementById(id), fmt=(v,n=2)=>Number(v).toFixed(n);
-el("identity").textContent=`记录时间：${meta.created_utc} · 控制来源：${meta.control_source}`;
+el("identity").textContent=`记录时间：${meta.created_utc} · 控制来源：${meta.control_source} · 活动状态包：${summary.active_packets}`;
 el("evidence").textContent=(meta.source_kind==="synthetic"?"这是合成数据演示。":"这些数据经 UDP 接收，来源仍需结合游戏实况核验。")+" 实机核验：未核验。数据包格式有效不代表驾驶有效、完赛或 RL 改善。";
 for(const [label,value] of [["数据包",summary.packet_count],["格式有效",summary.valid_packets],["异常数据包",summary.invalid_packets],["连续片段",summary.segments]]){
  const card=document.createElement("div");card.className="stat";
@@ -69,7 +69,7 @@ el("versions").textContent=`数据格式 ${meta.format_version} · 解析器 ${m
 const times=[];let elapsed=0;
 for(let i=0;i<samples.length;i++){if(i)elapsed+=Math.max(0,(samples[i].received_monotonic_ns-samples[i-1].received_monotonic_ns)/1e9);times.push(elapsed);}
 let minX=Infinity,maxX=-Infinity,minZ=Infinity,maxZ=-Infinity,maxSpeed=1;
-for(const s of samples){minX=Math.min(minX,s.position_m[0]);maxX=Math.max(maxX,s.position_m[0]);minZ=Math.min(minZ,s.position_m[2]);maxZ=Math.max(maxZ,s.position_m[2]);maxSpeed=Math.max(maxSpeed,s.speed_kmh);}
+for(const s of samples){if(s.is_race_on){minX=Math.min(minX,s.position_m[0]);maxX=Math.max(maxX,s.position_m[0]);minZ=Math.min(minZ,s.position_m[2]);maxZ=Math.max(maxZ,s.position_m[2]);}maxSpeed=Math.max(maxSpeed,s.speed_kmh);}
 let index=0,playing=false,lastWall=0,targetTime=0;
 el("cursor").max=Math.max(0,samples.length-1);el("cursor").disabled=!samples.length;el("play").disabled=!samples.length;
 function context(id){const canvas=el(id),ratio=window.devicePixelRatio||1,w=canvas.clientWidth,h=canvas.clientHeight;canvas.width=Math.round(w*ratio);canvas.height=Math.round(h*ratio);const ctx=canvas.getContext("2d");ctx.scale(ratio,ratio);ctx.clearRect(0,0,w,h);ctx.lineWidth=1;ctx.strokeStyle="#e0e8e4";for(let n=1;n<5;n++){ctx.beginPath();ctx.moveTo(w*n/5,0);ctx.lineTo(w*n/5,h);ctx.moveTo(0,h*n/5);ctx.lineTo(w,h*n/5);ctx.stroke();}return {ctx,w,h};}
@@ -81,11 +81,12 @@ function draw(){
  const velocity=(s,i)=>[24+(speed.w-48)*times[i]/Math.max(0.01,elapsed),speed.h-24-(speed.h-48)*s.speed_kmh/maxSpeed];
  for(const [chart,project] of [[track,pos],[speed,velocity]]){
   const {ctx}=chart;ctx.lineWidth=1.8;ctx.strokeStyle="#8ebbb3";ctx.beginPath();
-  samples.forEach((s,i)=>{const p=project(s,i);if(!i||s.segment!==samples[i-1].segment)ctx.moveTo(...p);else ctx.lineTo(...p);});ctx.stroke();
-  const p=project(samples[index],index);ctx.fillStyle="#0b7468";ctx.beginPath();ctx.arc(...p,5,0,Math.PI*2);ctx.fill();
+  samples.forEach((s,i)=>{if(chart===track&&!s.is_race_on)return;const p=project(s,i);if(!i||s.segment!==samples[i-1].segment)ctx.moveTo(...p);else ctx.lineTo(...p);});ctx.stroke();
+  if(chart===speed||samples[index].is_race_on){const p=project(samples[index],index);ctx.fillStyle="#0b7468";ctx.beginPath();ctx.arc(...p,5,0,Math.PI*2);ctx.fill();}
+  if(chart===track&&!summary.active_packets){ctx.fillStyle="#647776";ctx.font="14px sans-serif";ctx.fillText("未收到活动状态位置",24,48);}
  }
  const s=samples[index],c=s.telemetry_controls;el("cursor").value=index;el("clock").textContent=`${fmt(times[index])} / ${fmt(elapsed)} s`;
- el("readout").textContent=`包 ${s.packet_index} · 片段 ${s.segment} · ${fmt(s.speed_kmh,1)} km/h · 游戏时间 ${s.game_timestamp_ms} ms · 遥测油门 ${c.accel} / 刹车 ${c.brake} / 转向 ${c.steer} · CarOrdinal ${s.car_ordinal} / PI ${s.car_performance_index}`;
+ el("readout").textContent=`包 ${s.packet_index} · ${s.is_race_on?"活动":"非活动"} · 片段 ${s.segment} · ${fmt(s.speed_kmh,1)} km/h · 游戏时间 ${s.game_timestamp_ms} ms · 遥测油门 ${c.accel} / 刹车 ${c.brake} / 转向 ${c.steer} · CarOrdinal ${s.car_ordinal} / PI ${s.car_performance_index}`;
 }
 el("cursor").addEventListener("input",()=>{index=Number(el("cursor").value);playing=false;el("play").textContent="播放";draw();});
 function tick(now){if(!playing)return;targetTime+=(now-lastWall)/1000*Number(el("rate").value);lastWall=now;while(index+1<samples.length&&times[index+1]<=targetTime)index++;draw();if(index+1===samples.length){playing=false;el("play").textContent="播放";}else requestAnimationFrame(tick);}

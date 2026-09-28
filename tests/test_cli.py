@@ -22,7 +22,7 @@ def test_cli_records_udp_then_replays_without_claiming_game_validation(tmp_path:
             "--output",
             str(run_dir),
             "--seconds",
-            "0.4",
+            "0.8",
             "--port",
             "0",
         ],
@@ -58,6 +58,14 @@ def test_cli_records_udp_then_replays_without_claiming_game_validation(tmp_path:
     result = json.loads(replay.stdout)
     assert result["valid_packets"] == 1
     assert result["game_validation"] == "unverified"
+    report = json.loads((tmp_path / "replayed.json").read_text(encoding="utf-8"))
+    tail_gaps = [
+        event
+        for event in report["events"]
+        if event["kind"] == "receive_gap" and event.get("boundary") == "end"
+    ]
+    assert len(tail_gaps) == 1
+    assert 0.5 < tail_gaps[0]["duration_seconds"] < 2
 
 
 def test_no_datagrams_is_reported_as_an_unsuccessful_capture(tmp_path: Path) -> None:

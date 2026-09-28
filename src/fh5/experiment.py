@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import struct
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -160,6 +161,8 @@ def run_experiment(
             "capture_status": "recording",
         }
         request.output_dir.mkdir(parents=True, exist_ok=False)
+        if request.source_kind == "udp":
+            metadata["capture_start_monotonic_ns"] = time.perf_counter_ns()
         _write_json(request.output_dir / "session.json", metadata)
         try:
             with (request.output_dir / "packets.jsonl").open("w", encoding="utf-8") as target:
@@ -183,6 +186,8 @@ def run_experiment(
         else:
             metadata["capture_status"] = "completed"
         metadata["ended_utc"] = datetime.now(UTC).isoformat()
+        if request.source_kind == "udp":
+            metadata["capture_end_monotonic_ns"] = time.perf_counter_ns()
         _write_json(request.output_dir / "session.json", metadata)
         directory = request.output_dir
         report_path = directory / "report.html"
@@ -236,6 +241,7 @@ def run_experiment(
     segment = 0
     break_pending = False
     previous_receive: int | None = None
+    first_receive: int | None = None
     packet_count = 0
     lines = (directory / "packets.jsonl").read_bytes().splitlines(keepends=True)
     for packet_index, line in enumerate(lines):
@@ -254,6 +260,8 @@ def run_experiment(
             break_pending = True
             continue
         reasons: list[tuple[str, str]] = []
+        if first_receive is None:
+            first_receive = packet.received_monotonic_ns
         if previous_receive is not None:
             receive_delta = (packet.received_monotonic_ns - previous_receive) / 1e9
             if receive_delta > DIAGNOSTICS["receive_gap_seconds"]:
@@ -284,9 +292,13 @@ def run_experiment(
                 reasons.append((kind, "IsRaceOn changed; this is not a finish or rewind signal"))
             dt = (packet.received_monotonic_ns - previous["received_monotonic_ns"]) / 1e9
             displacement = math.dist(sample["position_m"], previous["position_m"])
-            if displacement > DIAGNOSTICS["jump_slack_metres"] + DIAGNOSTICS[
-                "jump_speed_metres_per_second"
-            ] * max(0.0, dt):
+            if (
+                sample["is_race_on"]
+                and previous["is_race_on"]
+                and displacement
+                > DIAGNOSTICS["jump_slack_metres"]
+                + DIAGNOSTICS["jump_speed_metres_per_second"] * max(0.0, dt)
+            ):
                 reasons.append(("position_jump", f"Position changed by {displacement:.1f} metres"))
         for kind, detail in reasons:
             events.append(
@@ -306,6 +318,23 @@ def run_experiment(
         sample["packet_index"] = packet_index
         samples.append(sample)
         break_pending = False
+    for boundary, clock, received in (
+        ("start", metadata.get("capture_start_monotonic_ns"), first_receive),
+        ("end", metadata.get("capture_end_monotonic_ns"), previous_receive),
+    ):
+        if type(clock) is not int or received is None:
+            continue
+        duration = (received - clock if boundary == "start" else clock - received) / 1e9
+        if duration > DIAGNOSTICS["receive_gap_seconds"]:
+            events.append(
+                {
+                    "kind": "receive_gap",
+                    "packet_index": None,
+                    "boundary": boundary,
+                    "duration_seconds": duration,
+                    "detail": f"No datagram for {duration:.3f} seconds at capture {boundary}",
+                }
+            )
     if not samples:
         events.append(
             {
@@ -323,6 +352,7 @@ def run_experiment(
         "receive_span_seconds": receive_span,
         "packet_count": packet_count,
         "valid_packets": len(samples),
+        "active_packets": sum(s["is_race_on"] for s in samples),
         "invalid_packets": packet_count - len(samples),
         "segments": segment + bool(samples),
     }

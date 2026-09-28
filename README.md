@@ -2,7 +2,7 @@
 
 使用用户固定调校的兰博基尼第六元素，从遥测与已知路线起步，建立能自行采样、训练、评估并改进驾驶策略的实验系统。首版聚焦无对抗歌利亚，后续探索对手竞速和路线泛化。
 
-当前实现：[T01 / Issue #2](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/2) 的遥测录制与离线回放工具。已用合成数据和本机 UDP 验证软件链路；FH5 实机录制仍待验证。七天是首轮探索窗口，按可运行里程碑推进。
+当前实现：[T01 / Issue #2](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/2) 的遥测录制与离线回放工具。已完成一次 90 秒实机记录与回放，包含 3,308 个活动状态样本；[验证记录](docs/validation/t01-recording.md) 区分软件检查、实录观察和待核实项目。七天是首轮探索窗口，按可运行里程碑推进。
 
 ## 安装与运行
 

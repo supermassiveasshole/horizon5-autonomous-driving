@@ -210,3 +210,18 @@ def test_pause_and_clock_wrap_are_visible_without_claiming_rewind(tmp_path: Path
     assert [s["segment"] for s in result.samples] == [0, 1, 2]
     assert result.summary["receive_span_seconds"] == pytest.approx(0.2)
     assert result.metadata["diagnostics"]["receive_gap_seconds"] == 0.5
+
+
+def test_inactive_zero_fields_do_not_count_as_driving_position_jumps(tmp_path: Path) -> None:
+    result = run_experiment(
+        Record(config_file(tmp_path), tmp_path / "activity"),
+        packets=[
+            Packet(1_000_000_000, "2026-09-28T10:00:00+00:00", bytes(324)),
+            Packet(1_100_000_000, "2026-09-28T10:00:00.1+00:00", changed_packet(100, 5700)),
+            Packet(1_200_000_000, "2026-09-28T10:00:00.2+00:00", bytes(324)),
+        ],
+    )
+    assert result.summary["valid_packets"] == 3
+    assert result.summary["active_packets"] == 1
+    assert [s["segment"] for s in result.samples] == [0, 1, 2]
+    assert "position_jump" not in {e["kind"] for e in result.events}
