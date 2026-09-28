@@ -20,12 +20,12 @@ uv run --locked --extra control fh5 control --config runs/calibration-config.jso
 uv run --locked --extra control fh5 control --config runs/calibration-config.json --output runs/calibration-001 --live
 ```
 
-看到等待状态后切回 FH5。只有前台进程为 `ForzaHorizon5.exe`、收到活动遥测、车型/PI 匹配且低于起步速度时，才开始校准。示例约 7.2 秒；按 **F8** 或终端 **Ctrl+C** 解除输入。保持观察，停止后确认车辆响应。输出目录必须不存在。
+看到等待状态后切回 FH5。只有前台进程为 `ForzaHorizon5.exe`、收到活动遥测、车型/PI 匹配且低于起步速度时，才开始校准。示例约 7 秒；按 **F8** 或终端 **Ctrl+C** 解除输入。保持观察，停止后确认车辆响应。输出目录必须不存在。
 
 ## 动作、限制与停止
 
 - `steer`、`longitudinal` 均为 `[-1, 1]`。纵向正值给油、负值刹车；不会同时踩两者。转向乘 32767、踏板乘 255，四舍五入为整数。游戏内左右方向与死区仍须实测。
-- 示例限幅为转向 ±0.25、油门 0.15、刹车 0.5，最高 30 km/h，起步不超过 3 km/h。硬上限为 40 km/h、油门 0.25、转向 0.5、30 秒动作序列、60 秒等待，禁止无限试车。
+- 示例来自本机低速实测：转向限幅 ±0.5（动作使用 ±0.4）、油门 0.24、刹车 0.5，最高 15 km/h，起步不超过 3 km/h。硬上限为 40 km/h、油门 0.25、转向 0.5、30 秒动作序列、60 秒等待，禁止无限试车。
 - 20 Hz 调度采用实时时钟；断流、游戏时钟停滞、失焦、非活动状态、超速、车型变化、时间/位置跳变、接口异常均停止。退出等待后不自动重新接管。
 - 独立线程每约 20 ms 检查 F8、焦点和 250 ms 命令租期；过期发送归零并锁止。归零返回错误时继续重试，累计三次失败则尝试断开设备，并记录断开是否成功。它不能保证应对 Python 进程强杀、内核/驱动卡死或操作系统暂停，不能当作硬实时保证。
 - “解除输入”指向手柄发送全零并断开虚拟设备，不代表车辆物理速度已经为零。异常时采用解除输入，正常动作序列包含刹车段。
@@ -42,4 +42,4 @@ uv run --locked --extra control fh5 control --config runs/calibration-config.jso
 
 实机先核对左右方向、油门与刹车映射，再用不同小幅度脉冲测死区和响应；分别演练 F8、失焦、暂停、停止 Data Out。每轮记录配置、原始数据哈希、观察和失败条件。保留原调校，不用改车掩盖控制问题。
 
-在实机证据补齐之前，`game_response_validation=unverified`，`sustained_sampling_allowed=false`。通过合成测试、调用驱动成功、实际游戏响应验证是三项不同结论。此版本始终只开放短时校准；持续驾驶接口留待后续任务。
+机器报告保持 `game_response_validation=unverified`，不因发送成功或字段变化就自动升级验证结论；结合截图、用户观察和遥测的实际结论见 [T02 验证记录](validation/t02-control.md)，本地补充证据保存在 `verification.json`。通过合成测试、调用驱动成功、实际游戏响应验证是三项不同结论。此版本始终 `sustained_sampling_allowed=false`，只开放短时校准；持续驾驶接口留待后续任务。

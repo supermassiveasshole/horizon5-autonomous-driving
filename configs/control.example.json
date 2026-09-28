@@ -33,58 +33,43 @@
     "expected_car_ordinal": 2941,
     "expected_pi": 999,
     "rate_hz": 20,
-    "max_speed_kmh": 30,
+    "max_speed_kmh": 15,
     "start_speed_kmh": 3,
-    "max_steer": 0.25,
-    "max_throttle": 0.15,
+    "max_steer": 0.5,
+    "max_throttle": 0.24,
     "max_brake": 0.5,
     "telemetry_timeout_s": 0.25,
     "ready_timeout_s": 30,
     "steps": [
       {
+        "longitudinal": 0,
         "seconds": 0.5,
-        "steer": 0,
-        "longitudinal": 0
+        "steer": 0
       },
       {
-        "seconds": 1,
-        "steer": 0,
-        "longitudinal": 0.1
+        "longitudinal": 0.24,
+        "seconds": 2.5,
+        "steer": 0
       },
       {
+        "longitudinal": 0.2,
         "seconds": 0.8,
-        "steer": 0.2,
-        "longitudinal": 0.06
+        "steer": 0.4
       },
       {
-        "seconds": 1.2,
-        "steer": 0,
-        "longitudinal": -0.4
-      },
-      {
-        "seconds": 0.3,
-        "steer": 0,
-        "longitudinal": 0
-      },
-      {
-        "seconds": 1,
-        "steer": 0,
-        "longitudinal": 0.1
-      },
-      {
+        "longitudinal": 0.2,
         "seconds": 0.8,
-        "steer": -0.2,
-        "longitudinal": 0.06
+        "steer": -0.4
       },
       {
-        "seconds": 1.2,
-        "steer": 0,
-        "longitudinal": -0.4
+        "longitudinal": -0.5,
+        "seconds": 2.0,
+        "steer": 0
       },
       {
+        "longitudinal": 0,
         "seconds": 0.4,
-        "steer": 0,
-        "longitudinal": 0
+        "steer": 0
       }
     ]
   }
