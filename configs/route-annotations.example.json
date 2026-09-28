@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "reference_review": {
+    "status": "unverified",
+    "evidence": []
+  },
+  "corridors": [],
+  "checkpoints": [],
+  "checkpoints_review": {
+    "status": "unverified",
+    "evidence": []
+  }
+}

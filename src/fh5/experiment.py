@@ -15,6 +15,7 @@ from typing import Any, Literal
 from fh5.control import Control, ControlEnvironment, read_control, run_control
 from fh5.events import EventEnvironment, EventRun, read_event, run_event
 from fh5.report import write_report
+from fh5.routes import BuildRoute, build_route, load_route, locate_route
 
 FORMAT_VERSION = 1
 DECODER_VERSION = "fh5-dash-324-v1"
@@ -45,6 +46,7 @@ class Record:
 class Replay:
     recording_dir: Path
     report_path: Path
+    route_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -142,7 +144,7 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 
 def run_experiment(
-    request: Record | Replay | Control | EventRun,
+    request: Record | Replay | Control | EventRun | BuildRoute,
     *,
     packets: Iterable[Packet] | None = None,
     environment: ControlEnvironment | None = None,
@@ -383,6 +385,35 @@ def run_experiment(
         event_run = read_event(directory)
         summary["event_run"] = event_run["summary"]
         events.extend(event_run["events"])
+    if isinstance(request, BuildRoute):
+        route = build_route(request, samples)
+        samples = [
+            s for s in samples if request.first_packet <= s["packet_index"] <= request.last_packet
+        ]
+        events = [
+            e
+            for e in events
+            if e.get("packet_index") is not None
+            and request.first_packet <= e["packet_index"] <= request.last_packet
+        ]
+        metadata["analysis_packet_range"] = [request.first_packet, request.last_packet]
+        summary.update(
+            packet_count=len(samples),
+            valid_packets=len(samples),
+            active_packets=sum(s["is_race_on"] for s in samples),
+            invalid_packets=0,
+            segments=len({s["segment"] for s in samples}),
+            receive_span_seconds=(
+                samples[-1]["received_monotonic_ns"] - samples[0]["received_monotonic_ns"]
+            )
+            / 1e9,
+        )
+        events.extend(locate_route(samples, route))
+        summary["route"] = route
+    elif isinstance(request, Replay) and request.route_file is not None:
+        route = load_route(request.route_file)
+        events.extend(locate_route(samples, route))
+        summary["route"] = route
     write_report(
         report_path,
         {"metadata": metadata, "samples": samples, "events": events, "summary": summary},

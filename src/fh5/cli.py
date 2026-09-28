@@ -15,6 +15,7 @@ from pathlib import Path
 from fh5.control import Control, validate_control_file
 from fh5.events import EventRun, validate_event_file
 from fh5.experiment import Packet, Record, Replay, run_experiment
+from fh5.routes import BuildRoute
 
 
 def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
@@ -40,6 +41,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     replay = commands.add_parser("replay", help="Replay a saved recording without the game")
     replay.add_argument("recording", type=Path)
     replay.add_argument("--report", type=Path, required=True)
+    replay.add_argument("--route", type=Path, help="Overlay a frozen local route bundle")
+    route = commands.add_parser(
+        "route", help="Build a local reference from a continuous recording span"
+    )
+    route.add_argument("recording", type=Path)
+    route.add_argument("--output", type=Path, required=True)
+    route.add_argument("--first-packet", type=int, required=True)
+    route.add_argument("--last-packet", type=int, required=True)
+    route.add_argument("--spacing", type=float, default=2.0)
+    route.add_argument("--annotations", type=Path)
     control = commands.add_parser(
         "control", help="Validate a bounded calibration; --live sends game input"
     )
@@ -159,15 +170,41 @@ def main(argv: Sequence[str] | None = None) -> int:
                     )
                 finally:
                     environment_event.close()
+        elif args.mode == "route":
+            result = run_experiment(
+                BuildRoute(
+                    args.recording,
+                    args.output,
+                    args.first_packet,
+                    args.last_packet,
+                    args.spacing,
+                    args.annotations,
+                )
+            )
         else:
-            result = run_experiment(Replay(args.recording, args.report))
+            result = run_experiment(Replay(args.recording, args.report, args.route))
     except (OSError, ValueError) as error:
         print(json.dumps({"status": "error", "message": str(error)}), file=sys.stderr)
         return 2
     print(
         json.dumps(
             {
-                **result.summary,
+                **{key: value for key, value in result.summary.items() if key != "route"},
+                **(
+                    {
+                        "route": {
+                            key: result.summary["route"][key]
+                            for key in (
+                                "length_m",
+                                "reference_points",
+                                "verified_corridor_length_m",
+                                "low_speed_ready",
+                            )
+                        }
+                    }
+                    if "route" in result.summary
+                    else {}
+                ),
                 "report": str(result.report_path),
                 "game_validation": result.metadata["game_validation"],
             }
