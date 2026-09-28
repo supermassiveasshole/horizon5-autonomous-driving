@@ -1,0 +1,20 @@
+# Local tools, environments, and machine-specific configuration
+.tools/
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+!.env.*.example
+
+# Temporary planning files and generated experiment outputs
+.scratch/
+data/recordings/
+runs/
+checkpoints/
+replay/
+logs/
+videos/
+*.tmp

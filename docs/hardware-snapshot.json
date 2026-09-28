@@ -1,0 +1,45 @@
+{
+  "observed_date": "2026-09-28",
+  "purpose": "FH5 autonomous driving feasibility assessment; read-only hardware inventory, not a game or training benchmark",
+  "cpu": {
+    "name": "Intel Core i9-13900KF",
+    "physical_cores": 24,
+    "logical_processors": 32
+  },
+  "memory": {
+    "installed_gib": 63.9,
+    "available_gib_at_observation": 46.1
+  },
+  "gpu": {
+    "name": "NVIDIA GeForce RTX 4090",
+    "total_memory_mib": 24564,
+    "used_memory_mib_at_first_observation": 3364,
+    "driver_version": "610.88",
+    "driver_model": "WDDM",
+    "pytorch_cuda_execution_tested": false
+  },
+  "os": {
+    "name": "Microsoft Windows 11 Pro",
+    "version": "10.0.26200"
+  },
+  "storage": {
+    "workspace_drive": "G:",
+    "workspace_path": "G:/horizon5-autonomous-driving",
+    "workspace_drive_free_gib": 434.4,
+    "workspace_drive_device": "Predator SSD GM7 M.2 4TB",
+    "workspace_drive_bus": "NVMe",
+    "system_drive_free_gib": 25.5
+  },
+  "sources": [
+    "Windows Get-CimInstance: Win32_Processor, Win32_ComputerSystem, Win32_OperatingSystem",
+    "Windows Get-Partition / Get-Disk; Get-PSDrive",
+    "nvidia-smi"
+  ],
+  "not_measured": [
+    "FH5 rendering performance and VRAM consumption",
+    "Data Out receive rate, jitter and packet layout on the installed game version",
+    "Controller compatibility and input-to-telemetry latency",
+    "Policy inference/training throughput while FH5 is running",
+    "Restart latency, reliability and training convergence"
+  ]
+}
