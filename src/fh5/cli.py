@@ -16,6 +16,7 @@ from pathlib import Path
 from fh5.control import Control, validate_control_file
 from fh5.events import EventRun, validate_event_file
 from fh5.experiment import Packet, Record, Replay, run_experiment
+from fh5.perception import Perception, PerceptionReplay
 from fh5.routes import BuildRoute
 from fh5.vision import VisionRecord
 
@@ -83,9 +84,30 @@ def main(argv: Sequence[str] | None = None) -> int:
     vision.add_argument("--period", type=float, default=0.1)
     vision.add_argument("--max-age-ms", type=float, default=100)
     vision.add_argument("--max-mib", type=int, default=256)
+    perceive = commands.add_parser("perceive", help="Estimate pixels in a frozen RGB dataset")
+    perceive.add_argument("--dataset", type=Path, required=True)
+    perceive.add_argument("--protocol", type=Path, required=True)
+    perceive.add_argument("--model-dir", type=Path, required=True)
+    perceive.add_argument("--device", choices=["cuda", "cpu"], default="cuda")
+    perceive.add_argument("--output", type=Path, required=True)
+    perception_replay = commands.add_parser(
+        "perception-replay", help="Replay pixel candidates and independent errors"
+    )
+    perception_replay.add_argument("result", type=Path)
+    perception_replay.add_argument("--report", type=Path, required=True)
+    perception_replay.add_argument("--labels", type=Path)
     args = parser.parse_args(argv)
     try:
-        if args.mode == "vision":
+        if args.mode == "perceive":
+            from fh5.segformer import SegformerRoadModel
+
+            model = SegformerRoadModel(args.model_dir, args.protocol, args.device)
+            result = run_experiment(
+                Perception(args.dataset, args.protocol, args.output), road_model=model
+            )
+        elif args.mode == "perception-replay":
+            result = run_experiment(PerceptionReplay(args.result, args.report, args.labels))
+        elif args.mode == "vision":
             request = VisionRecord(
                 args.config,
                 args.output,
@@ -243,7 +265,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         else:
             result = run_experiment(Replay(args.recording, args.report, args.route))
-    except (OSError, ValueError) as error:
+    except (OSError, ValueError, ImportError) as error:
         print(json.dumps({"status": "error", "message": str(error)}), file=sys.stderr)
         return 2
     print(
@@ -252,8 +274,19 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **{
                     key: value
                     for key, value in result.summary.items()
-                    if key not in ("route", "vision")
+                    if key not in ("route", "vision", "perception")
                 },
+                **(
+                    {
+                        "perception": {
+                            "frames": len(result.summary["perception"]["frames"]),
+                            "evaluation": result.summary["perception"]["evaluation"]["status"],
+                            "geometry_ready": result.summary["perception"]["geometry_ready"],
+                        }
+                    }
+                    if "perception" in result.summary
+                    else {}
+                ),
                 **(
                     {
                         "vision": {
@@ -288,6 +321,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if result.summary["capture_status"] == "source_error":
         return 2
+    if "perception" in result.summary:
+        return 4 if result.summary["perception"]["evaluation"]["invalid_frames"] else 0
     if args.mode == "vision":
         visual = result.summary["vision"]
         if not visual["session"]["resources_released"] or visual["integrity_errors"]:

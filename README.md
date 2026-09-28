@@ -40,6 +40,8 @@ uv run --locked fh5 replay runs/manual-001 --report runs/manual-001/replay.html
 
 ## 彩色观测
 
+T23 已接入冻结 SegFormer 的离线道路候选与独立人工核验流程，使用 `fh5 perceive` / `fh5 perception-replay`。输出仍是像素估计，未获道路精度或驾驶验收；安装、协议与标签说明见 [像素道路估计](docs/perception.md)。
+
 彩色画面与遥测可通过 `fh5 vision` 一起记录，不发送游戏输入：
 
 ```powershell

@@ -1,0 +1,104 @@
+{
+  "version": 1,
+  "clips": [
+    {
+      "id": "development-0",
+      "split": "development",
+      "recording_dir": "../runs/t22-rgb-20260929-023136",
+      "vision_sha256": "649fcd9c484863da5c9dc6a06016fad530f8b69d69b84a81dece677e86359bb3",
+      "first_frame": 70,
+      "last_frame": 129,
+      "annotation_frames": [
+        90,
+        91,
+        100
+      ],
+      "tags": [
+        "left_turn",
+        "off_road",
+        "low_speed",
+        "guardrail",
+        "motion_blur"
+      ]
+    },
+    {
+      "id": "development-1",
+      "split": "development",
+      "recording_dir": "../runs/t22-rgb-20260929-023136",
+      "vision_sha256": "649fcd9c484863da5c9dc6a06016fad530f8b69d69b84a81dece677e86359bb3",
+      "first_frame": 300,
+      "last_frame": 359,
+      "annotation_frames": [
+        320,
+        321,
+        330
+      ],
+      "tags": [
+        "straight",
+        "shoulder",
+        "medium_speed",
+        "blue_arrows",
+        "ego_occlusion",
+        "hud"
+      ]
+    },
+    {
+      "id": "holdout-0",
+      "split": "holdout",
+      "recording_dir": "../runs/t22-acceptance-20260929-024718",
+      "vision_sha256": "c502035fc6b4326ee1d52528cfcbbc04099cbed8b19620b86c831ac85c439d54",
+      "first_frame": 70,
+      "last_frame": 129,
+      "annotation_frames": [
+        100,
+        101
+      ],
+      "tags": [
+        "straight",
+        "shoulder",
+        "medium_speed",
+        "blue_arrows",
+        "ego_occlusion",
+        "hud"
+      ]
+    },
+    {
+      "id": "holdout-1",
+      "split": "holdout",
+      "recording_dir": "../runs/t22-acceptance-20260929-024718",
+      "vision_sha256": "c502035fc6b4326ee1d52528cfcbbc04099cbed8b19620b86c831ac85c439d54",
+      "first_frame": 260,
+      "last_frame": 319,
+      "annotation_frames": [
+        280,
+        281
+      ],
+      "tags": [
+        "left_turn",
+        "guardrail",
+        "high_speed",
+        "shadow",
+        "motion_blur"
+      ]
+    },
+    {
+      "id": "holdout-2",
+      "split": "holdout",
+      "recording_dir": "../runs/t22-acceptance-20260929-024718",
+      "vision_sha256": "c502035fc6b4326ee1d52528cfcbbc04099cbed8b19620b86c831ac85c439d54",
+      "first_frame": 500,
+      "last_frame": 559,
+      "annotation_frames": [
+        540,
+        541
+      ],
+      "tags": [
+        "right_turn",
+        "shoulder",
+        "high_speed",
+        "blue_arrows",
+        "motion_blur"
+      ]
+    }
+  ]
+}

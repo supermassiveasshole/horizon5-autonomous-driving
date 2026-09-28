@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "method": "segformer-cityscapes-b0-v1",
+  "model_id": "nvidia/segformer-b0-finetuned-cityscapes-1024-1024",
+  "revision": "21b3847fae21ddee674abd31129307b6a1235bd9",
+  "model_files": {
+    "config.json": "649ba4afbaa11ee730b14ad5e31bd50f2e2d5be661a291e31a91512510dba8d9",
+    "preprocessor_config.json": "d96ab2cb112985c19d5ea32f1d1f2369104fc78b1379f5ce26e33ca8646202a7",
+    "pytorch_model.bin": "027ed78d8ff9c535df5a66361c92b9673cca3cb923cbeb8c5802385b6b93194c",
+    "LICENSE": "f549820c06519e3105e5174a2fd7285224ffd2268a7f879a843b1a255fd04a61"
+  },
+  "input_size": [512, 512],
+  "confidence_threshold": 0.7,
+  "high_confidence_threshold": 0.9,
+  "boundary_rows": [0.45, 0.5, 0.55, 0.6],
+  "max_result_age_ms": 150,
+  "max_pair_gap_ms": 200,
+  "gates": {
+    "min_annotated_frames_per_split": 6,
+    "min_road_iou": 0.85,
+    "max_boundary_mae_px": 15,
+    "max_missed_boundary_fraction": 0.1,
+    "max_high_confidence_error_fraction": 0.02,
+    "max_inference_p95_ms": 80,
+    "max_boundary_residual_jitter_px": 10
+  }
+}

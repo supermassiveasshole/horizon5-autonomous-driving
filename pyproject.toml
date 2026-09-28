@@ -12,6 +12,15 @@ dependencies = []
 [project.optional-dependencies]
 control = ["vgamepad @ https://github.com/yannbouteiller/vgamepad/archive/3f910aa8bbde49a576683db74ad5e4a0879f8a80.zip ; sys_platform == 'win32'"]
 events = ["mss>=10,<11", "Pillow>=11.3,<13"]
+perception = ["torch==2.8.0", "transformers==4.57.6", "numpy>=2,<3", "Pillow>=11.3,<13"]
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu128", extra = "perception" }]
 
 [tool.uv.extra-build-variables]
 vgamepad = { VGAMEPAD_SKIP_VIGEMBUS_INSTALL = "true" }
@@ -20,7 +29,7 @@ vgamepad = { VGAMEPAD_SKIP_VIGEMBUS_INSTALL = "true" }
 fh5 = "fh5.cli:main"
 
 [dependency-groups]
-dev = ["pytest>=8,<10", "mypy>=1.11,<2", "ruff>=0.6,<1"]
+dev = ["pytest>=8,<10", "mypy>=1.11,<2", "ruff>=0.6,<1", "Pillow>=11.3,<13"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fh5"]

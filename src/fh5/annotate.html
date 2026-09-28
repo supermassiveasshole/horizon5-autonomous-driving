@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>原图独立道路核验</title>
+<style>
+body{margin:24px auto;max-width:1120px;padding:0 20px;background:#101923;color:#e6edf4;font:16px/1.5 system-ui}h1{margin-bottom:8px}button,input,select,textarea{font:inherit;padding:7px;margin:3px;border:1px solid #546375;border-radius:5px}button{cursor:pointer}canvas{width:100%;max-width:960px;height:auto;background:#263340;cursor:crosshair}section{background:#1b2837;padding:14px;margin:12px 0;border-radius:8px}.muted{color:#b8c7d4}#status{color:#f3d57d}textarea{display:block;width:90%}label{display:inline-block}kbd{background:#304259;padding:2px 5px}
+</style>
+<h1>独立道路核验 · 仅原图</h1>
+<p>这一页不载入预测。请标出肉眼可见的路面，车身、HUD 和无法辨认的区域用“忽略区”排除。蓝色箭头下可确认的路面仍算路面；阴影不是自动排除项。</p>
+<section><label>标注者 <input id="name" placeholder="填写名字或代号"></label><button id="export">下载核验 JSON</button><label>恢复上次文件 <input id="import" type="file" accept=".json"></label><p id="status" aria-live="polite"></p></section>
+<section>
+<button id="previous">上一张</button><strong id="counter"></strong><button id="next">下一张</button>
+<p id="frame-info" class="muted"></p>
+<label>操作 <select id="mode"><option value="road">路面多边形</option><option value="ignore">忽略区多边形</option><option value="left">左边界端点</option><option value="right">右边界端点</option></select></label>
+<button id="finish">完成多边形</button><button id="undo">撤销</button><button id="clear">清空本张</button>
+<p class="muted">多边形：沿区域边缘依次点击，至少 3 点后点“完成多边形”，可画多个。边界：选择左右端点后，在对应横线的路面边缘点击；看不清就留空，右键删除该行端点。Ctrl+Z 撤销。</p>
+<canvas id="canvas" width="960" height="540" aria-label="原始驾驶画面与人工标注"></canvas>
+<p><label><input type="checkbox" id="reviewed">我已核验本张路面、忽略区和边界（无法辨认的端点保留空值）</label></p>
+<label>场景标签（可修正，逗号分隔）<input id="tags" size="80"></label>
+<label>备注<textarea id="notes" rows="2" placeholder="例如右边界被车身遮挡、模糊处已忽略"></textarea></label>
+</section>
+<p class="muted">标注以原图像素存储。浏览器尝试在本地自动保存；离开页面前请下载 JSON。可先导出部分进度，未核验的帧不会计入评估。</p>
+<script id="data" type="application/json"><!--PERCEPTION_DATA--></script>
+<script>
+const data=JSON.parse(document.getElementById('data').textContent),el=id=>document.getElementById(id);
+const key='fh5-labels-'+data.dataset_sha256+'-'+data.protocol_sha256;
+let labels={version:1,annotator:{kind:'human',name:''},protocol_sha256:data.protocol_sha256,dataset_sha256:data.dataset_sha256,frames:data.frames.map(f=>({id:f.id,image_sha256:f.image_sha256,reviewed:false,road_polygons:[],ignore_polygons:[],boundaries:f.rows.map(y=>({y,left:null,right:null})),tags:f.tags,notes:''}))};
+let index=0,points=[],history=[],photo=new Image(),ready=false;
+const canvas=el('canvas'),ctx=canvas.getContext('2d');
+function validImport(value){return value?.version===1&&value.protocol_sha256===data.protocol_sha256&&value.dataset_sha256===data.dataset_sha256&&Array.isArray(value.frames)&&value.frames.length===data.frames.length&&value.frames.every((f,i)=>f.id===data.frames[i].id&&f.image_sha256===data.frames[i].image_sha256&&Array.isArray(f.road_polygons)&&Array.isArray(f.ignore_polygons)&&Array.isArray(f.boundaries));}
+try{const cached=JSON.parse(localStorage.getItem(key)||'null');if(validImport(cached))labels=cached;}catch{}
+el('name').value=labels.annotator.name;
+function save(){labels.annotator.name=el('name').value.trim();try{localStorage.setItem(key,JSON.stringify(labels));el('status').textContent=`已在本地暂存 · ${labels.frames.filter(f=>f.reviewed).length}/${labels.frames.length} 张已核验`;}catch{el('status').textContent='浏览器未允许本地暂存，请下载 JSON 保存进度。';}}
+function remember(){history.push(JSON.stringify(labels.frames[index]));if(history.length>100)history.shift();labels.frames[index].reviewed=false;el('reviewed').checked=false;}
+function polygon(vertices,color){if(!vertices.length)return;ctx.beginPath();vertices.forEach((p,i)=>i?ctx.lineTo(...p):ctx.moveTo(...p));ctx.closePath();ctx.fillStyle=color;ctx.fill();ctx.strokeStyle=color;ctx.lineWidth=2;ctx.stroke();}
+function draw(){ctx.clearRect(0,0,canvas.width,canvas.height);if(ready)ctx.drawImage(photo,0,0);const row=labels.frames[index];row.road_polygons.forEach(p=>polygon(p,'#29e38e66'));row.ignore_polygons.forEach(p=>polygon(p,'#ce80ff88'));polygon(points,'#fff3a077');ctx.font='13px system-ui';for(const b of row.boundaries){ctx.strokeStyle='#ffffff55';ctx.beginPath();ctx.moveTo(0,b.y);ctx.lineTo(canvas.width,b.y);ctx.stroke();ctx.fillStyle='#fff';ctx.fillText('y='+b.y,4,b.y-3);for(const side of ['left','right']){if(b[side]===null)continue;ctx.fillStyle=side==='left'?'#38dfef':'#ffd146';ctx.beginPath();ctx.arc(b[side],b.y,5,0,Math.PI*2);ctx.fill();}}}
+function show(){ready=false;points=[];history=[];const f=data.frames[index],r=labels.frames[index];canvas.width=f.size[0];canvas.height=f.size[1];el('counter').textContent=` ${index+1} / ${data.frames.length} `;el('frame-info').textContent=f.id+' · '+f.size.join('×');el('reviewed').checked=r.reviewed;el('tags').value=r.tags.join(', ');el('notes').value=r.notes;el('previous').disabled=index===0;el('next').disabled=index+1===data.frames.length;const nextPhoto=new Image();photo=nextPhoto;nextPhoto.onload=()=>{if(photo!==nextPhoto)return;ready=true;draw();};nextPhoto.onerror=()=>{el('status').textContent='原图读取失败，不能核验此帧。';};nextPhoto.src=f.image_url;draw();save();}
+function position(event){const rect=canvas.getBoundingClientRect();return [Math.max(0,Math.min(canvas.width-1,Math.round((event.clientX-rect.left)*canvas.width/rect.width))),Math.max(0,Math.min(canvas.height-1,Math.round((event.clientY-rect.top)*canvas.height/rect.height)))];}
+canvas.onclick=event=>{if(!ready)return;const p=position(event),mode=el('mode').value;if(mode==='road'||mode==='ignore'){points.push(p);}else{remember();const b=labels.frames[index].boundaries.reduce((best,b)=>Math.abs(b.y-p[1])<Math.abs(best.y-p[1])?b:best);b[mode]=p[0];save();}draw();};
+canvas.oncontextmenu=event=>{event.preventDefault();const mode=el('mode').value;if(mode!=='left'&&mode!=='right')return;remember();const p=position(event),b=labels.frames[index].boundaries.reduce((best,b)=>Math.abs(b.y-p[1])<Math.abs(best.y-p[1])?b:best);b[mode]=null;save();draw();};
+el('finish').onclick=()=>{const mode=el('mode').value;if(!['road','ignore'].includes(mode)||points.length<3){el('status').textContent='先在多边形模式点击至少 3 个点。';return;}remember();labels.frames[index][mode==='road'?'road_polygons':'ignore_polygons'].push(points);points=[];save();draw();};
+el('mode').onchange=()=>{points=[];draw();};
+function undo(){if(points.length){points.pop();draw();return;}if(!history.length)return;labels.frames[index]=JSON.parse(history.pop());el('reviewed').checked=labels.frames[index].reviewed;save();draw();}
+el('undo').onclick=undo;document.addEventListener('keydown',event=>{if(event.ctrlKey&&event.key.toLowerCase()==='z'&&event.target===document.body){event.preventDefault();undo();}});
+el('clear').onclick=()=>{remember();const r=labels.frames[index];r.road_polygons=[];r.ignore_polygons=[];r.boundaries.forEach(b=>{b.left=null;b.right=null;});points=[];save();draw();};
+el('previous').onclick=()=>{index--;show();};el('next').onclick=()=>{index++;show();};
+el('reviewed').onchange=()=>{if(!ready||points.length){el('reviewed').checked=false;el('status').textContent='请先加载原图并完成当前多边形。';return;}labels.frames[index].reviewed=el('reviewed').checked;save();};
+el('notes').oninput=()=>{labels.frames[index].notes=el('notes').value;save();};el('tags').oninput=()=>{labels.frames[index].tags=el('tags').value.split(',').map(s=>s.trim()).filter(Boolean);save();};el('name').oninput=save;
+el('export').onclick=()=>{save();if(!labels.annotator.name){el('status').textContent='请先填写标注者名字或代号。';return;}const url=URL.createObjectURL(new Blob([JSON.stringify(labels,null,2)],{type:'application/json'})),a=document.createElement('a');a.href=url;a.download='fh5-t23-labels.json';a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);};
+el('import').onchange=async()=>{try{const file=el('import').files[0];if(!file)return;const value=JSON.parse(await file.text());if(!validImport(value))throw Error('来源或协议不匹配');labels=value;el('name').value=labels.annotator.name;show();}catch(error){el('status').textContent='导入失败：'+error.message;}};
+if(data.frames.length)show();else el('status').textContent='没有待核验帧。';
+</script></html>

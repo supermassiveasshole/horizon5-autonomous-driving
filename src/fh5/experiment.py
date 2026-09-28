@@ -14,6 +14,13 @@ from typing import Any, Literal
 
 from fh5.control import Control, ControlEnvironment, read_control, run_control
 from fh5.events import EventEnvironment, EventRun, read_event, run_event
+from fh5.perception import (
+    Perception,
+    PerceptionReplay,
+    RoadModel,
+    replay_perception,
+    run_perception,
+)
 from fh5.report import write_report
 from fh5.routes import BuildRoute, build_route, load_route, locate_route
 from fh5.vision import VisionEnvironment, VisionRecord, read_vision, run_vision
@@ -145,14 +152,28 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 
 def run_experiment(
-    request: Record | Replay | Control | EventRun | BuildRoute | VisionRecord,
+    request: Record
+    | Replay
+    | Control
+    | EventRun
+    | BuildRoute
+    | VisionRecord
+    | Perception
+    | PerceptionReplay,
     *,
     packets: Iterable[Packet] | None = None,
     environment: ControlEnvironment | None = None,
     event_environment: EventEnvironment | None = None,
     vision_environment: VisionEnvironment | None = None,
+    road_model: RoadModel | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, PerceptionReplay):
+        return replay_perception(request)
+    if isinstance(request, Perception):
+        if road_model is None:
+            raise ValueError("Perception requires a frozen external road model")
+        return run_perception(request, road_model)
     if isinstance(request, VisionRecord):
         if vision_environment is None:
             raise ValueError("VisionRecord requires a passive observation environment")
