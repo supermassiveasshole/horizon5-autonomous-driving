@@ -2,7 +2,46 @@
 
 使用用户固定调校的兰博基尼第六元素，从遥测与已知路线起步，建立能自行采样、训练、评估并改进驾驶策略的实验系统。首版聚焦无对抗歌利亚，后续探索对手竞速和路线泛化。
 
-当前状态：范围共识及 PRD 已整理；尚未开始代码实现、游戏接入或训练验证。七天是首轮探索窗口，按可运行里程碑推进。
+当前实现：[T01 / Issue #2](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/2) 的遥测录制与离线回放工具。已用合成数据和本机 UDP 验证软件链路；FH5 实机录制仍待验证。七天是首轮探索窗口，按可运行里程碑推进。
+
+## 安装与运行
+
+需要 Python 3.12 和 [uv](https://docs.astral.sh/uv/)。在仓库根目录运行 PowerShell：
+
+```powershell
+uv sync --locked
+New-Item -ItemType Directory -Force runs | Out-Null
+Copy-Item configs/recording.example.json runs/manual-config.json
+```
+
+编辑 `runs/manual-config.json`，填写本次车辆、调校、辅助、赛事和环境；不确定的项目保留 `unverified`。示例的 Sesto Elemento 来自用户选车，具体版本尚未核实。
+
+在 FH5 的 **设置 → HUD 与游戏（HUD and Gameplay）** 中开启 **Data Out**，目标 IP 设置为 `127.0.0.1`，端口设置为 `5300`，进入可手动驾驶的场景：
+
+```powershell
+uv run --locked fh5 record --config runs/manual-config.json --output runs/manual-001 --seconds 60
+```
+
+看到 `listening` 后开始驾驶。满 60 秒自动结束，或在终端按 **Ctrl+C** 提前停止并保存。打开 `runs/manual-001/report.html` 查看轨迹、车速、播放滑块、异常及快照；页面离线可用。输出目录必须是新目录，避免覆盖实验。
+
+不运行游戏也能重新解析和回放已有记录：
+
+```powershell
+uv run --locked fh5 replay runs/manual-001 --report runs/manual-001/replay.html
+```
+
+每次回放使用新的报告文件名。接收了 UDP 并不自动证明来源是 FH5；实机核验步骤、字段定义和限制见 [录制与回放说明](docs/recording.md)。
+
+## 开发检查
+
+```powershell
+uv run --locked pytest
+uv run --locked mypy
+uv run --locked ruff check .
+uv run --locked ruff format --check .
+```
+
+测试通过实验运行入口验证录制、回放和故障行为。运行时只使用 Python 标准库。`src/fh5/` 是代码及报告模板，`tests/` 是合成输入测试，`configs/` 是配置示例，`runs/` 是不纳入 Git 的本地实验结果。
 
 ## 当前文档
 

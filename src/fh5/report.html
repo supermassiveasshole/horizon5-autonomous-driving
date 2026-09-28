@@ -1,0 +1,95 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>FH5 驾驶记录 · 回放</title>
+<style>
+:root{color-scheme:light;--ink:#163130;--muted:#647776;--line:#dce5e2;--green:#0b7468;--bg:#f3f6f4}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.6 system-ui,"Microsoft YaHei",sans-serif}
+main{max-width:1200px;margin:auto;padding:38px 24px 60px}h1{font-size:30px;letter-spacing:-1px;margin:4px 0}h2{font-size:17px;margin:0 0 14px}
+.eyebrow{font-size:12px;letter-spacing:2px;color:var(--green);font-weight:700}.muted,small{color:var(--muted)}.muted{margin:4px 0}
+.notice{background:#fff8e6;color:#795619;border:1px solid #ebd89f;border-radius:10px;padding:12px 16px;margin:20px 0}
+.stats{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin:20px 0}.stat,.panel{background:white;border:1px solid var(--line);border-radius:12px;padding:20px}
+.stat b{display:block;font-size:26px;font-variant-numeric:tabular-nums}.stat span{color:var(--muted);font-size:13px}
+.charts{display:grid;grid-template-columns:1fr 1fr;gap:16px}.panel{margin-bottom:16px;min-width:0}canvas{display:block;width:100%;height:300px;background:#f8faf9;border-radius:8px}
+.controls{display:flex;gap:14px;align-items:center;flex-wrap:wrap}button,select{border:1px solid var(--line);background:white;color:var(--ink);padding:8px 14px;border-radius:7px;font:inherit}
+button{background:var(--green);color:white;cursor:pointer}button:disabled{opacity:.5;cursor:default}input[type=range]{flex:1;min-width:150px;accent-color:var(--green)}
+output{font-variant-numeric:tabular-nums}.readout{display:flex;gap:22px;flex-wrap:wrap;margin-top:15px;font-size:13px}.table-wrap{overflow:auto;max-height:360px}
+table{border-collapse:collapse;width:100%;font-size:13px;text-align:left}th,td{padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-weight:500;background:#f8faf9;position:sticky;top:0}
+td{overflow-wrap:anywhere}summary{cursor:pointer;font-weight:600}code{font-size:12px}footer{font-size:12px;color:var(--muted);margin-top:20px}
+@media(max-width:760px){.charts{grid-template-columns:1fr}.stats{grid-template-columns:repeat(2,1fr)}main{padding:20px 14px}h1{font-size:25px}}
+</style>
+</head>
+<body>
+<main>
+<div class="eyebrow">FH5 / EXPERIMENT RECORDER</div>
+<h1>驾驶记录与回放</h1>
+<p class="muted" id="identity"></p>
+<div class="notice" id="evidence"></div>
+<section class="stats" id="stats" aria-label="数据摘要"></section>
+<section class="panel" aria-label="回放控制">
+<div class="controls">
+<button id="play" type="button">播放</button>
+<label for="rate">速度</label><select id="rate"><option value="1">1×</option><option value="4">4×</option><option value="16">16×</option></select>
+<input id="cursor" type="range" min="0" max="0" value="0" aria-label="回放位置">
+<output id="clock">0.00 s</output>
+</div><div class="readout" id="readout"></div>
+</section>
+<div class="charts">
+<section class="panel"><h2>轨迹 · 世界 X/Z</h2><canvas id="trajectory" aria-label="按连续片段绘制的轨迹"></canvas><small>单位 m；跳变和断流处断开。视图方向仍需实机标定。</small></section>
+<section class="panel"><h2>车速与接收时间</h2><canvas id="speed" aria-label="车速随接收时间的变化"></canvas><small>单位 km/h；时间来自接收端单调时钟。</small></section>
+</div>
+<section class="panel"><h2 id="event-title">异常与状态事件</h2><div class="table-wrap"><table><thead><tr><th>数据包</th><th>类型</th><th>说明</th></tr></thead><tbody id="events"></tbody></table></div></section>
+<section class="panel"><details open><summary>实验配置快照</summary><div class="table-wrap"><table><thead><tr><th>项目</th><th>记录值</th><th>核验状态</th><th>依据</th></tr></thead><tbody id="snapshot"></tbody></table></div></details></section>
+<footer id="versions"></footer>
+</main>
+<script id="recording-data" type="application/json"><!--REPORT_DATA--></script>
+<script>
+"use strict";
+const data=JSON.parse(document.getElementById("recording-data").textContent);
+const samples=data.samples, meta=data.metadata, summary=data.summary;
+const el=id=>document.getElementById(id), fmt=(v,n=2)=>Number(v).toFixed(n);
+el("identity").textContent=`记录时间：${meta.created_utc} · 控制来源：${meta.control_source}`;
+el("evidence").textContent=(meta.source_kind==="synthetic"?"这是合成数据演示。":"这些数据经 UDP 接收，来源仍需结合游戏实况核验。")+" 实机核验：未核验。数据包格式有效不代表驾驶有效、完赛或 RL 改善。";
+for(const [label,value] of [["数据包",summary.packet_count],["格式有效",summary.valid_packets],["异常数据包",summary.invalid_packets],["连续片段",summary.segments]]){
+ const card=document.createElement("div");card.className="stat";
+ const number=document.createElement("b");number.textContent=value;
+ const text=document.createElement("span");text.textContent=label;card.append(number,text);el("stats").append(card);
+}
+const kinds={unsupported_packet:"未知包格式",invalid_value:"异常字段",receive_gap:"接收间隔过长",receive_clock_discontinuity:"接收时钟异常",game_time_discontinuity:"游戏时间跳变",position_jump:"位置跳变",capture_interrupted:"用户停止",capture_source_error:"接收故障",capture_recording:"录制未正常结束",no_telemetry:"未收到有效遥测",paused:"游戏非活动状态",resumed:"恢复活动状态",game_clock_wrap:"游戏计时回绕",corrupt_record:"记录损坏",incomplete_tail:"末尾记录不完整"};
+function row(target,values){const tr=document.createElement("tr");for(const value of values){const td=document.createElement("td");td.textContent=value??"—";tr.append(td);}el(target).append(tr);}
+el("event-title").textContent=`异常与状态事件 · ${data.events.length}`;
+for(const event of data.events)row("events",[event.packet_index??"—",kinds[event.kind]??event.kind,event.detail]);
+if(!data.events.length)row("events",["—","未检测到异常","这不代表所有异常均可被识别。"]);
+const labels={vehicle:"车辆",variant:"具体版本",tune:"调校",assists:"辅助设置",event:"赛事",environment:"环境"};
+const states={unverified:"未核验",user_reported:"用户提供",verified:"有依据的记录"};
+for(const [name,fact] of Object.entries(meta.snapshot))row("snapshot",[labels[name]??name,fact.value??"待核实",states[fact.status]??fact.status,fact.evidence??"—"]);
+el("versions").textContent=`数据格式 ${meta.format_version} · 解析器 ${meta.decoder_version} · 录制状态 ${summary.capture_status} · 遥测踏板/转向是游戏输出，不是已校准命令标签。`;
+const times=[];let elapsed=0;
+for(let i=0;i<samples.length;i++){if(i)elapsed+=Math.max(0,(samples[i].received_monotonic_ns-samples[i-1].received_monotonic_ns)/1e9);times.push(elapsed);}
+let minX=Infinity,maxX=-Infinity,minZ=Infinity,maxZ=-Infinity,maxSpeed=1;
+for(const s of samples){minX=Math.min(minX,s.position_m[0]);maxX=Math.max(maxX,s.position_m[0]);minZ=Math.min(minZ,s.position_m[2]);maxZ=Math.max(maxZ,s.position_m[2]);maxSpeed=Math.max(maxSpeed,s.speed_kmh);}
+let index=0,playing=false,lastWall=0,targetTime=0;
+el("cursor").max=Math.max(0,samples.length-1);el("cursor").disabled=!samples.length;el("play").disabled=!samples.length;
+function context(id){const canvas=el(id),ratio=window.devicePixelRatio||1,w=canvas.clientWidth,h=canvas.clientHeight;canvas.width=Math.round(w*ratio);canvas.height=Math.round(h*ratio);const ctx=canvas.getContext("2d");ctx.scale(ratio,ratio);ctx.clearRect(0,0,w,h);ctx.lineWidth=1;ctx.strokeStyle="#e0e8e4";for(let n=1;n<5;n++){ctx.beginPath();ctx.moveTo(w*n/5,0);ctx.lineTo(w*n/5,h);ctx.moveTo(0,h*n/5);ctx.lineTo(w,h*n/5);ctx.stroke();}return {ctx,w,h};}
+function draw(){
+ const track=context("trajectory"),speed=context("speed");
+ if(!samples.length){for(const {ctx} of [track,speed]){ctx.fillStyle="#647776";ctx.font="14px sans-serif";ctx.fillText("没有可回放的有效数据",24,48);}return;}
+ const spanX=Math.max(1,maxX-minX),spanZ=Math.max(1,maxZ-minZ),scale=Math.min((track.w-48)/spanX,(track.h-48)/spanZ);
+ const pos=s=>[track.w/2+(s.position_m[0]-(minX+maxX)/2)*scale,track.h/2-(s.position_m[2]-(minZ+maxZ)/2)*scale];
+ const velocity=(s,i)=>[24+(speed.w-48)*times[i]/Math.max(0.01,elapsed),speed.h-24-(speed.h-48)*s.speed_kmh/maxSpeed];
+ for(const [chart,project] of [[track,pos],[speed,velocity]]){
+  const {ctx}=chart;ctx.lineWidth=1.8;ctx.strokeStyle="#8ebbb3";ctx.beginPath();
+  samples.forEach((s,i)=>{const p=project(s,i);if(!i||s.segment!==samples[i-1].segment)ctx.moveTo(...p);else ctx.lineTo(...p);});ctx.stroke();
+  const p=project(samples[index],index);ctx.fillStyle="#0b7468";ctx.beginPath();ctx.arc(...p,5,0,Math.PI*2);ctx.fill();
+ }
+ const s=samples[index],c=s.telemetry_controls;el("cursor").value=index;el("clock").textContent=`${fmt(times[index])} / ${fmt(elapsed)} s`;
+ el("readout").textContent=`包 ${s.packet_index} · 片段 ${s.segment} · ${fmt(s.speed_kmh,1)} km/h · 游戏时间 ${s.game_timestamp_ms} ms · 遥测油门 ${c.accel} / 刹车 ${c.brake} / 转向 ${c.steer} · CarOrdinal ${s.car_ordinal} / PI ${s.car_performance_index}`;
+}
+el("cursor").addEventListener("input",()=>{index=Number(el("cursor").value);playing=false;el("play").textContent="播放";draw();});
+function tick(now){if(!playing)return;targetTime+=(now-lastWall)/1000*Number(el("rate").value);lastWall=now;while(index+1<samples.length&&times[index+1]<=targetTime)index++;draw();if(index+1===samples.length){playing=false;el("play").textContent="播放";}else requestAnimationFrame(tick);}
+el("play").addEventListener("click",()=>{playing=!playing;if(playing){if(index+1===samples.length)index=0;targetTime=times[index];lastWall=performance.now();requestAnimationFrame(tick);}el("play").textContent=playing?"暂停":"播放";});
+window.addEventListener("resize",draw);draw();
+</script>
+</body></html>

@@ -1,0 +1,15 @@
+{
+  "schema_version": 1,
+  "control_source": "human",
+  "snapshot": {
+    "vehicle": {
+      "value": "Lamborghini Sesto Elemento",
+      "status": "user_reported"
+    },
+    "variant": {"value": null, "status": "unverified"},
+    "tune": {"value": null, "status": "unverified"},
+    "assists": {"value": null, "status": "unverified"},
+    "event": {"value": null, "status": "unverified"},
+    "environment": {"value": null, "status": "unverified"}
+  }
+}

@@ -1,0 +1,3 @@
+from fh5.cli import main
+
+raise SystemExit(main())
