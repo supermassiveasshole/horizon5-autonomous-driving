@@ -1,0 +1,211 @@
+"""UDP and Windows adapters. Importing this module never loads the controller driver."""
+
+from __future__ import annotations
+
+import ctypes
+import importlib
+import select
+import socket
+import sys
+import threading
+import time
+from ctypes import wintypes
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import Any, Literal, Protocol
+
+from fh5.control import Command, ControlInput
+from fh5.experiment import Packet
+
+NEUTRAL = Command(0, 0, 0)
+LEASE_NS = 250_000_000
+
+
+class Controller(Protocol):
+    def send(self, command: Command) -> None: ...
+    def close(self) -> None: ...
+
+
+class DesktopState(Protocol):
+    def focused(self) -> bool: ...
+    def stop_requested(self) -> bool: ...
+
+
+class LiveEnvironment:
+    """A short command lease; the watchdog can neutralize while the runner is stalled.
+
+    This is a Python thread, not a hard real-time or process-crash safety guarantee.
+    The caller owns the UDP socket. close() is idempotent and detaches the controller.
+    """
+
+    source_kind: Literal["udp", "synthetic"] = "udp"
+
+    def __init__(
+        self, receiver: socket.socket, controller: Controller, desktop: DesktopState
+    ) -> None:
+        self.receiver = receiver
+        self.controller = controller
+        self.desktop = desktop
+        self.events: list[dict[str, Any]] = []
+        self._lock = threading.Lock()
+        self._done = threading.Event()
+        self._fault: str | None = None
+        self._active = False
+        self._last_send = self.now_ns()
+        self._closed = False
+        self._worker = threading.Thread(target=self._watch, daemon=True, name="fh5-input-watchdog")
+        self._worker.start()
+
+    def now_ns(self) -> int:
+        return time.perf_counter_ns()
+
+    def read(self, period_s: float) -> ControlInput:
+        deadline = time.monotonic() + period_s
+        packets = []
+        while (remaining := deadline - time.monotonic()) > 0:
+            ready, _, _ = select.select([self.receiver], [], [], remaining)
+            if not ready:
+                break
+            payload, _ = self.receiver.recvfrom(65535)
+            packets.append(Packet(self.now_ns(), datetime.now(UTC).isoformat(), payload))
+            if len(packets) >= 256:
+                self._fault = "telemetry_overflow"
+                break
+        return ControlInput(
+            tuple(packets), self.desktop.focused(), self.desktop.stop_requested(), self._fault
+        )
+
+    def send(self, command: Command) -> None:
+        with self._lock:
+            if self._closed:
+                raise OSError("Controller is closed")
+            if command != NEUTRAL:
+                reason = self._fault
+                if self.desktop.stop_requested():
+                    reason = "user_stop"
+                elif not self.desktop.focused():
+                    reason = "focus_lost"
+                if reason:
+                    self._trip(reason)
+                    raise OSError(f"Input inhibited: {reason}")
+            self.controller.send(command)
+            self._active = command != NEUTRAL
+            self._last_send = self.now_ns()
+
+    def _trip(self, reason: str) -> None:
+        # Called with the lock held; latch even if the neutral write fails.
+        self._fault = reason
+        self._active = False
+        event: dict[str, Any] = {
+            "reason": reason,
+            "issued_ns": self.now_ns(),
+            "owner": "watchdog",
+            "status": "failed",
+        }
+        try:
+            self.controller.send(NEUTRAL)
+            event["status"] = "sent"
+        except Exception as error:
+            event["error"] = str(error)
+        finally:
+            event["returned_ns"] = self.now_ns()
+            self.events.append(event)
+
+    def _watch(self) -> None:
+        while not self._done.wait(0.02):
+            with self._lock:
+                if not self._active:
+                    continue
+                try:
+                    if self.desktop.stop_requested():
+                        self._trip("user_stop")
+                    elif not self.desktop.focused():
+                        self._trip("focus_lost")
+                    elif self.now_ns() - self._last_send >= LEASE_NS:
+                        self._trip("watchdog_timeout")
+                except Exception:
+                    self._trip("desktop_error")
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._done.set()
+        self._worker.join()
+        with self._lock:
+            self._closed = True
+            self.controller.close()
+
+
+class WindowsDesktop:
+    def __init__(self) -> None:
+        if sys.platform != "win32":
+            raise OSError("Live control requires Windows")
+        self.user32 = ctypes.WinDLL("user32", use_last_error=True)
+        self.kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        self.user32.GetForegroundWindow.restype = wintypes.HWND
+        self.user32.GetWindowThreadProcessId.argtypes = [
+            wintypes.HWND,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        self.user32.GetAsyncKeyState.argtypes = [ctypes.c_int]
+        self.user32.GetAsyncKeyState.restype = ctypes.c_short
+        self.kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        self.kernel32.OpenProcess.restype = wintypes.HANDLE
+        self.kernel32.QueryFullProcessImageNameW.argtypes = [
+            wintypes.HANDLE,
+            wintypes.DWORD,
+            wintypes.LPWSTR,
+            ctypes.POINTER(wintypes.DWORD),
+        ]
+        self.kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+
+    def focused(self) -> bool:
+        window = self.user32.GetForegroundWindow()
+        pid = wintypes.DWORD()
+        self.user32.GetWindowThreadProcessId(window, ctypes.byref(pid))
+        process = self.kernel32.OpenProcess(0x1000, False, pid.value)
+        if not process:
+            return False
+        try:
+            buffer = ctypes.create_unicode_buffer(32768)
+            length = wintypes.DWORD(len(buffer))
+            if not self.kernel32.QueryFullProcessImageNameW(
+                process, 0, buffer, ctypes.byref(length)
+            ):
+                return False
+            return Path(buffer.value).name.lower() == "forzahorizon5.exe"
+        finally:
+            self.kernel32.CloseHandle(process)
+
+    def stop_requested(self) -> bool:
+        return bool(self.user32.GetAsyncKeyState(0x77) & 0x8000)  # F8, independent of focus.
+
+
+class XboxController:
+    def __init__(self) -> None:
+        try:
+            vg = importlib.import_module("vgamepad")
+            self.pad: Any = vg.VX360Gamepad()
+        except Exception as error:
+            raise OSError(
+                "Virtual Xbox unavailable; install the control extra and ViGEmBus. See docs/control.md."
+            ) from error
+
+    def send(self, command: Command) -> None:
+        try:
+            self.pad.reset()
+            self.pad.left_joystick(x_value=command.steer_i16, y_value=0)
+            self.pad.right_trigger(value=command.throttle_u8)
+            self.pad.left_trigger(value=command.brake_u8)
+            self.pad.update()
+        except Exception as error:
+            raise OSError(f"Virtual Xbox write failed: {error}") from error
+
+    def close(self) -> None:
+        if self.pad is None:
+            return
+        try:
+            self.send(NEUTRAL)
+        finally:
+            # vgamepad owns target removal; releasing the final reference detaches it.
+            self.pad = None

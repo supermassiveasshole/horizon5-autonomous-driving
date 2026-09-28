@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+from test_control import control_config
 from test_experiment import config_file, sample_packet
 
 
@@ -94,3 +95,25 @@ def test_no_datagrams_is_reported_as_an_unsuccessful_capture(tmp_path: Path) -> 
     report = json.loads((run_dir / "report.json").read_text(encoding="utf-8"))
     assert report["summary"]["valid_packets"] == 0
     assert "no_telemetry" in {event["kind"] for event in report["events"]}
+
+
+def test_control_cli_defaults_to_validation_without_a_driver(tmp_path: Path) -> None:
+    run_dir = tmp_path / "never-created"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "fh5",
+            "control",
+            "--config",
+            str(control_config(tmp_path)),
+            "--output",
+            str(run_dir),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "validated_only"
+    assert not run_dir.exists()

@@ -4,6 +4,7 @@
 
 - `src/fh5/experiment.py` owns the public record/replay experiment interface, packet decoding, and diagnostics.
 - `src/fh5/cli.py` adapts UDP and command-line input; `report.py` and `report.html` produce offline reports.
+- `control.py` owns bounded calibration; `live.py` adapts Windows, UDP, and the virtual controller. Read `docs/control.md` before live control or driver changes.
 - `tests/` checks observable experiment behavior using synthetic packets and loopback UDP. `configs/` contains versioned configuration examples.
 - `runs/` holds ignored local recordings. Keep recordings, credentials, model checkpoints, and machine tooling out of commits.
 - Before changing scope, read `docs/PRD.md`. Before changing control or learning behavior, read `docs/driving-learning-design.md`. `CONTEXT.md` holds domain terminology; `docs/adr/` records consequential decisions.
@@ -20,7 +21,7 @@ Run from the repository root with Python 3.12 and uv:
 
 ## Coding Style & Naming Conventions
 
-Use four-space Python indentation, `snake_case` functions/files, and `PascalCase` types. Keep the experiment interface independent of the transport adapter. Runtime dependencies currently use the standard library only; justify additions.
+Use four-space Python indentation, `snake_case` functions/files, and `PascalCase` types. Keep the experiment interface independent of transport adapters. Recording and replay use the standard library; Windows control dependencies stay optional and lazily loaded.
 
 Use UTF-8, two-space JSON indentation, and lowercase kebab-case document names. Preserve Chinese product documentation and sequential `NNNN-short-topic.md` ADR names.
 

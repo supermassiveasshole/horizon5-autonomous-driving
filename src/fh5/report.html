@@ -40,6 +40,7 @@ td{overflow-wrap:anywhere}summary{cursor:pointer;font-weight:600}code{font-size:
 <section class="panel"><h2>轨迹 · 世界 X/Z</h2><canvas id="trajectory" aria-label="按连续片段绘制的轨迹"></canvas><small>单位 m；仅绘制活动状态位置，异常处断开。方向待实机标定。</small></section>
 <section class="panel"><h2>车速与接收时间</h2><canvas id="speed" aria-label="车速随接收时间的变化"></canvas><small>单位 km/h；时间来自接收端单调时钟。</small></section>
 </div>
+<section class="panel" id="control-panel" hidden><h2>控制命令与游戏响应</h2><p id="control-status"></p><p class="muted" id="control-timing"></p><div class="table-wrap"><table><thead><tr><th>相对时间</th><th>归属 / 状态</th><th>原始目标</th><th>发送值</th></tr></thead><tbody id="commands"></tbody></table></div><details><summary>响应观察与独立停止记录</summary><p class="muted">观察延迟为命令后首次遥测字段变化；不证明因果，死区和方向仍需实机核验。发送成功不等于游戏采用输入。</p><div class="table-wrap"><table><thead><tr><th>字段 / 原因</th><th>命令值</th><th>观察值</th><th>延迟 / 结果</th></tr></thead><tbody id="responses"></tbody></table></div></details></section>
 <section class="panel"><h2 id="event-title">异常与状态事件</h2><div class="table-wrap"><table><thead><tr><th>数据包</th><th>类型</th><th>说明</th></tr></thead><tbody id="events"></tbody></table></div></section>
 <section class="panel"><details open><summary>实验配置快照</summary><div class="table-wrap"><table><thead><tr><th>项目</th><th>记录值</th><th>核验状态</th><th>依据</th></tr></thead><tbody id="snapshot"></tbody></table></div></details></section>
 <footer id="versions"></footer>
@@ -59,6 +60,16 @@ for(const [label,value] of [["数据包",summary.packet_count],["格式有效",s
 }
 const kinds={unsupported_packet:"未知包格式",invalid_value:"异常字段",receive_gap:"接收间隔过长",receive_clock_discontinuity:"接收时钟异常",game_time_discontinuity:"游戏时间跳变",position_jump:"位置跳变",capture_interrupted:"用户停止",capture_source_error:"接收故障",capture_recording:"录制未正常结束",no_telemetry:"未收到有效遥测",paused:"游戏非活动状态",resumed:"恢复活动状态",game_clock_wrap:"游戏计时回绕",corrupt_record:"记录损坏",incomplete_tail:"末尾记录不完整"};
 function row(target,values){const tr=document.createElement("tr");for(const value of values){const td=document.createElement("td");td.textContent=value??"—";tr.append(td);}el(target).append(tr);}
+if(summary.control){
+ const c=summary.control,t=c.timing,origin=c.commands[0]?.issued_ns??0;
+ el("control-panel").hidden=false;
+ el("control-status").textContent=`结束原因：${c.stop_reason} · 归零调用成功：${c.release_sent?"是":"未确认"} · 游戏响应：未核验 · 持续采样：未开放`;
+ el("control-timing").textContent=`命令 ${t.command_count} 条 · 平均周期 ${t.mean_interval_ms==null?"—":fmt(t.mean_interval_ms)} ms · 最大周期 ${t.max_interval_ms==null?"—":fmt(t.max_interval_ms)} ms · 最长发送耗时 ${t.max_send_duration_ms==null?"—":fmt(t.max_send_duration_ms)} ms`;
+ for(const cmd of c.commands)row("commands",[`${fmt((cmd.issued_ns-origin)/1e9,3)} s`,`${cmd.owner} / ${cmd.status}`,JSON.stringify(cmd.requested),cmd.sent?JSON.stringify(cmd.sent):cmd.error??"发送失败"]);
+ for(const o of c.response_observations)row("responses",[o.field,o.target_value,o.observed_value,o.delay_ms==null?"未观察到变化":`${fmt(o.delay_ms)} ms`]);
+ for(const e of c.adapter_events??[])row("responses",[e.reason,"归零","—",e.status]);
+ for(const error of c.artifact_errors)row("responses",["日志不完整","—","—",error]);
+}
 el("event-title").textContent=`异常与状态事件 · ${data.events.length}`;
 for(const event of data.events)row("events",[event.packet_index??"—",kinds[event.kind]??event.kind,event.detail]);
 if(!data.events.length)row("events",["—","未检测到异常","这不代表所有异常均可被识别。"]);

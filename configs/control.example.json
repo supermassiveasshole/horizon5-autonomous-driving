@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "control_source": "calibration",
+  "snapshot": {
+    "vehicle": {
+      "value": "Lamborghini Sesto Elemento",
+      "status": "user_reported"
+    },
+    "variant": {
+      "value": "用户称特别版；X 999",
+      "status": "user_reported"
+    },
+    "tune": {
+      "value": "沿用用户原调校；具体值待记录",
+      "status": "unverified"
+    },
+    "assists": {
+      "value": null,
+      "status": "unverified"
+    },
+    "event": {
+      "value": "歌利亚（待本轮确认）",
+      "status": "unverified"
+    },
+    "environment": {
+      "value": null,
+      "status": "unverified"
+    }
+  },
+  "control": {
+    "version": 1,
+    "action_version": "steer-signed-longitudinal-v1",
+    "expected_car_ordinal": 2941,
+    "expected_pi": 999,
+    "rate_hz": 20,
+    "max_speed_kmh": 30,
+    "start_speed_kmh": 3,
+    "max_steer": 0.25,
+    "max_throttle": 0.15,
+    "max_brake": 0.5,
+    "telemetry_timeout_s": 0.25,
+    "ready_timeout_s": 30,
+    "steps": [
+      {
+        "seconds": 0.5,
+        "steer": 0,
+        "longitudinal": 0
+      },
+      {
+        "seconds": 1,
+        "steer": 0,
+        "longitudinal": 0.1
+      },
+      {
+        "seconds": 0.8,
+        "steer": 0.2,
+        "longitudinal": 0.06
+      },
+      {
+        "seconds": 1.2,
+        "steer": 0,
+        "longitudinal": -0.4
+      },
+      {
+        "seconds": 0.3,
+        "steer": 0,
+        "longitudinal": 0
+      },
+      {
+        "seconds": 1,
+        "steer": 0,
+        "longitudinal": 0.1
+      },
+      {
+        "seconds": 0.8,
+        "steer": -0.2,
+        "longitudinal": 0.06
+      },
+      {
+        "seconds": 1.2,
+        "steer": 0,
+        "longitudinal": -0.4
+      },
+      {
+        "seconds": 0.4,
+        "steer": 0,
+        "longitudinal": 0
+      }
+    ]
+  }
+}

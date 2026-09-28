@@ -12,6 +12,7 @@ from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from fh5.control import Control, validate_control_file
 from fh5.experiment import Packet, Record, Replay, run_experiment
 
 
@@ -38,6 +39,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     replay = commands.add_parser("replay", help="Replay a saved recording without the game")
     replay.add_argument("recording", type=Path)
     replay.add_argument("--report", type=Path, required=True)
+    control = commands.add_parser(
+        "control", help="Validate a bounded calibration; --live sends game input"
+    )
+    control.add_argument("--config", type=Path, required=True)
+    control.add_argument("--output", type=Path, required=True)
+    control.add_argument("--port", type=int, default=5300)
+    control.add_argument(
+        "--live", action="store_true", help="Send actual input; F8 or Ctrl+C releases it"
+    )
     args = parser.parse_args(argv)
     try:
         if args.mode == "record":
@@ -61,6 +71,39 @@ def main(argv: Sequence[str] | None = None) -> int:
                     Record(args.config, args.output, source_kind="udp"),
                     packets=_udp_packets(receiver, args.seconds),
                 )
+        elif args.mode == "control":
+            config = validate_control_file(args.config)
+            if not args.live:
+                print(
+                    json.dumps(
+                        {
+                            "status": "validated_only",
+                            "duration_s": sum(step["seconds"] for step in config["steps"]),
+                        }
+                    )
+                )
+                return 0
+            if not 0 <= args.port <= 65535:
+                raise ValueError("--port must be between 0 and 65535")
+            if args.output.exists():
+                raise FileExistsError(f"Output directory already exists: {args.output}")
+            from fh5.live import LiveEnvironment, WindowsDesktop, XboxController
+
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+                receiver.bind(("127.0.0.1", args.port))
+                desktop = WindowsDesktop()
+                environment = LiveEnvironment(receiver, XboxController(), desktop)
+                print(
+                    json.dumps(
+                        {
+                            "status": "waiting_for_focused_game_and_stationary_car",
+                            "port": receiver.getsockname()[1],
+                            "stop_key": "F8",
+                        }
+                    ),
+                    flush=True,
+                )
+                result = run_experiment(Control(args.config, args.output), environment=environment)
         else:
             result = run_experiment(Replay(args.recording, args.report))
     except (OSError, ValueError) as error:
@@ -77,6 +120,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if result.summary["capture_status"] == "source_error":
         return 2
+    if args.mode == "control" and result.summary["control"]["stop_reason"] != "completed":
+        return 4
     if result.summary["capture_status"] == "interrupted" and args.mode == "record":
         return 130
     if result.summary["valid_packets"] == 0:

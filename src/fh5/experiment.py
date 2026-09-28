@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from fh5.control import Control, ControlEnvironment, read_control, run_control
 from fh5.report import write_report
 
 FORMAT_VERSION = 1
@@ -112,8 +113,8 @@ def _validate_config(config: object) -> dict[str, Any]:
         raise ValueError("Config must be an object with integer schema_version")
     if config["schema_version"] != 1:
         raise ValueError("Unsupported config schema_version")
-    if config.get("control_source") not in ("human", "unknown"):
-        raise ValueError("This recorder supports human or unknown control_source")
+    if config.get("control_source") not in ("human", "unknown", "calibration"):
+        raise ValueError("Unknown control_source")
     snapshot = config.get("snapshot")
     if not isinstance(snapshot, dict):
         raise ValueError("Config requires a snapshot object")
@@ -140,9 +141,16 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 
 def run_experiment(
-    request: Record | Replay, *, packets: Iterable[Packet] | None = None
+    request: Record | Replay | Control,
+    *,
+    packets: Iterable[Packet] | None = None,
+    environment: ControlEnvironment | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, Control):
+        if environment is None:
+            raise ValueError("Control requires an external game environment")
+        return run_control(request, environment)
     if isinstance(request, Record):
         if packets is None:
             raise ValueError("A record run requires an external packet source")
@@ -185,6 +193,10 @@ def run_experiment(
             metadata["capture_error"] = str(error)
         else:
             metadata["capture_status"] = "completed"
+        finally:
+            close = getattr(packets, "close", None)
+            if close is not None:
+                close()
         metadata["ended_utc"] = datetime.now(UTC).isoformat()
         if request.source_kind == "udp":
             metadata["capture_end_monotonic_ns"] = time.perf_counter_ns()
@@ -356,6 +368,8 @@ def run_experiment(
         "invalid_packets": packet_count - len(samples),
         "segments": segment + bool(samples),
     }
+    if (directory / "control.json").exists():
+        summary["control"] = read_control(directory, samples)
     write_report(
         report_path,
         {"metadata": metadata, "samples": samples, "events": events, "summary": summary},

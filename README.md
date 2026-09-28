@@ -2,7 +2,7 @@
 
 使用用户固定调校的兰博基尼第六元素，从遥测与已知路线起步，建立能自行采样、训练、评估并改进驾驶策略的实验系统。首版聚焦无对抗歌利亚，后续探索对手竞速和路线泛化。
 
-当前实现：[T01 / Issue #2](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/2) 的遥测录制与离线回放工具。已完成一次 90 秒实机记录与回放，包含 3,308 个活动状态样本；[验证记录](docs/validation/t01-recording.md) 区分软件检查、实录观察和待核实项目。七天是首轮探索窗口，按可运行里程碑推进。
+当前实现：T01 遥测录制与离线回放已获得真实驾驶记录；T02 增加有时间和速度限制的双轴控制校准、停止保护及命令回放，实机控制验收待完成。见 [T01 验证记录](docs/validation/t01-recording.md) 与 [T02 控制说明](docs/control.md)。七天是首轮探索窗口，按可运行里程碑推进。
 
 ## 安装与运行
 
@@ -41,7 +41,7 @@ uv run --locked ruff check .
 uv run --locked ruff format --check .
 ```
 
-测试通过实验运行入口验证录制、回放和故障行为。运行时只使用 Python 标准库。`src/fh5/` 是代码及报告模板，`tests/` 是合成输入测试，`configs/` 是配置示例，`runs/` 是不纳入 Git 的本地实验结果。
+测试通过实验运行入口验证录制、回放和故障行为。录制与回放只需 Python 标准库；实机控制使用可选 `control` 依赖和单独安装的驱动。`src/fh5/` 是代码及报告模板，`tests/` 是合成输入测试，`configs/` 是配置示例，`runs/` 是不纳入 Git 的本地实验结果。
 
 ## 当前文档
 

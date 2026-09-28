@@ -9,6 +9,12 @@ description = "Record and replay FH5 driving experiments"
 requires-python = ">=3.12,<3.15"
 dependencies = []
 
+[project.optional-dependencies]
+control = ["vgamepad @ https://github.com/yannbouteiller/vgamepad/archive/3f910aa8bbde49a576683db74ad5e4a0879f8a80.zip ; sys_platform == 'win32'"]
+
+[tool.uv.extra-build-variables]
+vgamepad = { VGAMEPAD_SKIP_VIGEMBUS_INSTALL = "true" }
+
 [project.scripts]
 fh5 = "fh5.cli:main"
 
@@ -17,6 +23,9 @@ dev = ["pytest>=8,<10", "mypy>=1.11,<2", "ruff>=0.6,<1"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/fh5"]
+
+[tool.hatch.metadata]
+allow-direct-references = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
