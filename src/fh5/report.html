@@ -43,6 +43,7 @@ td{overflow-wrap:anywhere}summary{cursor:pointer;font-weight:600}code{font-size:
 <input id="cursor" type="range" min="0" max="0" value="0" aria-label="回放位置">
 <output id="clock">0.00 s</output>
 </div><div class="readout" id="readout"></div>
+<small>减速刹车为 Brake 遥测（0–255，通常对应手柄 LT），不包含手刹；该数值不是车辆实际减速度。</small>
 </section>
 <div class="charts">
 <section class="panel"><h2>轨迹 · 世界 X/Z</h2><canvas id="trajectory" aria-label="按连续片段绘制的轨迹"></canvas><small>单位 m；仅绘制活动状态位置，异常处断开。方向待实机标定。</small></section>
@@ -126,7 +127,7 @@ function draw(){
  }
  const s=samples[index],c=s.telemetry_controls;el("cursor").value=index;el("clock").textContent=`${fmt(times[index])} / ${fmt(elapsed)} s`;
  if(s.route){const r=s.route,names={matched:"走廊与检查点匹配",unverified_corridor:"走廊未覆盖",unverified_reference:"参考轨迹未核验",unverified_checkpoints:"检查点未核验",missing_checkpoint:"未确认经过检查点",checkpoint_order:"检查点穿越顺序错误",awaiting_checkpoint:"等待穿过斜向检查点",unanchored:"未从本段起点定位",ambiguous:"位置有歧义",discontinuity:"连续性中断",outside_reference:"远离参考轨迹",inactive:"非驾驶状态",continuity_unverified:"此前连续性未核实"};el("route-position").textContent=`片段 ${s.segment} · 参考里程 ${fmt(r.reference_s_m,1)} m · 到参考线 ${fmt(r.distance_m,2)} m · 已确认进度 ${fmt(r.confirmed_progress_m,1)} m · ${names[r.status]??r.status} · 下一检查点 ${r.next_checkpoint??"无/未标注"}`;}
- el("readout").textContent=`包 ${s.packet_index} · ${s.is_race_on?"活动":"非活动"} · 片段 ${s.segment} · ${fmt(s.speed_kmh,1)} km/h · 游戏时间 ${s.game_timestamp_ms} ms · 遥测油门 ${c.accel} / 刹车 ${c.brake} / 转向 ${c.steer} · CarOrdinal ${s.car_ordinal} / PI ${s.car_performance_index}`;
+ el("readout").textContent=`包 ${s.packet_index} · ${s.is_race_on?"活动":"非活动"} · 片段 ${s.segment} · ${fmt(s.speed_kmh,1)} km/h · 游戏时间 ${s.game_timestamp_ms} ms · 遥测油门 ${c.accel} / 减速刹车 ${c.brake} / 转向 ${c.steer} · CarOrdinal ${s.car_ordinal} / PI ${s.car_performance_index}`;
 }
 el("cursor").addEventListener("input",()=>{index=Number(el("cursor").value);playing=false;el("play").textContent="播放";draw();});
 function tick(now){if(!playing)return;targetTime+=(now-lastWall)/1000*Number(el("rate").value);lastWall=now;while(index+1<samples.length&&times[index+1]<=targetTime)index++;draw();if(index+1===samples.length){playing=false;el("play").textContent="播放";}else requestAnimationFrame(tick);}
