@@ -81,6 +81,9 @@ def validate_event_file(path: Path) -> dict[str, Any]:
         raise ValueError("Unsupported event_run version")
     if type(config.get("conditions_verified")) is not bool:
         raise ValueError("conditions_verified must be a boolean")
+    purpose = config.setdefault("purpose", "event")
+    if purpose not in ("event", "restart_probe"):
+        raise ValueError("Unknown event purpose")
     for name, low, high in [
         ("max_attempts", 1, 10),
         ("expected_car_ordinal", 1, 1000000),
@@ -161,11 +164,21 @@ def validate_event_file(path: Path) -> dict[str, Any]:
     evidence = config.get("verification_evidence")
     if not isinstance(evidence, list) or any(not isinstance(e, str) for e in evidence):
         raise ValueError("verification_evidence must be a list of paths")
-    if config["conditions_verified"]:
+    if purpose == "restart_probe" and (
+        config["max_attempts"] > 3
+        or config["attempt_timeout_s"] > 10
+        or config["ready_timeout_s"] > 30
+        or config["restart_timeout_s"] > 30
+    ):
+        raise ValueError("Restart probes allow at most three short stationary attempts")
+    if config["conditions_verified"] or purpose == "restart_probe":
         if (
             not evidence
             or any(not (path.parent / e).is_file() for e in evidence)
-            or any(f["status"] != "verified" for f in root["snapshot"].values())
+            or (
+                config["conditions_verified"]
+                and any(f["status"] != "verified" for f in root["snapshot"].values())
+            )
         ):
             raise ValueError("Verified conditions require snapshot and local evidence")
         if not {"ready", "driving", "finish"} <= signatures.keys() or any(
@@ -216,7 +229,11 @@ def _running_fault(
     delta = sample["received_monotonic_ns"] - previous["received_monotonic_ns"]
     if delta <= 0:
         return "telemetry_clock_invalid"
-    if (sample["game_timestamp_ms"] - previous["game_timestamp_ms"]) % (2**32) > 60_000:
+    if (
+        sample["is_race_on"]
+        and previous["is_race_on"]
+        and (sample["game_timestamp_ms"] - previous["game_timestamp_ms"]) % (2**32) > 60_000
+    ):
         return "game_time_jump"
     if (
         sample["is_race_on"]
@@ -253,6 +270,8 @@ def _run_event(request: EventRun, environment: EventEnvironment, root: dict[str,
         "attempts": [],
         "unattended_verified": False,
         "release_sent": False,
+        "purpose": config["purpose"],
+        "conditions_verified": config["conditions_verified"],
     }
     events: list[dict[str, Any]] = []
 
@@ -304,6 +323,12 @@ def _run_event(request: EventRun, environment: EventEnvironment, root: dict[str,
                     sample = _decode(packet)
                     if phase == "running":
                         telemetry_fault = telemetry_fault or _running_fault(sample, latest, config)
+                    if (
+                        config["purpose"] == "restart_probe"
+                        and sample["is_race_on"]
+                        and (sample["speed_kmh"] > 3 or any(sample["telemetry_controls"].values()))
+                    ):
+                        telemetry_fault = telemetry_fault or "probe_vehicle_moving_or_input"
                     latest = sample
                 frame = observation.frame
                 screen = "unknown"
@@ -329,7 +354,7 @@ def _run_event(request: EventRun, environment: EventEnvironment, root: dict[str,
                 previous_screen = screen
                 # Classification and evidence I/O may outlast the input freshness window.
                 now = environment.now_ns()
-                if not config["conditions_verified"]:
+                if not config["conditions_verified"] and config["purpose"] != "restart_probe":
                     event_summary["stop_reason"] = "conditions_unverified"
                     log("conditions_unverified")
                     break
@@ -450,6 +475,8 @@ def _run_event(request: EventRun, environment: EventEnvironment, root: dict[str,
                 log("released")
             else:
                 log("release_failed", error=release_error)
+            for adapter_event in getattr(environment, "events", []):
+                log("adapter_event", detail=adapter_event)
             # Record flushes each yielded datagram before resuming this generator.
             log(
                 "asset",

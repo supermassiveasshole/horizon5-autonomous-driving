@@ -56,6 +56,7 @@ class Game:
         struct.pack_into("<I", data, 4, self.time // 1_000_000)
         struct.pack_into("<fff", data, 244, 0, 0, 0)
         struct.pack_into("<f", data, 256, 0)
+        data[315] = data[316] = data[320] = 0
         return EventInput(
             packets=(Packet(self.time, "2026-09-28T12:00:00+00:00", bytes(data)),),
             frame=ScreenFrame(self.time, 4, 2, bytes(8)),
@@ -99,6 +100,92 @@ def test_visual_templates_are_frozen_before_the_first_observation(tmp_path):
     result = run_experiment(EventRun(path, tmp_path / "run"), event_environment=game)
     assert len(result.summary["event_run"]["attempts"]) == 2
     assert result.summary["event_run"]["stop_reason"] == "attempt_limit"
+
+
+def test_restart_probe_can_check_menus_without_claiming_verified_conditions(tmp_path):
+    path = verified_config(tmp_path)
+    root = json.loads(path.read_text(encoding="utf-8"))
+    root["event_run"].update(conditions_verified=False, purpose="restart_probe")
+    root["snapshot"]["tune"]["status"] = "user_reported"
+    path.write_text(json.dumps(root), encoding="utf-8")
+    game = RestartGame()
+    result = run_experiment(EventRun(path, tmp_path / "run"), event_environment=game)
+    assert len(result.summary["event_run"]["attempts"]) == 2
+    assert result.summary["event_run"]["purpose"] == "restart_probe"
+    assert result.summary["event_run"]["conditions_verified"] is False
+    assert result.summary["event_run"]["unattended_verified"] is False
+    assert game.pulses == ["A", "START", "X", "A", "A"]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("max_attempts", 4),
+        ("attempt_timeout_s", 11),
+        ("ready_timeout_s", 31),
+        ("restart_timeout_s", 31),
+    ],
+)
+def test_restart_probe_rejects_extended_sampling_before_input(tmp_path, field, value):
+    path = verified_config(tmp_path)
+    root = json.loads(path.read_text(encoding="utf-8"))
+    root["event_run"].update(purpose="restart_probe", conditions_verified=False)
+    root["event_run"][field] = value
+    path.write_text(json.dumps(root), encoding="utf-8")
+    game = RestartGame()
+    with pytest.raises(ValueError, match="three short stationary"):
+        run_experiment(EventRun(path, tmp_path / "run"), event_environment=game)
+    assert game.pulses == []
+
+
+def test_finish_page_accepts_zeroed_inactive_telemetry_without_inventing_a_clock_fault(tmp_path):
+    class FinishedGame(RestartGame):
+        driving_frames = 0
+
+        def read(self, period_s):
+            observation = super().read(period_s)
+            if self.screen == "driving":
+                self.driving_frames += 1
+            if self.driving_frames > 3:
+                observation = replace(
+                    observation,
+                    packets=(Packet(self.time, "2026-09-28T12:00:00+00:00", bytes(324)),),
+                    frame=ScreenFrame(self.time, 4, 2, PATTERNS["finish"]),
+                )
+            return observation
+
+    path = verified_config(tmp_path)
+    root = json.loads(path.read_text(encoding="utf-8"))
+    root["event_run"]["max_attempts"] = 1
+    path.write_text(json.dumps(root), encoding="utf-8")
+    result = run_experiment(EventRun(path, tmp_path / "run"), event_environment=FinishedGame())
+    assert result.summary["event_run"]["attempts"][0]["outcome"] == "completion_observed"
+
+
+@pytest.mark.parametrize("transient", [False, True])
+def test_restart_probe_stops_if_someone_operates_the_car(tmp_path, transient):
+    class DrivenGame(RestartGame):
+        def read(self, period_s):
+            observation = super().read(period_s)
+            data = bytearray(observation.packets[0].payload)
+            data[315] = 50
+            driven = replace(observation.packets[0], payload=bytes(data))
+            packets = (driven,)
+            if transient:
+                packets = (
+                    replace(driven, received_monotonic_ns=self.time - 1),
+                    observation.packets[0],
+                )
+            return replace(observation, packets=packets)
+
+    path = verified_config(tmp_path)
+    root = json.loads(path.read_text(encoding="utf-8"))
+    root["event_run"].update(purpose="restart_probe", conditions_verified=False)
+    path.write_text(json.dumps(root), encoding="utf-8")
+    game = DrivenGame()
+    result = run_experiment(EventRun(path, tmp_path / "run"), event_environment=game)
+    assert result.summary["event_run"]["stop_reason"] == "probe_vehicle_moving_or_input"
+    assert game.pulses == []
 
 
 PATTERNS = {

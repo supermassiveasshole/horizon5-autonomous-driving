@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from ctypes import wintypes
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -19,10 +20,30 @@ from fh5.experiment import Packet
 
 NEUTRAL = Command(0, 0, 0)
 LEASE_NS = 250_000_000
+MENU_BUTTONS = {
+    "A": "XUSB_GAMEPAD_A",
+    "B": "XUSB_GAMEPAD_B",
+    "X": "XUSB_GAMEPAD_X",
+    "Y": "XUSB_GAMEPAD_Y",
+    "START": "XUSB_GAMEPAD_START",
+    "UP": "XUSB_GAMEPAD_DPAD_UP",
+    "DOWN": "XUSB_GAMEPAD_DPAD_DOWN",
+    "LEFT": "XUSB_GAMEPAD_DPAD_LEFT",
+    "RIGHT": "XUSB_GAMEPAD_DPAD_RIGHT",
+}
+
+
+@dataclass(frozen=True)
+class MenuButton:
+    button: str
+
+    def __post_init__(self) -> None:
+        if self.button not in MENU_BUTTONS:
+            raise ValueError("Unsupported menu button")
 
 
 class Controller(Protocol):
-    def send(self, command: Command) -> None: ...
+    def send(self, command: Command | MenuButton) -> None: ...
     def close(self) -> None: ...
 
 
@@ -41,11 +62,17 @@ class LiveEnvironment:
     source_kind: Literal["udp", "synthetic"] = "udp"
 
     def __init__(
-        self, receiver: socket.socket, controller: Controller, desktop: DesktopState
+        self,
+        receiver: socket.socket,
+        controller: Controller,
+        desktop: DesktopState,
+        *,
+        monitor_idle: bool = False,
     ) -> None:
         self.receiver = receiver
         self.controller = controller
         self.desktop = desktop
+        self.monitor_idle = monitor_idle
         self.events: list[dict[str, Any]] = []
         self._lock = threading.Lock()
         self._done = threading.Event()
@@ -60,6 +87,10 @@ class LiveEnvironment:
 
     def now_ns(self) -> int:
         return time.perf_counter_ns()
+
+    @property
+    def fault(self) -> str | None:
+        return self._fault
 
     def read(self, period_s: float) -> ControlInput:
         deadline = time.monotonic() + period_s
@@ -77,7 +108,7 @@ class LiveEnvironment:
             tuple(packets), self.desktop.focused(), self.desktop.stop_requested(), self._fault
         )
 
-    def send(self, command: Command) -> None:
+    def send(self, command: Command | MenuButton) -> None:
         with self._lock:
             if self._closed or self._detached:
                 raise OSError("Controller is closed")
@@ -134,7 +165,7 @@ class LiveEnvironment:
     def _watch(self) -> None:
         while not self._done.wait(0.02):
             with self._lock:
-                if not self._active:
+                if not self._active and (not self.monitor_idle or self._fault):
                     continue
                 try:
                     if self._fault:
@@ -143,7 +174,7 @@ class LiveEnvironment:
                         self._trip("user_stop")
                     elif not self.desktop.focused():
                         self._trip("focus_lost")
-                    elif self.now_ns() - self._last_send >= LEASE_NS:
+                    elif self._active and self.now_ns() - self._last_send >= LEASE_NS:
                         self._trip("watchdog_timeout")
                 except Exception:
                     self._trip("desktop_error")
@@ -208,18 +239,22 @@ class XboxController:
     def __init__(self) -> None:
         try:
             vg = importlib.import_module("vgamepad")
+            self.buttons = vg.XUSB_BUTTON
             self.pad: Any = vg.VX360Gamepad()
         except Exception as error:
             raise OSError(
                 "Virtual Xbox unavailable; install the control extra and ViGEmBus. See docs/control.md."
             ) from error
 
-    def send(self, command: Command) -> None:
+    def send(self, command: Command | MenuButton) -> None:
         try:
             self.pad.reset()
-            self.pad.left_joystick(x_value=command.steer_i16, y_value=0)
-            self.pad.right_trigger(value=command.throttle_u8)
-            self.pad.left_trigger(value=command.brake_u8)
+            if isinstance(command, MenuButton):
+                self.pad.press_button(button=getattr(self.buttons, MENU_BUTTONS[command.button]))
+            else:
+                self.pad.left_joystick(x_value=command.steer_i16, y_value=0)
+                self.pad.right_trigger(value=command.throttle_u8)
+                self.pad.left_trigger(value=command.brake_u8)
             self.pad.update()
         except Exception as error:
             raise OSError(f"Virtual Xbox write failed: {error}") from error

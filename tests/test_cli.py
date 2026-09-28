@@ -117,3 +117,27 @@ def test_control_cli_defaults_to_validation_without_a_driver(tmp_path: Path) -> 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["status"] == "validated_only"
     assert not run_dir.exists()
+
+
+def test_event_cli_defaults_to_validation_without_capture_or_input(tmp_path):
+    from test_event_run import verified_config
+
+    output = tmp_path / "no-device"
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "fh5",
+            "event",
+            "--config",
+            str(verified_config(tmp_path)),
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["status"] == "validated_only"
+    assert not output.exists()

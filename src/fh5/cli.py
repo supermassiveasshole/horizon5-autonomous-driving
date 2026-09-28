@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fh5.control import Control, validate_control_file
+from fh5.events import EventRun, validate_event_file
 from fh5.experiment import Packet, Record, Replay, run_experiment
 
 
@@ -48,6 +49,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     control.add_argument(
         "--live", action="store_true", help="Send actual input; F8 or Ctrl+C releases it"
     )
+    event = commands.add_parser("event", help="Validate event recipes; --live enables menu pulses")
+    event.add_argument("--config", type=Path, required=True)
+    event.add_argument("--output", type=Path, required=True)
+    event.add_argument("--port", type=int, default=5300)
+    event.add_argument("--live", action="store_true", help="Run with FH5 foreground; F8 stops")
     args = parser.parse_args(argv)
     try:
         if args.mode == "record":
@@ -104,6 +110,55 @@ def main(argv: Sequence[str] | None = None) -> int:
                     flush=True,
                 )
                 result = run_experiment(Control(args.config, args.output), environment=environment)
+        elif args.mode == "event":
+            root = validate_event_file(args.config)
+            event_config = root["event_run"]
+            if not args.live:
+                print(
+                    json.dumps(
+                        {
+                            "status": "validated_only",
+                            "purpose": event_config["purpose"],
+                            "conditions_verified": event_config["conditions_verified"],
+                        }
+                    )
+                )
+                return 0
+            if not 0 <= args.port <= 65535:
+                raise ValueError("--port must be between 0 and 65535")
+            if args.output.exists():
+                raise FileExistsError(f"Output directory already exists: {args.output}")
+            from fh5.live import WindowsDesktop, XboxController
+            from fh5.live_event import BoundedFrames, LiveEventEnvironment, WindowsFrames
+
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+                receiver.bind(("127.0.0.1", args.port))
+                desktop = WindowsDesktop()
+                frames = BoundedFrames(
+                    lambda: WindowsFrames(desktop, tuple(event_config["screen_size"]))
+                )
+                try:
+                    controller = XboxController()
+                except BaseException:
+                    frames.close()
+                    raise
+                environment_event = LiveEventEnvironment(receiver, controller, desktop, frames)
+                try:
+                    print(
+                        json.dumps(
+                            {
+                                "status": "event_started",
+                                "stop_key": "F8",
+                                "purpose": event_config["purpose"],
+                            }
+                        ),
+                        flush=True,
+                    )
+                    result = run_experiment(
+                        EventRun(args.config, args.output), event_environment=environment_event
+                    )
+                finally:
+                    environment_event.close()
         else:
             result = run_experiment(Replay(args.recording, args.report))
     except (OSError, ValueError) as error:
@@ -121,6 +176,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     if result.summary["capture_status"] == "source_error":
         return 2
     if args.mode == "control" and result.summary["control"]["stop_reason"] != "completed":
+        return 4
+    if args.mode == "event" and (
+        result.summary["event_run"]["stop_reason"] != "attempt_limit"
+        or not result.summary["event_run"]["release_sent"]
+    ):
         return 4
     if result.summary["capture_status"] == "interrupted" and args.mode == "record":
         return 130

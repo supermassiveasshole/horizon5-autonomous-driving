@@ -11,6 +11,7 @@ dependencies = []
 
 [project.optional-dependencies]
 control = ["vgamepad @ https://github.com/yannbouteiller/vgamepad/archive/3f910aa8bbde49a576683db74ad5e4a0879f8a80.zip ; sys_platform == 'win32'"]
+events = ["mss>=10,<11", "Pillow>=11.3,<13"]
 
 [tool.uv.extra-build-variables]
 vgamepad = { VGAMEPAD_SKIP_VIGEMBUS_INSTALL = "true" }
