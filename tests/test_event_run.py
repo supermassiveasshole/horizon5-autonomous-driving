@@ -262,6 +262,78 @@ def test_timeout_restart_creates_a_new_attempt_only_after_start_is_verified(tmp_
     assert game.released and game.closed
 
 
+def test_brightness_changed_hud_still_starts_and_restarts_with_contrast_matching(tmp_path):
+    class ShadedHud(RestartGame):
+        def read(self, period_s):
+            observation = super().read(period_s)
+            if self.screen == "driving":
+                # Same text/background layout; the world behind the translucent HUD darkened.
+                observation = replace(
+                    observation, frame=ScreenFrame(self.time, 4, 2, bytes([160, 60] * 4))
+                )
+            return observation
+
+    path = verified_config(tmp_path)
+    root = json.loads(path.read_text())
+    root["event_run"]["signatures"]["driving"][0]["metric"] = "gradient"
+    path.write_text(json.dumps(root))
+    game = ShadedHud()
+    result = run_experiment(EventRun(path, tmp_path / "run"), event_environment=game)
+    lifecycle = result.summary["event_run"]
+    assert len(lifecycle["attempts"]) == 2
+    assert lifecycle["stop_reason"] == "attempt_limit"
+    assert game.pulses == ["A", "START", "X", "A", "A"]
+    replay = run_experiment(Replay(tmp_path / "run", tmp_path / "replay.html"))
+    assert lifecycle == replay.summary["event_run"]
+
+
+@pytest.mark.parametrize("metric", ["ncc", None, 1, []])
+def test_unknown_patch_metric_is_rejected_before_menu_input(tmp_path, metric):
+    path = verified_config(tmp_path)
+    root = json.loads(path.read_text())
+    root["event_run"]["signatures"]["driving"][0]["metric"] = metric
+    path.write_text(json.dumps(root))
+    game = RestartGame()
+    with pytest.raises(ValueError, match="metric"):
+        run_experiment(EventRun(path, tmp_path / "run"), event_environment=game)
+    assert game.pulses == []
+    assert game.closed
+
+
+def test_contrast_template_without_a_pattern_is_rejected_before_menu_input(tmp_path):
+    path = verified_config(tmp_path)
+    root = json.loads(path.read_text())
+    root["event_run"]["signatures"]["driving"][0]["metric"] = "gradient"
+    path.write_text(json.dumps(root))
+    (tmp_path / "driving.pgm").write_bytes(b"P5\n4 2\n255\n" + bytes([100] * 8))
+    game = RestartGame()
+    with pytest.raises(ValueError, match="contrast"):
+        run_experiment(EventRun(path, tmp_path / "run"), event_environment=game)
+    assert game.pulses == []
+
+
+@pytest.mark.parametrize(
+    "pixels", [bytes([120] * 8), bytes([60, 160] * 4), bytes([160, 160, 60, 60] * 2)]
+)
+def test_blank_inverted_or_different_hud_never_starts_a_contrast_matched_attempt(tmp_path, pixels):
+    class WrongHud(RestartGame):
+        def read(self, period_s):
+            observation = super().read(period_s)
+            if self.screen == "driving":
+                observation = replace(observation, frame=ScreenFrame(self.time, 4, 2, pixels))
+            return observation
+
+    path = verified_config(tmp_path)
+    root = json.loads(path.read_text())
+    root["event_run"]["signatures"]["driving"][0]["metric"] = "gradient"
+    path.write_text(json.dumps(root))
+    game = WrongHud()
+    result = run_experiment(EventRun(path, tmp_path / "run"), event_environment=game)
+    assert result.summary["event_run"]["attempts"] == []
+    assert result.summary["event_run"]["stop_reason"] == "prepare_timeout"
+    assert game.pulses == ["A"]
+
+
 @pytest.mark.parametrize(
     "fault", ["user_stop", "focus_lost", "screen_stale", "telemetry_stale", "capture_failed"]
 )

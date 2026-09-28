@@ -128,6 +128,8 @@ def validate_event_file(path: Path) -> dict[str, Any]:
         for patch in patches:
             if not isinstance(patch, dict):
                 raise ValueError("Invalid patch")
+            if patch.get("metric", "mae") not in ("mae", "gradient"):
+                raise ValueError("Patch metric must be mae or gradient")
             box = patch.get("box")
             if (
                 not isinstance(box, list)
@@ -146,9 +148,11 @@ def validate_event_file(path: Path) -> dict[str, Any]:
                 raise ValueError("max_error must be between 0 and 0.1")
             if not isinstance(patch.get("template"), str):
                 raise ValueError("Missing patch template")
-            width, height, _ = _pgm((path.parent / patch["template"]).read_bytes())
+            width, height, pixels = _pgm((path.parent / patch["template"]).read_bytes())
             if (width, height) != (box[2] - box[0], box[3] - box[1]):
                 raise ValueError("Patch and template dimensions differ")
+            if patch.get("metric") == "gradient" and min(pixels) == max(pixels):
+                raise ValueError("A gradient template must contain contrast")
     for name in ("start_steps", "restart_steps", "finish_steps"):
         steps = config.setdefault(name, [])
         if not isinstance(steps, list) or len(steps) > 32:
@@ -188,6 +192,18 @@ def validate_event_file(path: Path) -> dict[str, Any]:
     return root
 
 
+def _gradient(pixels: bytes, width: int, height: int) -> list[int]:
+    return [
+        pixels[y * width + x + 1] - pixels[y * width + x]
+        for y in range(height)
+        for x in range(width - 1)
+    ] + [
+        pixels[(y + 1) * width + x] - pixels[y * width + x]
+        for y in range(height - 1)
+        for x in range(width)
+    ]
+
+
 def _recognize(frame: ScreenFrame, config: dict[str, Any], templates: dict[str, bytes]) -> str:
     if [frame.width, frame.height] != config["screen_size"]:
         return "unknown"
@@ -201,7 +217,15 @@ def _recognize(frame: ScreenFrame, config: dict[str, Any], templates: dict[str, 
                 frame.grayscale[y * frame.width + left : y * frame.width + right]
                 for y in range(top, bottom)
             )
-            error = sum(abs(a - b) for a, b in zip(pixels, template)) / (len(template) * 255)
+            if patch.get("metric", "mae") == "gradient":
+                observed = _gradient(pixels, right - left, bottom - top)
+                expected = _gradient(template, right - left, bottom - top)
+                norm = math.sqrt(sum(a * a for a in observed) * sum(b * b for b in expected))
+                # A blank patch has no edges; it must never match a HUD.
+                correlation = sum(a * b for a, b in zip(observed, expected)) / norm if norm else -1
+                error = (1 - max(-1.0, min(1.0, correlation))) / 2
+            else:
+                error = sum(abs(a - b) for a, b in zip(pixels, template)) / (len(template) * 255)
             errors.append(error <= patch["max_error"])
         if errors and all(errors):
             matches.append(name)

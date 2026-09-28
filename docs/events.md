@@ -36,10 +36,14 @@ uv run --locked --extra control --extra events fh5 event --config runs/t03-menu-
 - `version`、`purpose`（默认 `event`）、`conditions_verified`、本地 `verification_evidence` 路径。
 - `max_attempts`（1–10）、准备/重开时限（0.5–120 秒）、单次尝试时限（0.5–1800 秒）。
 - `expected_car_ordinal`、`expected_pi`、`start_position_m` 和 `start_radius_m`。
-- `screen_size`、`signatures`：每个页面包含 `box: [left, top, right, bottom]`、`template` 和 `max_error` 图块。
+- `screen_size`、`signatures`：每个页面包含 `box: [left, top, right, bottom]`、`template`、`max_error` 和可选 `metric` 图块。
 - `start_steps/restart_steps/finish_steps`：按顺序指定期待的 `screen` 与要发送的 `button`。
 
 模板采用 `P5\n宽 高\n255\n` 后接灰度像素的 PGM。配置和证据在观察前固定并复制到本轮目录，原文件后续变化不影响本轮识别。普通 `event` 在条件未核验时只保存观测并退出，不发送菜单动作。
+
+`metric` 默认 `mae`，沿用平均灰度绝对差除以 255 的旧算法。半透明 HUD 可显式采用 `gradient`：按横向、纵向相邻像素差构造带符号梯度，误差为 `(1 - 余弦相似度) / 2`；例如 `max_error: 0.075` 要求相似度至少 0.85。它减少整体亮度及平缓背景变化的影响，不保证遮挡或低对比度下仍能识别。纯色观测不匹配；纯色梯度模板及未知方法在发送输入前拒绝。两种误差不能沿用同一阈值而不校准；多图块同时命中、跨页面歧义拒绝、连续两帧以及起点/车型/速度检查保持不变。
+
+驾驶模板应选固定文字，避开圈数、计时、车速及大片场景背景。本机曾将起跑的“0/1”和明亮背景纳入模板，导致行驶中失配；修订模板使用左下固定 HUD 文字。移动 HUD 也可能出现在自由漫游中，因此它不证明赛事身份或道路有效性；蓝图条件和起点遥测仍须独立核验。校准材料、未命中帧和新采实机检查见 [HUD 修复记录](validation/t03-hud-recognition.md)。
 
 显式 `purpose: "restart_probe"` 允许在条件仍未核验时测试菜单：最多三次尝试、每次最多 10 秒、准备/重开各最多 30 秒；仍须提供本地证据及起跑、完成、重开模板和步骤。逐包检查活动遥测，速度超过 3 km/h 或出现非零驾驶输入立即退出，包括同批中间短暂出现的异常。不会把配置快照升级为已核验，也不发送驾驶动作。完整配置形状见 `tests/test_event_run.py`；其中合成图块不能用于真实游戏。
 
