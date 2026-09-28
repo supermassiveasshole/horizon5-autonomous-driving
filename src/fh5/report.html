@@ -28,6 +28,13 @@ td{overflow-wrap:anywhere}summary{cursor:pointer;font-weight:600}code{font-size:
 <p class="muted" id="identity"></p>
 <div class="notice" id="evidence"></div>
 <section class="stats" id="stats" aria-label="数据摘要"></section>
+<section class="panel" id="vision-panel" hidden>
+<h2>彩色画面与当时可用的遥测</h2><p id="vision-status"></p>
+<p class="muted">追尾远视角会随速度改变距离。画面与遥测按接收端时钟关联，不代表同一物理帧；中断处不插值。</p>
+<div class="controls"><button id="vision-play" type="button">播放画面</button><input id="vision-cursor" type="range" min="0" max="0" value="0" aria-label="彩色画面位置"><output id="vision-clock"></output></div>
+<img id="vision-image" alt="当前录制的 FH5 彩色画面" style="display:block;width:100%;margin-top:16px;border-radius:8px" hidden>
+<p id="vision-readout"></p><details><summary>采集时序、事后配对与完整性</summary><pre id="vision-detail" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre><pre id="vision-timing" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details>
+</section>
 <section class="panel" id="route-panel" hidden><h2>局部路线与核验覆盖</h2><p id="route-quality"></p><p class="muted">橙色虚线：参考轨迹，不代表道路边界；绿色区域：已核实走廊；紫色线：检查点门。确认进度仅属于当前前向片段，不是全程成绩。</p><p id="route-position"></p><div class="table-wrap"><table><thead><tr><th>检查点顺序</th><th>距路线起点</th><th>核验状态</th></tr></thead><tbody id="route-gates"></tbody></table></div></section>
 <section class="panel" aria-label="回放控制">
 <div class="controls">
@@ -125,5 +132,25 @@ el("cursor").addEventListener("input",()=>{index=Number(el("cursor").value);play
 function tick(now){if(!playing)return;targetTime+=(now-lastWall)/1000*Number(el("rate").value);lastWall=now;while(index+1<samples.length&&times[index+1]<=targetTime)index++;draw();if(index+1===samples.length){playing=false;el("play").textContent="播放";}else requestAnimationFrame(tick);}
 el("play").addEventListener("click",()=>{playing=!playing;if(playing){if(index+1===samples.length)index=0;targetTime=times[index];lastWall=performance.now();requestAnimationFrame(tick);}el("play").textContent=playing?"暂停":"播放";});
 window.addEventListener("resize",draw);draw();
+if(summary.vision){
+ const v=summary.vision,frames=v.frames;let fi=0,active=false,timer=null;
+ el("vision-panel").hidden=false;
+ el("vision-status").textContent=`画面 ${v.frame_count} 帧 · 可用活动观测 ${v.usable_frames} 帧 · 结束：${v.session.stop_reason} · 完整性问题 ${v.integrity_errors.length}`;
+ el("vision-timing").textContent=JSON.stringify({timing:v.timing,integrity_errors:v.integrity_errors,events:v.events},null,2);
+ el("vision-cursor").max=Math.max(0,frames.length-1);el("vision-play").disabled=!frames.length;el("vision-cursor").disabled=!frames.length;
+ function showFrame(){
+  if(!frames.length){el("vision-readout").textContent="没有保存的画面；遥测与故障记录仍可检查。";return;}
+  const f=frames[fi],o=f.online,s=o.sample;
+  el("vision-cursor").value=fi;el("vision-clock").textContent=`${fi+1} / ${frames.length}`;
+  el("vision-image").hidden=!f.image_url;if(f.image_url)el("vision-image").src=f.image_url;else el("vision-image").removeAttribute("src");
+  el("vision-readout").textContent=`${o.usable?"活动观测可用":`不可用于驾驶：${o.reason}`} · ${s?`包 ${s.packet_index} / 片段 ${s.segment} / ${fmt(s.speed_kmh,1)} km/h / 游戏 ${s.game_timestamp_ms} ms` : "当时没有可用遥测"} · 画面年龄 ${fmt(o.frame_age_ms)} ms · 遥测年龄 ${o.telemetry_age_ms==null?"—":fmt(o.telemetry_age_ms)} ms`;
+  el("vision-detail").textContent=JSON.stringify({captured_utc:f.captured_utc??null,capture_start_ns:f.capture_start_ns,capture_end_ns:f.capture_end_ns,available_ns:f.available_ns,delivered_ns:f.delivered_ns??null,stored_ns:f.stored_ns,handoff_age_ms:o.handoff_age_ms,size:f.size,client_size:f.client_size,color:f.color??null,resize_method:f.resize_method??null,codec:f.codec,jpeg_quality:f.jpeg_quality??null,chroma_subsampling:f.chroma_subsampling??null,sha256:f.sha256,posthoc_only_after_capture:f.posthoc_after_capture},null,2);
+  if(s){const found=samples.findIndex(p=>p.packet_index===s.packet_index);if(found>=0){index=found;playing=false;el("play").textContent="播放";draw();}}
+ }
+ function stopFrames(){active=false;clearTimeout(timer);el("vision-play").textContent="播放画面";}
+ function advanceFrame(){if(!active)return;if(fi+1>=frames.length){stopFrames();return;}const delay=Math.max(1,(frames[fi+1].capture_start_ns-frames[fi].capture_start_ns)/1e6);timer=setTimeout(()=>{fi++;showFrame();advanceFrame();},delay);}
+ el("vision-play").addEventListener("click",()=>{if(active){stopFrames();return;}if(fi+1>=frames.length)fi=0;active=true;el("vision-play").textContent="暂停画面";showFrame();advanceFrame();});
+ el("vision-cursor").addEventListener("input",()=>{stopFrames();fi=Number(el("vision-cursor").value);showFrame();});showFrame();
+}
 </script>
 </body></html>

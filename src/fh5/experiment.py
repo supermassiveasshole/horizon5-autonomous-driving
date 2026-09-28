@@ -16,6 +16,7 @@ from fh5.control import Control, ControlEnvironment, read_control, run_control
 from fh5.events import EventEnvironment, EventRun, read_event, run_event
 from fh5.report import write_report
 from fh5.routes import BuildRoute, build_route, load_route, locate_route
+from fh5.vision import VisionEnvironment, VisionRecord, read_vision, run_vision
 
 FORMAT_VERSION = 1
 DECODER_VERSION = "fh5-dash-324-v1"
@@ -144,13 +145,18 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 
 def run_experiment(
-    request: Record | Replay | Control | EventRun | BuildRoute,
+    request: Record | Replay | Control | EventRun | BuildRoute | VisionRecord,
     *,
     packets: Iterable[Packet] | None = None,
     environment: ControlEnvironment | None = None,
     event_environment: EventEnvironment | None = None,
+    vision_environment: VisionEnvironment | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, VisionRecord):
+        if vision_environment is None:
+            raise ValueError("VisionRecord requires a passive observation environment")
+        return run_vision(request, vision_environment)
     if isinstance(request, EventRun):
         if event_environment is None:
             raise ValueError("EventRun requires an external game environment")
@@ -414,6 +420,8 @@ def run_experiment(
         route = load_route(request.route_file)
         events.extend(locate_route(samples, route))
         summary["route"] = route
+    if (directory / "vision-session.json").exists():
+        summary["vision"] = read_vision(directory, report_path, samples, events)
     write_report(
         report_path,
         {"metadata": metadata, "samples": samples, "events": events, "summary": summary},

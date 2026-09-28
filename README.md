@@ -38,6 +38,17 @@ uv run --locked fh5 replay runs/manual-001 --report runs/manual-001/replay.html
 
 每次回放使用新的报告文件名。接收了 UDP 并不自动证明来源是 FH5；实机核验步骤、字段定义和限制见 [录制与回放说明](docs/recording.md)。
 
+## 彩色观测
+
+彩色画面与遥测可通过 `fh5 vision` 一起记录，不发送游戏输入：
+
+```powershell
+uv sync --locked --extra events
+uv run --locked fh5 vision --config configs/goliath-fixed-v2.json --output runs/vision-001 --camera chase-far --seconds 60
+```
+
+保持追尾远视角；F8 或输出目录的 `STOP` 文件提前结束。`report.html` 提供彩色回放、当时可用遥测及故障诊断。参数、数据格式和限制见 [彩色观测说明](docs/vision-recording.md)。
+
 ## 开发检查
 
 ```powershell

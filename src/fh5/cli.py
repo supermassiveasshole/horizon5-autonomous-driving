@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import shutil
 import socket
 import sys
 import time
@@ -16,6 +17,7 @@ from fh5.control import Control, validate_control_file
 from fh5.events import EventRun, validate_event_file
 from fh5.experiment import Packet, Record, Replay, run_experiment
 from fh5.routes import BuildRoute
+from fh5.vision import VisionRecord
 
 
 def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
@@ -65,9 +67,67 @@ def main(argv: Sequence[str] | None = None) -> int:
     event.add_argument("--output", type=Path, required=True)
     event.add_argument("--port", type=int, default=5300)
     event.add_argument("--live", action="store_true", help="Run with FH5 foreground; F8 stops")
+    vision = commands.add_parser(
+        "vision", help="Record RGB and telemetry without sending game input"
+    )
+    vision.add_argument("--config", type=Path, required=True)
+    vision.add_argument("--output", type=Path, required=True)
+    vision.add_argument(
+        "--camera",
+        choices=["chase-far"],
+        required=True,
+        help="Declare the camera mode you have selected in game",
+    )
+    vision.add_argument("--port", type=int, default=5300)
+    vision.add_argument("--seconds", type=float, default=60)
+    vision.add_argument("--period", type=float, default=0.1)
+    vision.add_argument("--max-age-ms", type=float, default=100)
+    vision.add_argument("--max-mib", type=int, default=256)
     args = parser.parse_args(argv)
     try:
-        if args.mode == "record":
+        if args.mode == "vision":
+            request = VisionRecord(
+                args.config,
+                args.output,
+                args.seconds,
+                args.period,
+                args.max_age_ms,
+                args.max_mib * 1024**2,
+            )
+            if not 0 <= args.port <= 65535:
+                raise ValueError("--port must be between 0 and 65535")
+            if args.output.exists():
+                raise FileExistsError(f"Output directory already exists: {args.output}")
+            args.output.parent.mkdir(parents=True, exist_ok=True)
+            if shutil.disk_usage(args.output.parent).free < request.max_bytes + 128 * 1024**2:
+                raise OSError("Insufficient free space for capture budget and report reserve")
+            from fh5.live import WindowsDesktop
+            from fh5.live_vision import LiveVisionEnvironment, WindowsColorFrames
+
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
+                receiver.bind(("127.0.0.1", args.port))
+                desktop = WindowsDesktop()
+                visual_environment = LiveVisionEnvironment(
+                    receiver,
+                    desktop,
+                    args.period,
+                    frame_factory=lambda: WindowsColorFrames(desktop),
+                )
+                print(
+                    json.dumps(
+                        {
+                            "status": "passive_visual_recording",
+                            "port": args.port,
+                            "output": str(args.output),
+                            "seconds": args.seconds,
+                            "stop_key": "F8",
+                            "stop_file": str(args.output / "STOP"),
+                        }
+                    ),
+                    flush=True,
+                )
+                result = run_experiment(request, vision_environment=visual_environment)
+        elif args.mode == "record":
             if not math.isfinite(args.seconds) or args.seconds <= 0:
                 raise ValueError("--seconds must be finite and greater than zero")
             if not 0 <= args.port <= 65535:
@@ -189,7 +249,23 @@ def main(argv: Sequence[str] | None = None) -> int:
     print(
         json.dumps(
             {
-                **{key: value for key, value in result.summary.items() if key != "route"},
+                **{
+                    key: value
+                    for key, value in result.summary.items()
+                    if key not in ("route", "vision")
+                },
+                **(
+                    {
+                        "vision": {
+                            k: v
+                            for k, v in result.summary["vision"].items()
+                            if k in ("frame_count", "usable_frames", "timing", "integrity_errors")
+                        },
+                        "vision_stop_reason": result.summary["vision"]["session"]["stop_reason"],
+                    }
+                    if "vision" in result.summary
+                    else {}
+                ),
                 **(
                     {
                         "route": {
@@ -212,6 +288,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if result.summary["capture_status"] == "source_error":
         return 2
+    if args.mode == "vision":
+        visual = result.summary["vision"]
+        if not visual["session"]["resources_released"] or visual["integrity_errors"]:
+            return 4
+        if visual["session"]["stop_reason"] not in (
+            "time_limit",
+            "user_stop",
+            "stop_file",
+            "interrupted",
+        ):
+            return 4
+        if not visual["frame_count"]:
+            return 3
     if args.mode == "control" and result.summary["control"]["stop_reason"] != "completed":
         return 4
     if args.mode == "event" and (
