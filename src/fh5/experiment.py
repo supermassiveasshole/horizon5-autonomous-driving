@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fh5.control import Control, ControlEnvironment, read_control, run_control
+from fh5.events import EventEnvironment, EventRun, read_event, run_event
 from fh5.report import write_report
 
 FORMAT_VERSION = 1
@@ -141,12 +142,17 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 
 def run_experiment(
-    request: Record | Replay | Control,
+    request: Record | Replay | Control | EventRun,
     *,
     packets: Iterable[Packet] | None = None,
     environment: ControlEnvironment | None = None,
+    event_environment: EventEnvironment | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, EventRun):
+        if event_environment is None:
+            raise ValueError("EventRun requires an external game environment")
+        return run_event(request, event_environment)
     if isinstance(request, Control):
         if environment is None:
             raise ValueError("Control requires an external game environment")
@@ -370,6 +376,13 @@ def run_experiment(
     }
     if metadata.get("control_source") == "calibration" or (directory / "control.json").exists():
         summary["control"] = read_control(directory, samples)
+    if any(
+        (directory / name).exists()
+        for name in ("event-run.json", "event-config.json", "event-journal.jsonl")
+    ):
+        event_run = read_event(directory)
+        summary["event_run"] = event_run["summary"]
+        events.extend(event_run["events"])
     write_report(
         report_path,
         {"metadata": metadata, "samples": samples, "events": events, "summary": summary},

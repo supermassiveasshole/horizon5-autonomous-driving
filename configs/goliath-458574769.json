@@ -1,0 +1,51 @@
+{
+  "schema_version": 1,
+  "control_source": "unknown",
+  "snapshot": {
+    "vehicle": {
+      "value": "2011 Lamborghini Sesto Elemento",
+      "status": "verified",
+      "evidence": "docs/validation/t03-event.md; live vehicle header"
+    },
+    "variant": {
+      "value": "Forza Edition; CarOrdinal 2941; X 999",
+      "status": "verified",
+      "evidence": "docs/validation/t02-control.md; blueprint starting grid"
+    },
+    "tune": {
+      "value": "Current BEST FOR SESTOFE by IMG BIRD (2021/11/14); unchanged",
+      "status": "user_reported"
+    },
+    "assists": {
+      "value": "Automatic shifting; simulation steering; ABS/TCS/STM off; full driving line; cosmetic damage; rewind enabled; launch control off",
+      "status": "verified",
+      "evidence": "docs/validation/t03-event.md; official-assists.jpg"
+    },
+    "event": {
+      "value": "Goliath blueprint 458574769; official route and checkpoints required; 1 lap; 54.6 km; Drivatars off; traffic off",
+      "status": "verified",
+      "evidence": "docs/validation/t03-event.md; blueprint settings/card and single-car grid"
+    },
+    "environment": {
+      "value": "Season=current (actual season unresolved); custom weather/time; clear; early morning; dynamic time progression",
+      "status": "user_reported"
+    }
+  },
+  "event_profile": {
+    "version": 1,
+    "blueprint_share_code": "458574769",
+    "expected_car_ordinal": 2941,
+    "expected_pi": 999,
+    "drivatars": 0,
+    "traffic": false,
+    "laps": 1,
+    "season": "current",
+    "weather": "clear",
+    "time_of_day": "early_morning",
+    "time_progression": "dynamic",
+    "rewind_enabled": true,
+    "rewind_allowed_in_valid_evaluation": false,
+    "conditions_verified": false,
+    "unattended_verified": false
+  }
+}

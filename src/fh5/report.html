@@ -41,6 +41,7 @@ td{overflow-wrap:anywhere}summary{cursor:pointer;font-weight:600}code{font-size:
 <section class="panel"><h2>车速与接收时间</h2><canvas id="speed" aria-label="车速随接收时间的变化"></canvas><small>单位 km/h；时间来自接收端单调时钟。</small></section>
 </div>
 <section class="panel" id="control-panel" hidden><h2>控制命令与游戏响应</h2><p id="control-status"></p><p class="muted" id="control-timing"></p><div class="table-wrap"><table><thead><tr><th>相对时间</th><th>归属 / 状态</th><th>原始目标</th><th>发送值</th></tr></thead><tbody id="commands"></tbody></table></div><details><summary>响应观察与独立停止记录</summary><p class="muted">观察延迟为命令后首次遥测字段变化；不证明因果，死区和方向仍需实机核验。发送成功不等于游戏采用输入。</p><div class="table-wrap"><table><thead><tr><th>字段 / 原因</th><th>命令值</th><th>观察值</th><th>延迟 / 结果</th></tr></thead><tbody id="responses"></tbody></table></div></details></section>
+<section class="panel" id="lifecycle-panel" hidden><h2>赛事尝试与重开</h2><p id="lifecycle-status"></p><p class="muted">观察到完成页面不等于有效完赛；仍需检查路线、倒带、人工接管和比较条件。实机自动重开尚未验收。</p><div class="table-wrap"><table><thead><tr><th>尝试标识</th><th>结果</th><th>原因</th></tr></thead><tbody id="attempts"></tbody></table></div></section>
 <section class="panel"><h2 id="event-title">异常与状态事件</h2><div class="table-wrap"><table><thead><tr><th>数据包</th><th>类型</th><th>说明</th></tr></thead><tbody id="events"></tbody></table></div></section>
 <section class="panel"><details open><summary>实验配置快照</summary><div class="table-wrap"><table><thead><tr><th>项目</th><th>记录值</th><th>核验状态</th><th>依据</th></tr></thead><tbody id="snapshot"></tbody></table></div></details></section>
 <footer id="versions"></footer>
@@ -70,8 +71,13 @@ if(summary.control){
  for(const e of c.adapter_events??[])row("responses",[e.reason,"归零","—",e.status]);
  for(const error of c.artifact_errors)row("responses",["日志不完整","—","—",error]);
 }
+if(summary.event_run){
+ const e=summary.event_run;el("lifecycle-panel").hidden=false;
+ el("lifecycle-status").textContent=`结束原因：${e.stop_reason} · 证据：${e.evidence_status??"incomplete"} · 归零调用成功：${e.release_sent?"是":"未确认"} · 无人值守：未验证`;
+ for(const a of e.attempts??[])row("attempts",[a.attempt_id,a.outcome,a.reason]);
+}
 el("event-title").textContent=`异常与状态事件 · ${data.events.length}`;
-for(const event of data.events)row("events",[event.packet_index??"—",kinds[event.kind]??event.kind,event.detail]);
+for(const event of data.events)row("events",[event.packet_index??"—",kinds[event.kind]??event.kind,event.detail??JSON.stringify(event)]);
 if(!data.events.length)row("events",["—","未检测到异常","这不代表所有异常均可被识别。"]);
 const labels={vehicle:"车辆",variant:"具体版本",tune:"调校",assists:"辅助设置",event:"赛事",environment:"环境"};
 const states={unverified:"未核验",user_reported:"用户提供",verified:"有依据的记录"};
