@@ -1,6 +1,6 @@
 # 视觉必选的多模态 BC→SAC 规格增量
 
-版本：1.1（2026-09-29）。原 v1.0 的 3 项新增、9 项修订已发布；本轮视觉导航增量已落文档，后续任务拆分待审阅。本文补充 [PRD v1.2](PRD.md) 与[驾驶学习主方案](driving-learning-design.md)，约束后续实现；不表示已有驾驶模型、训练或实机验收结果。范围来源见[决定记录](scope-decisions.md)，取舍见 [ADR 0004](adr/0004-multimodal-learning-before-geometry.md)。
+版本：1.1（2026-09-29）。原 v1.0 的 3 项新增、9 项修订已发布；本轮视觉导航增量与任务拆分已获批准并发布。本文补充 [PRD v1.2](PRD.md) 与[驾驶学习主方案](driving-learning-design.md)，约束后续实现；不表示已有驾驶模型、训练或实机验收结果。范围来源见[决定记录](scope-decisions.md)，取舍见 [ADR 0004](adr/0004-multimodal-learning-before-geometry.md)。
 
 ## 已确认需求与本批实施方案
 
