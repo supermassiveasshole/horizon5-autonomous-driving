@@ -234,3 +234,18 @@ RL 数据还需记录跳过决策后的实际 action hold 时长 `dt`、监督�
 3. **按证据优化 GPU 与训练。** 当映射/CPU resize 仍占主导时做 D3D11→CUDA；输入分布和时间契约已变化时重建训练数据并验证新候选，再进入有界实机驾驶验收。
 
 本调研不修改 [ADR 0004](adr/0004-multimodal-learning-before-geometry.md) / [ADR 0005](adr/0005-visual-navigation-optional-reference.md) 的多模态学习方向。后续实现应更新图像观测与模型契约；当前规格中的“缺图即终止”“必须完整存档”等约束若与用户新要求冲突，应明确版本化替换，不能一边宣称容错一边继续由 writer 满队列终止驾驶。
+
+## 已发布的实施任务
+
+2026-09-30，用户批准 4 项新增、5 项修订；任务正文与 GitHub 原生阻塞关系已核对，合并依赖图无环。各票依据本方案固定提交 `a9214d0045fbb797774e4f776c6a5571049be9ae`；发布任务不表示已完成管线、模型或实机验收。
+
+| 任务 | 可见交付 | 直接前置 |
+| --- | --- | --- |
+| [T31 / #33：数值图像直达策略并精确回放](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/33) | 真实记录的数值输入、冻结预测及精确回放 | #28、#31（均已完成） |
+| [T32 / #34：DXGI 实时数值观测](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/34) | 独立采集/预处理、源时间和真实负载下的观测报告 | #33 |
+| [T33 / #35：显式帧间 Δt 的 BC 候选](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/35) | 时间特征进入训练/预测，并诊断静止起步行为 | #33、#27（#27 已完成） |
+| [T34 / #36：容错实时决策与动作到期释放](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/36) | 缺帧跳过、常驻推理、旁路降级与只读影子运行 | #34、#35 |
+
+已同步修订 [#9 实机驾驶](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/9)、[#10 冻结评估](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/10)、[#11 SAC](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/11)、[#13 续训](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/13) 和 [#16 资源预算](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/16) 的像素、时间及记录完整性要求。仅 #9 增加 #36 直接前置，其余沿既有依赖承接。父规格票 #1/#30、已完成票及历史验收未改。
+
+实施入口为 #33；之后 #34/#35 可并行，汇合 #36 后回到 #9 的真实双轴驾驶。管线时效与车辆不起步分别诊断；CUDA 互操作、NVENC 或必须证明 Δt 带来收益，均不是首次驾驶/SAC 的额外总前置。
