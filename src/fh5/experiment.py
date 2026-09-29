@@ -31,7 +31,14 @@ from fh5.perception import (
     run_perception,
 )
 from fh5.report import write_report
-from fh5.routes import BuildRoute, build_route, load_route, locate_route
+from fh5.routes import (
+    BuildRoute,
+    RouteCheck,
+    build_route,
+    check_route_recording,
+    load_route,
+    locate_route,
+)
 from fh5.vision import VisionEnvironment, VisionRecord, read_vision, run_vision
 
 FORMAT_VERSION = 1
@@ -183,6 +190,7 @@ def run_experiment(
     | Control
     | EventRun
     | BuildRoute
+    | RouteCheck
     | VisionRecord
     | ObservationReplay
     | Perception
@@ -450,11 +458,18 @@ def run_experiment(
         event_run = read_event(directory)
         summary["event_run"] = event_run["summary"]
         events.extend(event_run["events"])
-    if isinstance(request, BuildRoute):
-        route = build_route(request, samples)
+    if isinstance(request, (BuildRoute, RouteCheck)):
+        route = (
+            build_route(request, samples)
+            if isinstance(request, BuildRoute)
+            else load_route(request.route_file)
+        )
+        recording_packet_count = packet_count
         samples = [
             s for s in samples if request.first_packet <= s["packet_index"] <= request.last_packet
         ]
+        if not samples or request.last_packet >= packet_count:
+            raise ValueError("Local analysis packet range is outside the recording")
         events = [
             e
             for e in events
@@ -462,11 +477,12 @@ def run_experiment(
             and request.first_packet <= e["packet_index"] <= request.last_packet
         ]
         metadata["analysis_packet_range"] = [request.first_packet, request.last_packet]
+        selected_count = request.last_packet - request.first_packet + 1
         summary.update(
-            packet_count=len(samples),
+            packet_count=selected_count,
             valid_packets=len(samples),
             active_packets=sum(s["is_race_on"] for s in samples),
-            invalid_packets=0,
+            invalid_packets=selected_count - len(samples),
             segments=len({s["segment"] for s in samples}),
             receive_span_seconds=(
                 samples[-1]["received_monotonic_ns"] - samples[0]["received_monotonic_ns"]
@@ -475,6 +491,10 @@ def run_experiment(
         )
         events.extend(locate_route(samples, route))
         summary["route"] = route
+        if isinstance(request, RouteCheck):
+            summary["route_check"] = check_route_recording(
+                request, samples, route, metadata, recording_packet_count
+            )
     elif (
         isinstance(request, (Replay, ObservationReplay))
         and request.route_file is not None

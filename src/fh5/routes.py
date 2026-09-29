@@ -28,6 +28,77 @@ class BuildRoute:
         return self.output_dir / "report.html"
 
 
+@dataclass(frozen=True)
+class RouteCheck:
+    """Audit a declared local window against an independently frozen route."""
+
+    recording_dir: Path
+    report_path: Path
+    route_file: Path
+    first_packet: int
+    last_packet: int
+    max_speed_kmh: float = 20.0
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.first_packet) is not int
+            or type(self.last_packet) is not int
+            or not 0 <= self.first_packet < self.last_packet
+        ):
+            raise ValueError("Invalid local check packet range")
+        if not math.isfinite(self.max_speed_kmh) or not 0 < self.max_speed_kmh <= 40:
+            raise ValueError("Local check speed limit must be above zero and at most 40 km/h")
+
+
+def check_route_recording(
+    request: RouteCheck,
+    samples: list[dict[str, Any]],
+    route: dict[str, Any],
+    metadata: dict[str, Any],
+    recording_packet_count: int,
+) -> dict[str, Any]:
+    reasons: list[str] = []
+    recording_sha256 = hashlib.sha256(
+        (request.recording_dir / "packets.jsonl").read_bytes()
+    ).hexdigest()
+    speed = max(s["speed_kmh"] for s in samples)
+    progress = max(s["route"]["confirmed_progress_m"] for s in samples)
+    checks = {
+        "reference_source_reused": recording_sha256 != route["source"]["packets_sha256"],
+        "incomplete_recording": metadata["capture_status"] == "completed",
+        "missing_packets": len(samples) == request.last_packet - request.first_packet + 1,
+        "multiple_segments": len({s["segment"] for s in samples}) == 1,
+        "vehicle_changed": len({(s["car_ordinal"], s["car_performance_index"]) for s in samples})
+        == 1,
+        "route_not_reviewed": route["low_speed_ready"],
+        "speed_limit_exceeded": speed <= request.max_speed_kmh,
+        "unconfirmed_path": all(s["route"]["status"] == "matched" for s in samples),
+        "route_start_missing": samples[0]["route"]["reference_s_m"] <= 0.25,
+        "route_end_missing": progress >= route["length_m"] - 1e-6,
+    }
+    reasons.extend(reason for reason, passed in checks.items() if not passed)
+    return {
+        "version": 1,
+        "passed": not reasons,
+        "reasons": reasons,
+        "packet_range": [request.first_packet, request.last_packet],
+        "recording_packet_count": recording_packet_count,
+        "selected_packet_count": request.last_packet - request.first_packet + 1,
+        "selected_valid_packets": len(samples),
+        "source_kind": metadata["source_kind"],
+        "recording_sha256": recording_sha256,
+        "session_sha256": hashlib.sha256(
+            (request.recording_dir / "session.json").read_bytes()
+        ).hexdigest(),
+        "route_sha256": hashlib.sha256(request.route_file.read_bytes()).hexdigest(),
+        "speed_limit_kmh": request.max_speed_kmh,
+        "max_speed_kmh": speed,
+        "confirmed_progress_m": progress,
+        "formal_validity": "not_evaluated",
+        "meaning": "Local telemetry and geometry check only; review images and conditions separately",
+    }
+
+
 def _write(path: Path, value: object) -> None:
     path.write_text(
         json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"

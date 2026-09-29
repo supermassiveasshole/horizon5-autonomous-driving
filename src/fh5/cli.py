@@ -21,7 +21,7 @@ from fh5.events import EventRun, validate_event_file
 from fh5.experiment import Packet, Record, Replay, run_experiment
 from fh5.observations import ObservationReplay
 from fh5.perception import Perception, PerceptionReplay
-from fh5.routes import BuildRoute
+from fh5.routes import BuildRoute, RouteCheck
 from fh5.vision import VisionRecord
 
 
@@ -66,6 +66,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     route.add_argument("--last-packet", type=int, required=True)
     route.add_argument("--spacing", type=float, default=2.0)
     route.add_argument("--annotations", type=Path)
+    route_check = commands.add_parser(
+        "route-check", help="Check a declared short recording against a frozen route; no control"
+    )
+    route_check.add_argument("recording", type=Path)
+    route_check.add_argument("--route", type=Path, required=True)
+    route_check.add_argument("--report", type=Path, required=True)
+    route_check.add_argument("--first-packet", type=int, required=True)
+    route_check.add_argument("--last-packet", type=int, required=True)
+    route_check.add_argument("--max-speed-kmh", type=float, default=20.0)
     control = commands.add_parser(
         "control", help="Validate a bounded calibration; --live sends game input"
     )
@@ -149,6 +158,17 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = run_experiment(BCReplay(args.model, args.dataset, args.report, args.device))
         elif args.mode == "demonstration-replay":
             result = run_experiment(DemonstrationReplay(args.recording, args.report))
+        elif args.mode == "route-check":
+            result = run_experiment(
+                RouteCheck(
+                    args.recording,
+                    args.report,
+                    args.route,
+                    args.first_packet,
+                    args.last_packet,
+                    args.max_speed_kmh,
+                )
+            )
         elif args.mode == "demonstration-dataset":
             result = run_experiment(DemonstrationDataset(args.config, args.output))
         elif args.mode == "observe":
@@ -423,6 +443,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     if "route" in result.summary
                     else {}
                 ),
+                **(
+                    {"route_check": result.summary["route_check"]}
+                    if "route_check" in result.summary
+                    else {}
+                ),
                 "report": str(result.report_path),
                 "game_validation": result.metadata["game_validation"],
             }
@@ -432,6 +457,8 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if "perception" in result.summary:
         return 4 if result.summary["perception"]["evaluation"]["invalid_frames"] else 0
+    if "route_check" in result.summary:
+        return 0 if result.summary["route_check"]["passed"] else 4
     if args.mode in ("vision", "demonstrate"):
         visual = result.summary["vision"]
         if not visual["session"]["resources_released"] or visual["integrity_errors"]:

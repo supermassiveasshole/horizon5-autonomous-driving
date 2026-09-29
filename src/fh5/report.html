@@ -53,7 +53,7 @@ td{overflow-wrap:anywhere}summary{cursor:pointer;font-weight:600}code{font-size:
 <img id="vision-image" alt="当前录制的 FH5 彩色画面" style="display:block;width:100%;margin-top:16px;border-radius:8px" hidden>
 <p id="vision-readout"></p><details><summary>采集时序、事后配对与完整性</summary><pre id="vision-detail" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre><pre id="vision-timing" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details>
 </section>
-<section class="panel" id="route-panel" hidden><h2>局部路线与核验覆盖</h2><p id="route-quality"></p><p class="muted">橙色虚线：参考轨迹，不代表道路边界；绿色区域：已核实走廊；紫色线：检查点门。确认进度仅属于当前前向片段，不是全程成绩。</p><p id="route-position"></p><div class="table-wrap"><table><thead><tr><th>检查点顺序</th><th>距路线起点</th><th>核验状态</th></tr></thead><tbody id="route-gates"></tbody></table></div></section>
+<section class="panel" id="route-panel" hidden><h2>局部路线与核验覆盖</h2><p id="route-quality"></p><p id="route-check"></p><p class="muted">橙色虚线：参考轨迹，不代表道路边界；绿色区域：已核实走廊；紫色线：检查点门。确认进度仅属于当前前向片段，不是全程成绩。</p><p id="route-position"></p><div class="table-wrap"><table><thead><tr><th>检查点顺序</th><th>距路线起点</th><th>核验状态</th></tr></thead><tbody id="route-gates"></tbody></table></div></section>
 <section class="panel" aria-label="回放控制">
 <div class="controls">
 <button id="play" type="button">播放</button>
@@ -91,7 +91,8 @@ function row(target,values){const tr=document.createElement("tr");for(const valu
 const route=summary.route;
 if(route){
  el("route-panel").hidden=false;
- el("route-quality").textContent=`参考轨迹 ${fmt(route.length_m,1)} m · 核实走廊覆盖 ${fmt(route.verified_corridor_length_m,1)} m · ${route.low_speed_ready?"道路数据具备低速试验前提，控制仍需单独核验":"道路数据尚不具备低速闭环前提"}`;
+ el("route-quality").textContent=`参考轨迹 ${fmt(route.length_m,1)} m · 核实走廊覆盖 ${fmt(route.verified_corridor_length_m,1)} m · ${route.low_speed_ready?"几何标注齐备，低速记录与控制仍需单独核验":"道路标注或覆盖尚未齐备"}`;
+ if(summary.route_check){const q=summary.route_check;el("route-check").textContent=`局部数据检查：${q.passed?"通过（非正式成绩/控制授权）":"未通过"} · 峰值 ${fmt(q.max_speed_kmh,2)} / 门槛 ${fmt(q.speed_limit_kmh,1)} km/h · 分析包 ${q.packet_range.join("–")}（${q.selected_packet_count} / 完整记录 ${q.recording_packet_count} 包） · 来源 ${q.source_kind} · ${q.reasons.join("、")||"仍需独立画面与条件核验"}`;}
  for(const [i,g] of route.checkpoints.entries())row("route-gates",[`${i+1}. ${g.id}`,`${fmt(g.s_m,1)} m`,g.status==="verified"?"有依据的标注":"未核实"]);
  if(!route.checkpoints.length)row("route-gates",["—","—",route.checkpoints_review.status==="verified"?"已核实本段无检查点":"检查点尚未核实"]);
 }
