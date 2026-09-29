@@ -37,6 +37,15 @@ td{overflow-wrap:anywhere}summary{cursor:pointer;font-weight:600}code{font-size:
 <details><summary>当前输入、缺失掩码与时间</summary><pre id="observations-detail" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details>
 <details><summary>观测版本、来源与覆盖</summary><pre id="observations-source" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details>
 </section>
+<section class="panel" id="demonstration-dataset-panel" hidden><h2>示范数据集</h2><p id="demonstration-dataset-status"></p><div id="demonstration-dataset-links"></div></section>
+<section class="panel" id="demonstration-panel" hidden>
+<h2>实体手柄输入与游戏响应</h2><p id="demonstration-status"></p>
+<p class="muted">原始设备读数、双轴映射与游戏遥测分别展示。映射成立不代表游戏必然采用；无效片段不作为正确 BC 标签。上方观测选择会联动此处，未来监督仅用于标签。</p>
+<input id="demonstration-cursor" type="range" min="0" max="0" value="0" aria-label="人工输入位置">
+<p id="demonstration-readout"></p><pre id="demonstration-detail" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre>
+<canvas id="demonstration-future" width="480" height="200" aria-label="未来局部航点监督，仅训练标签"></canvas>
+<details><summary>未来监督与示范质量（不进入 actor）</summary><pre id="demonstration-target" style="white-space:pre-wrap"></pre></details>
+</section>
 <section class="panel" id="vision-panel" hidden>
 <h2>彩色画面与当时可用的遥测</h2><p id="vision-status"></p>
 <p class="muted">追尾远视角会随速度改变距离。画面与遥测按接收端时钟关联，不代表同一物理帧；中断处不插值。操作上方观测面板时，此处跟随最新历史槽；缺失时留空。</p>
@@ -170,6 +179,26 @@ if(summary.vision){
  el("vision-play").addEventListener("click",()=>{if(active){stopFrames();return;}if(fi+1>=frames.length)fi=0;active=true;el("vision-play").textContent="暂停画面";showFrame();advanceFrame();});
  el("vision-cursor").addEventListener("input",()=>{stopFrames();fi=Number(el("vision-cursor").value);showFrame();});showFrame();
 }
+if(summary.demonstration_dataset){
+ const ds=summary.demonstration_dataset;el("demonstration-dataset-panel").hidden=false;
+ el("demonstration-dataset-status").textContent=`独立录制 ${ds.sources.length} 段 · 可用训练 ${ds.eligible_by_split.train??0} / 留出 ${ds.eligible_by_split.holdout??0} 个观测 · 两种参考条件 · 未来位置仅作监督标签，未训练策略`;
+ ds.sources.forEach((s,i)=>{const p=document.createElement("p"),a=document.createElement("a");a.href=`run-${i}-targets.html`;a.textContent=`录制 ${i+1} (${s.split})：画面、真实输入与监督目标`;p.append(a);el("demonstration-dataset-links").append(p);});
+}
+if(summary.demonstration){
+ const demo=summary.demonstration,inputs=demo.inputs;el("demonstration-panel").hidden=false;
+ el("demonstration-status").textContent=`原始输入 ${inputs.length} 次 · 实体设备映射：${demo.calibrated?"有标定依据":"待标定"} · 完整性错误 ${demo.integrity_errors.length} 项 · 未发送控制命令`;
+ el("demonstration-cursor").max=Math.max(0,inputs.length-1);el("demonstration-cursor").disabled=!inputs.length;
+ function showInput(i){if(i<0||!inputs.length){el("demonstration-readout").textContent="此时尚无输入记录";el("demonstration-detail").textContent="";return;}
+  const r=inputs[i],before=samples.findLast(s=>s.received_monotonic_ns<=r.poll_ns),after=samples.find(s=>s.received_monotonic_ns>=r.available_ns&&s.received_monotonic_ns-r.available_ns<=100e6);
+  el("demonstration-cursor").value=i;el("demonstration-readout").textContent=`输入 ${i+1}/${inputs.length} · ${r.mapping_valid?"可映射":"排除："+r.reasons.join("、")} · 转向/纵向 ${r.mapped? r.mapped.map(v=>fmt(v,3)).join(" / "):"未知"}`;
+  el("demonstration-detail").textContent=JSON.stringify({input:r,telemetry_before:before?{packet_index:before.packet_index,controls:before.telemetry_controls}:null,telemetry_after:after?{packet_index:after.packet_index,controls:after.telemetry_controls,receipt_delay_ms:(after.received_monotonic_ns-r.available_ns)/1e6}:null},null,2);
+ }
+ el("demonstration-cursor").addEventListener("input",()=>showInput(Number(el("demonstration-cursor").value)));
+ document.addEventListener("observation-state-selected",e=>{showInput(inputs.findLastIndex(r=>r.available_ns<=e.detail.decision_ns));const s=e.detail.supervision;el("demonstration-target").textContent=JSON.stringify(s??{status:"尚未导出监督标签"},null,2);
+  const c=el("demonstration-future"),ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height);ctx.fillStyle="#dbe7ef";ctx.fillText("未来局部位置监督 · 右/前（米） · 缺失目标不外推",10,15);
+  if(s){const points=s.future_waypoints_m.filter((p,i)=>p&&s.future_mask[i]);const extent=Math.max(10,...points.flatMap(p=>p.map(Math.abs)));ctx.strokeStyle="#75e4b7";ctx.beginPath();ctx.moveTo(240,180);for(const p of points)ctx.lineTo(240+p[0]*150/extent,180-p[1]*150/extent);ctx.stroke();ctx.fillText(`范围 ±${fmt(extent,1)} m · ${s.action_mask?"动作可用":"动作排除"}`,10,195);}
+ });showInput(0);
+}
 if(summary.observations){
  const o=summary.observations,decisions=o.decisions;let oi=0,active=false,timer=null;
  el("observations-panel").hidden=false;
@@ -192,6 +221,7 @@ if(summary.observations){
   ctx.fillStyle="#d45e30";ctx.beginPath();ctx.arc(360,140,5,0,Math.PI*2);ctx.fill();ctx.strokeStyle="#177d72";ctx.beginPath();ctx.moveTo(360,140);pts.forEach(p=>ctx.lineTo(360+p[0]*scale,140-p[1]*scale));ctx.stroke();pts.forEach(p=>{ctx.beginPath();ctx.arc(360+p[0]*scale,140-p[1]*scale,4,0,Math.PI*2);ctx.stroke();ctx.fillText(`${fmt(p[0],1)}, ${fmt(p[1],1)}`,368+p[0]*scale,140-p[1]*scale);});
   el("observations-detail").textContent=JSON.stringify(d,null,2);
   document.dispatchEvent(new CustomEvent("observation-selected",{detail:d.images.at(-1)}));
+  document.dispatchEvent(new CustomEvent("observation-state-selected",{detail:d}));
   if(s){const found=samples.findIndex(p=>p.packet_index===s.packet_index);if(found>=0){index=found;playing=false;el("play").textContent="播放";draw();}}
  }
  function stopObservations(){active=false;clearTimeout(timer);el("observations-play").textContent="播放观测";}

@@ -14,6 +14,8 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fh5.control import Control, validate_control_file
+from fh5.demonstration_dataset import DemonstrationDataset
+from fh5.demonstrations import DemonstrationRecord, DemonstrationReplay
 from fh5.events import EventRun, validate_event_file
 from fh5.experiment import Packet, Record, Replay, run_experiment
 from fh5.observations import ObservationReplay
@@ -72,6 +74,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     vision = commands.add_parser(
         "vision", help="Record RGB and telemetry without sending game input"
     )
+    commands.add_parser("input-devices", help="List connected XInput logical slots, read-only")
+    demo_replay = commands.add_parser(
+        "demonstration-replay", help="Verify and inspect raw human inputs"
+    )
+    demo_replay.add_argument("recording", type=Path)
+    demo_replay.add_argument("--report", type=Path, required=True)
+    dataset = commands.add_parser(
+        "demonstration-dataset", help="Export reviewed train and holdout demonstrations"
+    )
+    dataset.add_argument("--config", type=Path, required=True)
+    dataset.add_argument("--output", type=Path, required=True)
     vision.add_argument("--config", type=Path, required=True)
     vision.add_argument("--output", type=Path, required=True)
     vision.add_argument(
@@ -87,6 +100,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     vision.add_argument("--max-mib", type=int, default=256)
     vision.add_argument("--observations", type=Path, help="Record passive observation check times")
     vision.add_argument("--route", type=Path, help="Independent frozen navigation reference")
+    demo = commands.add_parser(
+        "demonstrate",
+        parents=[vision],
+        add_help=False,
+        help="Record physical XInput, RGB and telemetry; no commands sent",
+    )
+    demo.add_argument("--input-profile", type=Path, required=True)
     observe = commands.add_parser("observe", help="Replay causal RGB history, state and navigation")
     observe.add_argument("recording", type=Path)
     observe.add_argument("--config", type=Path, required=True)
@@ -109,7 +129,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     perception_replay.add_argument("--labels", type=Path)
     args = parser.parse_args(argv)
     try:
-        if args.mode == "observe":
+        if args.mode == "input-devices":
+            from fh5.live_demonstration import input_devices
+
+            print(json.dumps({"devices": input_devices(), "commands_sent": False}))
+            return 0
+        if args.mode == "demonstration-replay":
+            result = run_experiment(DemonstrationReplay(args.recording, args.report))
+        elif args.mode == "demonstration-dataset":
+            result = run_experiment(DemonstrationDataset(args.config, args.output))
+        elif args.mode == "observe":
             result = run_experiment(
                 ObservationReplay(
                     args.recording, args.report, args.route, args.config, args.evaluation_route
@@ -124,7 +153,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.mode == "perception-replay":
             result = run_experiment(PerceptionReplay(args.result, args.report, args.labels))
-        elif args.mode == "vision":
+        elif args.mode in ("vision", "demonstrate"):
             request = VisionRecord(
                 args.config,
                 args.output,
@@ -167,7 +196,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     flush=True,
                 )
-                result = run_experiment(request, vision_environment=visual_environment)
+                try:
+                    if args.mode == "demonstrate":
+                        from fh5.demonstrations import _profile
+                        from fh5.live_demonstration import HumanInputEnvironment, XInputReader
+
+                        profile = _profile(args.input_profile.read_bytes())
+                        reader = XInputReader(profile["device"]["index"], desktop)
+                        human = HumanInputEnvironment(
+                            visual_environment, reader, args.input_profile
+                        )
+                        result = run_experiment(
+                            DemonstrationRecord(request, args.input_profile),
+                            vision_environment=human,
+                        )
+                    else:
+                        result = run_experiment(request, vision_environment=visual_environment)
+                finally:
+                    visual_environment.close()
         elif args.mode == "record":
             if not math.isfinite(args.seconds) or args.seconds <= 0:
                 raise ValueError("--seconds must be finite and greater than zero")
@@ -293,7 +339,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **{
                     key: value
                     for key, value in result.summary.items()
-                    if key not in ("route", "vision", "perception", "observations")
+                    if key
+                    not in (
+                        "route",
+                        "vision",
+                        "perception",
+                        "observations",
+                        "demonstration",
+                        "demonstration_dataset",
+                    )
                 },
                 **(
                     {
@@ -352,7 +406,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 2
     if "perception" in result.summary:
         return 4 if result.summary["perception"]["evaluation"]["invalid_frames"] else 0
-    if args.mode == "vision":
+    if args.mode in ("vision", "demonstrate"):
         visual = result.summary["vision"]
         if not visual["session"]["resources_released"] or visual["integrity_errors"]:
             return 4

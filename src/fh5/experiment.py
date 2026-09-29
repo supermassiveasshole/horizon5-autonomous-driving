@@ -13,6 +13,13 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fh5.control import Control, ControlEnvironment, read_control, run_control
+from fh5.demonstration_dataset import DemonstrationDataset, export_demonstrations
+from fh5.demonstrations import (
+    DemonstrationRecord,
+    DemonstrationReplay,
+    record_demonstration,
+    replay_demonstration,
+)
 from fh5.events import EventEnvironment, EventRun, read_event, run_event
 from fh5.observations import ObservationReplay, build_observations, read_settings
 from fh5.perception import (
@@ -165,7 +172,10 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 
 def run_experiment(
-    request: Record
+    request: DemonstrationRecord
+    | DemonstrationDataset
+    | DemonstrationReplay
+    | Record
     | Replay
     | Control
     | EventRun
@@ -182,6 +192,14 @@ def run_experiment(
     road_model: RoadModel | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, DemonstrationDataset):
+        return export_demonstrations(request)
+    if isinstance(request, DemonstrationReplay):
+        return replay_demonstration(request)
+    if isinstance(request, DemonstrationRecord):
+        if vision_environment is None:
+            raise ValueError("DemonstrationRecord requires a passive input environment")
+        return record_demonstration(request, vision_environment)
     if isinstance(request, PerceptionReplay):
         return replay_perception(request)
     if isinstance(request, Perception):

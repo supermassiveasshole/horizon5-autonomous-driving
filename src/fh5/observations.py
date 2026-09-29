@@ -295,6 +295,8 @@ def build_observations(
             "telemetry_overflow",
             "rewind",
             "restart",
+            "input_boundary",
+            "intent_changed",
         )
         and type(e.get("observed_ns")) is int
     ]
@@ -510,6 +512,7 @@ def build_observations(
     }
     if config["version"] == 2:
         result["reference"] = reference
+        result["history_boundaries_ns"] = boundaries
         result["navigation"] = config["navigation"]
         result["policy_support"] = "not_evaluated"
         result["task_assessment"] = _task_evidence(

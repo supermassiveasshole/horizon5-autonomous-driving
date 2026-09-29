@@ -67,6 +67,10 @@ uv run --locked fh5 observe runs/vision-001 --config configs/observations-naviga
 
 这证明无参考观测可构造，还不是无参考驾驶能力；格式、动作历史导入及独立任务证据见 [视觉导航观测](docs/navigation-observations.md)。
 
+## 人工同步示范
+
+T26 / #27 从实体 XInput 手柄读取原始动作，与 RGB 和遥测同步记录；双踏板、手刹、争用及失焦等片段保留并排除。`fh5 input-devices` 查看设备，`fh5 demonstrate` 被动采集，`fh5 demonstration-dataset` 按独立回合导出无参考/参考辅助视图及未来轨迹监督。校准、质量审阅和命令见[同步示范说明](docs/demonstrations.md)。这一切片不训练或执行驾驶策略。
+
 ## 开发检查
 
 ```powershell
