@@ -8,7 +8,7 @@ T03 开发中：[赛事生命周期](docs/events.md) 已接入 Windows 菜单适
 
 当前实验条件更新为蓝图 `105 657 219`：干燥季节、晴朗、固定早晨，配置为 `configs/goliath-fixed-v2.json`。已完成一次赛途中暂停后自动重开，从准备到起点核验约 12.91 秒；旧蓝图记录保留原条件。持续无人值守验收仍未完成。
 
-T04 开发中：[局部路线工具](docs/routes.md) 可从连续记录导出参考轨迹，独立保存走廊与检查点依据，并回放连续定位与已确认进度。已从第二次人工完赛记录提取起跑后的约 801 米；边界和检查点尚未核验，当前不据此启动自动驾驶，见 [T04 数据记录](docs/validation/t04-route.md)。下一步按已批准的[多模态学习规格](docs/multimodal-learning-spec.md)推进：含道路/导航的真实截图历史、本车状态、因果动作历史及可选历史航点进入 BC→SAC；先做可信同步示范和离线 BC，训练与评估实际覆盖无参考条件，见[视觉导航增量](docs/visual-navigation-spec.md)。当前 #26 的因果观测已实现参考必选回放，扩展契约待实现。精确分割/米制道路保留为可选研究，实机控制和成绩有效性另行验收。
+T04 开发中：[局部路线工具](docs/routes.md) 可从连续记录导出参考轨迹，独立保存走廊与检查点依据，并回放连续定位与已确认进度。已从第二次人工完赛记录提取起跑后的约 801 米；边界和检查点尚未核验，当前不据此启动自动驾驶，见 [T04 数据记录](docs/validation/t04-route.md)。下一步按已批准的[多模态学习规格](docs/multimodal-learning-spec.md)推进：含道路/导航的真实截图历史、本车状态、因果动作历史及可选历史航点进入 BC→SAC；先做可信同步示范和离线 BC，训练与评估实际覆盖无参考条件，见[视觉导航增量](docs/visual-navigation-spec.md)。当前 #26 的 v1 保留必选参考回放，#31 已实现可选/禁用参考的 v2 观测，尚未训练驾驶模型。精确分割/米制道路保留为可选研究，实机控制和成绩有效性另行验收。
 
 ## 安装与运行
 
@@ -58,6 +58,14 @@ uv run --locked fh5 observe runs/vision-001 --config configs/observations.exampl
 ```
 
 报告展示图像历史、年龄/缺失掩码、本车状态和局部航点；JSON 保留可重读的原图依赖。新采集可记录真实检查时刻，旧采集明确标记为重建时钟。此阶段不控制车辆，见 [因果观测说明](docs/observations.md)。
+
+T29 / #31 新增观测 v2，可省略历史参考，支持 `required/optional/disabled` 三种模式；独立评测路线不进入策略输入。旧录制的动作历史明确缺失，不伪造中性动作：
+
+```powershell
+uv run --locked fh5 observe runs/vision-001 --config configs/observations-navigation.example.json --report runs/navigation-001/report.html
+```
+
+这证明无参考观测可构造，还不是无参考驾驶能力；格式、动作历史导入及独立任务证据见 [视觉导航观测](docs/navigation-observations.md)。
 
 ## 开发检查
 

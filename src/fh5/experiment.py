@@ -14,7 +14,7 @@ from typing import Any, Literal
 
 from fh5.control import Control, ControlEnvironment, read_control, run_control
 from fh5.events import EventEnvironment, EventRun, read_event, run_event
-from fh5.observations import ObservationReplay, build_observations
+from fh5.observations import ObservationReplay, build_observations, read_settings
 from fh5.perception import (
     Perception,
     PerceptionReplay,
@@ -452,7 +452,14 @@ def run_experiment(
         )
         events.extend(locate_route(samples, route))
         summary["route"] = route
-    elif isinstance(request, (Replay, ObservationReplay)) and request.route_file is not None:
+    elif (
+        isinstance(request, (Replay, ObservationReplay))
+        and request.route_file is not None
+        and (
+            not isinstance(request, ObservationReplay)
+            or read_settings(request.config_file)["version"] == 1
+        )
+    ):
         route = load_route(request.route_file)
         events.extend(locate_route(samples, route))
         summary["route"] = route
@@ -460,7 +467,7 @@ def run_experiment(
         summary["vision"] = read_vision(directory, report_path, samples, events)
     if isinstance(request, ObservationReplay):
         summary["observations"] = build_observations(
-            request, samples, events, summary.get("vision"), summary["route"]
+            request, samples, events, summary.get("vision"), summary.get("route")
         )
     write_report(
         report_path,

@@ -90,7 +90,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     observe = commands.add_parser("observe", help="Replay causal RGB history, state and navigation")
     observe.add_argument("recording", type=Path)
     observe.add_argument("--config", type=Path, required=True)
-    observe.add_argument("--route", type=Path, required=True)
+    observe.add_argument("--route", type=Path, help="Actor reference; required by v1/required mode")
+    observe.add_argument(
+        "--evaluation-route", type=Path, help="V2 diagnostic evidence, never actor input"
+    )
     observe.add_argument("--report", type=Path, required=True)
     perceive = commands.add_parser("perceive", help="Estimate pixels in a frozen RGB dataset")
     perceive.add_argument("--dataset", type=Path, required=True)
@@ -108,7 +111,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         if args.mode == "observe":
             result = run_experiment(
-                ObservationReplay(args.recording, args.report, args.route, args.config)
+                ObservationReplay(
+                    args.recording, args.report, args.route, args.config, args.evaluation_route
+                )
             )
         elif args.mode == "perceive":
             from fh5.segformer import SegformerRoadModel

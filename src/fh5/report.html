@@ -173,10 +173,11 @@ if(summary.vision){
 if(summary.observations){
  const o=summary.observations,decisions=o.decisions;let oi=0,active=false,timer=null;
  el("observations-panel").hidden=false;
- el("observations-status").textContent=`观测 ${decisions.length} 次 · 完整输入 ${o.usable_decisions} 次 · 时钟：${o.clock} · 观测版本 ${o.version}`;
+  el("observations-status").textContent=`观测 ${decisions.length} 次 · ${o.version===2?"可构造观测":"完整输入"} ${o.usable_decisions} 次 · 时钟：${o.clock} · 观测版本 ${o.version}`;
  const firstImage=decisions.findIndex(d=>d.images.some(f=>f?.image_url)),firstComplete=decisions.findIndex(d=>d.usable);
  el("observations-coverage").textContent=`首个有图观测：${firstImage<0?"无":firstImage+1} · 首个完整输入：${firstComplete<0?"无":firstComplete+1}。等待与缺失观测完整保留；灰色占位表示该历史槽没有输入，未复制其他槽补齐。`;
- el("observations-first").disabled=firstComplete<0;
+  el("observations-first").disabled=firstComplete<0;
+  if(o.version===2){el("observations-first").textContent="跳至首个可构造观测";el("observations-coverage").textContent+=` 参考模式：${o.reference.mode} / ${o.reference.status}。策略支持：未评估；任务可评分：${o.task_assessment.scorable?"是":"否"}（${o.task_assessment.status}）。动作来源：${o.action_source.status}；缺失动作保留掩码。导航显示：${o.navigation.display} / 可见性：${o.navigation.visibility}，声明与人工核验不是在线检测。`;}
  const cards=o.config.history_offsets_ms.map(()=>{const box=document.createElement("figure"),label=document.createElement("figcaption"),surface=document.createElement("div"),img=document.createElement("img"),missing=document.createElement("span");box.style.cssText="margin:0;flex:1;min-width:180px";surface.style.cssText="aspect-ratio:16/9;background:#e6ece9;position:relative;display:flex;align-items:center;justify-content:center;border-radius:8px;overflow:hidden";img.style.cssText="width:100%;height:100%;object-fit:contain;position:absolute;inset:0";img.hidden=true;missing.textContent="此历史槽无输入";surface.append(img,missing);box.append(label,surface);el("observations-images").append(box);return {label,img,missing};});
  el("observations-source").textContent=JSON.stringify({...o,decisions:undefined},null,2);
  el("observations-cursor").max=Math.max(0,decisions.length-1);el("observations-cursor").disabled=!decisions.length;el("observations-play").disabled=!decisions.length;
@@ -184,7 +185,7 @@ if(summary.observations){
   if(!decisions.length){el("observations-readout").textContent="没有可构造的检查时刻；查看采集与异常记录。";return;}
   const d=decisions[oi],s=d.telemetry;
   el("observations-cursor").value=oi;el("observations-clock").textContent=`${oi+1} / ${decisions.length}`;
-  el("observations-readout").textContent=`${d.usable?"输入完整（不代表驾驶已验收）":`输入不可用：${d.reasons.join("、")}`} · 片段 ${d.segment??"未知"} · ${s?`遥测包 ${s.packet_index} / 年龄 ${fmt(d.telemetry_age_ms)} ms`:"缺少遥测"}`;
+   el("observations-readout").textContent=`${d.usable?(o.version===2?"可构造（不代表策略支持或可评分）":"输入完整（不代表驾驶已验收）"):`输入不可用：${d.reasons.join("、")}`} · 片段 ${d.segment??"未知"} · ${s?`遥测包 ${s.packet_index} / 年龄 ${fmt(d.telemetry_age_ms)} ms`:"缺少遥测"}${o.version===2?` · 参考：${d.route.status} · 动作历史：${d.actor.action_mask.map(v=>v?"有":"缺").join(" / ")}`:""}`;
   d.images.forEach((f,i)=>{const {label,img,missing}=cards[i];label.textContent=`历史 -${o.config.history_offsets_ms[i]} ms：${f?`${f.valid?"有效":"屏蔽"} / 实际年龄 ${fmt(f.age_ms)} ms / ${(f.reasons??[]).join("、")}`:"缺失（没有用其他槽填补）"}`;img.hidden=!f?.image_url;missing.hidden=!!f?.image_url;missing.textContent=f?"图片缺失或校验失败":"此历史槽无输入";if(f?.image_url){if(img.getAttribute("src")!==f.image_url)img.src=f.image_url;img.alt=`历史画面 ${i+1}${f.valid?"":"（诊断展示，不进入有效输入）"}`;img.style.opacity=f.valid?1:.45;}});
   const ctx=el("observations-route").getContext("2d"),pts=d.route.waypoints_m.filter(Boolean),extent=Math.max(20,...pts.flat().map(Math.abs)),scale=115/extent;
   ctx.clearRect(0,0,720,280);ctx.strokeStyle="#c7cfc9";ctx.beginPath();ctx.moveTo(360,15);ctx.lineTo(360,260);ctx.moveTo(50,140);ctx.lineTo(670,140);ctx.stroke();ctx.fillStyle="#475b53";ctx.font="14px sans-serif";ctx.fillText("前方（米）",370,20);ctx.fillText("右方（米）",590,130);ctx.fillText(`参考定位：${d.route.status}`,20,270);

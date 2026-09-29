@@ -63,8 +63,8 @@ class VisionRecord:
     route_file: Path | None = None
 
     def __post_init__(self) -> None:
-        if (self.observation_config is None) != (self.route_file is None):
-            raise ValueError("Observation capture requires both config and independent route")
+        if self.observation_config is None and self.route_file is not None:
+            raise ValueError("Observation capture requires a config for the reference")
         for name, value, low, high in (
             ("seconds", self.seconds, 0.1, 600),
             ("period_s", self.period_s, 0.05, 5),
@@ -205,7 +205,9 @@ def run_vision(request: VisionRecord, environment: VisionEnvironment) -> RunResu
                 ObservationReplay(
                     directory,
                     directory / "observations.html",
-                    directory / "observation-route/route.json",
+                    directory / "observation-route/route.json"
+                    if "observation-route/route.json" in frozen
+                    else None,
                     directory / "observation-config.json",
                 )
             )

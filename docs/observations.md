@@ -1,6 +1,6 @@
 # T25：因果多模态观测
 
-对应 [GitHub #26](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/26)。输出可追溯的截图历史、本车状态和局部导航航点，不运行 actor、采集动作标签或发送游戏输入。同步示范另属 #27。当前已实现版本仍要求参考文件；[视觉导航增量](visual-navigation-spec.md)规定的可选/禁用参考及动作历史由后续切片实现，不能用下列命令声称已支持无参考模式。
+对应 [GitHub #26](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/26)。本页记录观测 v1：输出可追溯的截图历史、本车状态和必选局部导航航点，不运行 actor、采集动作标签或发送游戏输入。同步示范另属 #27。#31 已另行实现可选/禁用参考及动作历史的 [v2 契约](navigation-observations.md)，本页 v1 命令与历史统计保持不变。
 
 ## 使用
 
