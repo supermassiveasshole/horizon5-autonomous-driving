@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "period_ms": 100,
+  "history_offsets_ms": [200, 100, 0],
+  "max_image_age_ms": 200,
+  "max_telemetry_age_ms": 100,
+  "waypoint_distances_m": [5, 10, 20, 40]
+}

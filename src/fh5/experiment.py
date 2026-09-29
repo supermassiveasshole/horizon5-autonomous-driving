@@ -14,6 +14,7 @@ from typing import Any, Literal
 
 from fh5.control import Control, ControlEnvironment, read_control, run_control
 from fh5.events import EventEnvironment, EventRun, read_event, run_event
+from fh5.observations import ObservationReplay, build_observations
 from fh5.perception import (
     Perception,
     PerceptionReplay,
@@ -26,7 +27,7 @@ from fh5.routes import BuildRoute, build_route, load_route, locate_route
 from fh5.vision import VisionEnvironment, VisionRecord, read_vision, run_vision
 
 FORMAT_VERSION = 1
-DECODER_VERSION = "fh5-dash-324-v1"
+DECODER_VERSION = "fh5-dash-324-v2"
 DIAGNOSTICS = {
     "version": 1,
     "receive_gap_seconds": 0.5,
@@ -93,6 +94,18 @@ def _decode(packet: Packet) -> dict[str, Any]:
         raise ValueError("Non-finite position or speed")
     if sample["is_race_on"] not in (0, 1):
         raise ValueError("IsRaceOn must be 0 or 1")
+    velocity = list(struct.unpack_from("<fff", data, 32))
+    angular = list(struct.unpack_from("<fff", data, 44))
+    yaw = struct.unpack_from("<f", data, 56)[0]
+    motion_valid = (
+        all(math.isfinite(v) for v in [*velocity, *angular, yaw]) and abs(yaw) <= math.pi + 1e-5
+    )
+    sample["motion"] = (
+        {"yaw_rad": yaw, "velocity_car_mps": velocity, "angular_velocity_car_radps": angular}
+        if motion_valid
+        else None
+    )
+    sample["motion_status"] = "decoded" if motion_valid else "invalid_motion"
     return sample
 
 
@@ -158,6 +171,7 @@ def run_experiment(
     | EventRun
     | BuildRoute
     | VisionRecord
+    | ObservationReplay
     | Perception
     | PerceptionReplay,
     *,
@@ -249,7 +263,7 @@ def run_experiment(
             or metadata["format_version"] != FORMAT_VERSION
         ):
             raise ValueError("Unsupported session format_version")
-        if metadata.get("decoder_version") != DECODER_VERSION:
+        if metadata.get("decoder_version") not in ("fh5-dash-324-v1", DECODER_VERSION):
             raise ValueError("Unsupported session decoder_version")
         if metadata.get("diagnostics") != DIAGNOSTICS:
             raise ValueError("Unsupported session diagnostics")
@@ -274,6 +288,7 @@ def run_experiment(
         ):
             raise ValueError("Session requires created_utc and unverified game_validation")
 
+    metadata["analysis_decoder_version"] = DECODER_VERSION
     samples: list[dict[str, Any]] = []
     events: list[dict[str, Any]] = []
     capture_status = metadata.get("capture_status", "recording")
@@ -437,12 +452,16 @@ def run_experiment(
         )
         events.extend(locate_route(samples, route))
         summary["route"] = route
-    elif isinstance(request, Replay) and request.route_file is not None:
+    elif isinstance(request, (Replay, ObservationReplay)) and request.route_file is not None:
         route = load_route(request.route_file)
         events.extend(locate_route(samples, route))
         summary["route"] = route
     if (directory / "vision-session.json").exists():
         summary["vision"] = read_vision(directory, report_path, samples, events)
+    if isinstance(request, ObservationReplay):
+        summary["observations"] = build_observations(
+            request, samples, events, summary.get("vision"), summary["route"]
+        )
     write_report(
         report_path,
         {"metadata": metadata, "samples": samples, "events": events, "summary": summary},

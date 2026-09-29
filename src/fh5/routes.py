@@ -439,9 +439,17 @@ def locate_route(samples: list[dict[str, Any]], route: dict[str, Any]) -> list[d
                 and sample["received_monotonic_ns"] - clock_advanced_ns <= 250_000_000
                 and math.dist(sample["position_m"], previous["position_m"]) <= bound
             )
-            candidates = [
-                c for c in candidates if abs(c[1] - previous["route"]["reference_s_m"]) <= bound
-            ]
+            # An unresolved projection is not a trustworthy station prior. Keeping
+            # its arbitrary branch would turn repeated ambiguity into false certainty.
+            if previous["route"]["status"] not in {
+                "ambiguous",
+                "outside_reference",
+                "inactive",
+                "discontinuity",
+            }:
+                candidates = [
+                    c for c in candidates if abs(c[1] - previous["route"]["reference_s_m"]) <= bound
+                ]
         if candidates:
             distance, station = min(candidates)
         else:

@@ -59,8 +59,12 @@ class VisionRecord:
     period_s: float = 0.1
     max_age_ms: float = 100.0
     max_bytes: int = 256 * 1024**2
+    observation_config: Path | None = None
+    route_file: Path | None = None
 
     def __post_init__(self) -> None:
+        if (self.observation_config is None) != (self.route_file is None):
+            raise ValueError("Observation capture requires both config and independent route")
         for name, value, low, high in (
             ("seconds", self.seconds, 0.1, 600),
             ("period_s", self.period_s, 0.05, 5),
@@ -79,11 +83,16 @@ def _hash(path: Path) -> str:
 def run_vision(request: VisionRecord, environment: VisionEnvironment) -> RunResult:
     # Import at the dispatch boundary: experiment owns telemetry parsing, not transport.
     from fh5.experiment import Record, _write_json, run_experiment
+    from fh5.observations import ObservationReplay, freeze_inputs
 
     directory = request.output_dir
 
     def observations() -> Iterator[Packet]:
         (directory / "frames").mkdir()
+        for name, contents in frozen.items():
+            target = directory / name
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(contents)
         (directory / "vision-config.json").write_bytes(request.config_file.read_bytes())
         session: dict[str, Any] = {
             "version": 1,
@@ -91,7 +100,9 @@ def run_vision(request: VisionRecord, environment: VisionEnvironment) -> RunResu
             "camera_status": "user_reported",
             "camera_pose": "dynamic_unknown",
             "settings": {
-                k: v for k, v in asdict(request).items() if k not in ("config_file", "output_dir")
+                k: v
+                for k, v in asdict(request).items()
+                if k not in ("config_file", "output_dir", "observation_config", "route_file")
             },
             "source_hashes": {p.name: _hash(p) for p in Path(__file__).parent.glob("*.py")},
             "stop_reason": "recording",
@@ -100,6 +111,10 @@ def run_vision(request: VisionRecord, environment: VisionEnvironment) -> RunResu
         started = environment.now_ns()
         count = 0
         written = 0
+        last_check = started - 1_000_000_000
+        observation_period = (
+            json.loads(frozen["observation-config.json"])["period_ms"] * 1e6 if frozen else 0
+        )
         try:
             with (directory / "vision.jsonl").open("x", encoding="utf-8") as journal:
                 while environment.now_ns() - started < request.seconds * 1e9:
@@ -149,6 +164,17 @@ def run_vision(request: VisionRecord, environment: VisionEnvironment) -> RunResu
                         )
                         journal.write(json.dumps(row, allow_nan=False) + "\n")
                         count += 1
+                    if frozen and environment.now_ns() - last_check >= observation_period:
+                        last_check = environment.now_ns()
+                        tick_line = (
+                            json.dumps({"kind": "observation_tick", "observed_ns": last_check})
+                            + "\n"
+                        )
+                        if written + len(tick_line) > request.max_bytes:
+                            session["stop_reason"] = "byte_limit"
+                            break
+                        written += len(tick_line)
+                        journal.write(tick_line)
                     journal.flush()
                 else:
                     session["stop_reason"] = "time_limit"
@@ -170,9 +196,20 @@ def run_vision(request: VisionRecord, environment: VisionEnvironment) -> RunResu
             _write_json(directory / "vision-session.json", session)
 
     try:
-        return run_experiment(
+        frozen = freeze_inputs(request.observation_config, request.route_file)
+        result = run_experiment(
             Record(request.config_file, directory, environment.source_kind), packets=observations()
         )
+        if frozen:
+            return run_experiment(
+                ObservationReplay(
+                    directory,
+                    directory / "observations.html",
+                    directory / "observation-route/route.json",
+                    directory / "observation-config.json",
+                )
+            )
+        return result
     finally:
         environment.close()
 

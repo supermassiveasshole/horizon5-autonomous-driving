@@ -28,9 +28,18 @@ td{overflow-wrap:anywhere}summary{cursor:pointer;font-weight:600}code{font-size:
 <p class="muted" id="identity"></p>
 <div class="notice" id="evidence"></div>
 <section class="stats" id="stats" aria-label="数据摘要"></section>
+<section class="panel" id="observations-panel" hidden>
+<h2>因果多模态观测</h2><p id="observations-status"></p>
+<p class="muted">每个时刻只取已交付画面及已收到遥测。检查时刻不代表策略已运行；旧记录按固定时间网格重建。局部航点是航向平面中的导航参考，不是路宽、相机投影或合法进度。</p>
+<div class="controls"><button id="observations-play" type="button">播放观测</button><input id="observations-cursor" type="range" min="0" max="0" value="0" aria-label="因果观测位置"><output id="observations-clock"></output></div>
+<p id="observations-readout"></p><div id="observations-images" style="display:flex;flex-wrap:wrap;gap:12px"></div>
+<canvas id="observations-route" width="720" height="280" style="width:100%;max-width:720px;height:280px" aria-label="车体航向平面局部航点"></canvas>
+<details><summary>当前输入、缺失掩码与时间</summary><pre id="observations-detail" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details>
+<details><summary>观测版本、来源与覆盖</summary><pre id="observations-source" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details>
+</section>
 <section class="panel" id="vision-panel" hidden>
 <h2>彩色画面与当时可用的遥测</h2><p id="vision-status"></p>
-<p class="muted">追尾远视角会随速度改变距离。画面与遥测按接收端时钟关联，不代表同一物理帧；中断处不插值。</p>
+<p class="muted">追尾远视角会随速度改变距离。画面与遥测按接收端时钟关联，不代表同一物理帧；中断处不插值。操作上方观测面板时，此处跟随最新历史槽；缺失时留空。</p>
 <div class="controls"><button id="vision-play" type="button">播放画面</button><input id="vision-cursor" type="range" min="0" max="0" value="0" aria-label="彩色画面位置"><output id="vision-clock"></output></div>
 <img id="vision-image" alt="当前录制的 FH5 彩色画面" style="display:block;width:100%;margin-top:16px;border-radius:8px" hidden>
 <p id="vision-readout"></p><details><summary>采集时序、事后配对与完整性</summary><pre id="vision-detail" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre><pre id="vision-timing" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details>
@@ -149,9 +158,35 @@ if(summary.vision){
   if(s){const found=samples.findIndex(p=>p.packet_index===s.packet_index);if(found>=0){index=found;playing=false;el("play").textContent="播放";draw();}}
  }
  function stopFrames(){active=false;clearTimeout(timer);el("vision-play").textContent="播放画面";}
+ document.addEventListener("observation-selected",event=>{stopFrames();const f=event.detail;if(!f){el("vision-image").hidden=true;el("vision-image").removeAttribute("src");el("vision-clock").textContent="当前观测缺少最新历史槽";el("vision-readout").textContent="未用旧图填补缺失。";el("vision-detail").textContent="";return;}const found=frames.findIndex(item=>item.path===f.path);if(found>=0){fi=found;showFrame();}});
  function advanceFrame(){if(!active)return;if(fi+1>=frames.length){stopFrames();return;}const delay=Math.max(1,(frames[fi+1].capture_start_ns-frames[fi].capture_start_ns)/1e6);timer=setTimeout(()=>{fi++;showFrame();advanceFrame();},delay);}
  el("vision-play").addEventListener("click",()=>{if(active){stopFrames();return;}if(fi+1>=frames.length)fi=0;active=true;el("vision-play").textContent="暂停画面";showFrame();advanceFrame();});
  el("vision-cursor").addEventListener("input",()=>{stopFrames();fi=Number(el("vision-cursor").value);showFrame();});showFrame();
+}
+if(summary.observations){
+ const o=summary.observations,decisions=o.decisions;let oi=0,active=false,timer=null;
+ el("observations-panel").hidden=false;
+ el("observations-status").textContent=`观测 ${decisions.length} 次 · 完整输入 ${o.usable_decisions} 次 · 时钟：${o.clock} · 观测版本 ${o.version}`;
+ el("observations-source").textContent=JSON.stringify({...o,decisions:undefined},null,2);
+ el("observations-cursor").max=Math.max(0,decisions.length-1);el("observations-cursor").disabled=!decisions.length;el("observations-play").disabled=!decisions.length;
+ function showObservation(){
+  if(!decisions.length){el("observations-readout").textContent="没有可构造的检查时刻；查看采集与异常记录。";return;}
+  const d=decisions[oi],s=d.telemetry;
+  el("observations-cursor").value=oi;el("observations-clock").textContent=`${oi+1} / ${decisions.length}`;
+  el("observations-readout").textContent=`${d.usable?"输入完整（不代表驾驶已验收）":`输入不可用：${d.reasons.join("、")}`} · 片段 ${d.segment??"未知"} · ${s?`遥测包 ${s.packet_index} / 年龄 ${fmt(d.telemetry_age_ms)} ms`:"缺少遥测"}`;
+  el("observations-images").replaceChildren();
+  d.images.forEach((f,i)=>{const box=document.createElement("figure"),label=document.createElement("figcaption");box.style.cssText="margin:0;flex:1;min-width:180px";label.textContent=`历史 -${o.config.history_offsets_ms[i]} ms：${f?`${f.valid?"有效":"屏蔽"} / 实际年龄 ${fmt(f.age_ms)} ms / ${(f.reasons??[]).join("、")}`:"缺失（不重复旧帧补齐）"}`;box.append(label);if(f?.image_url){const img=document.createElement("img");img.src=f.image_url;img.alt=`历史画面 ${i+1}${f.valid?"":"（诊断展示，不进入有效输入）"}`;img.style.cssText=`width:100%;opacity:${f.valid?1:.45}`;box.append(img);}el("observations-images").append(box);});
+  const ctx=el("observations-route").getContext("2d"),pts=d.route.waypoints_m.filter(Boolean),extent=Math.max(20,...pts.flat().map(Math.abs)),scale=115/extent;
+  ctx.clearRect(0,0,720,280);ctx.strokeStyle="#c7cfc9";ctx.beginPath();ctx.moveTo(360,15);ctx.lineTo(360,260);ctx.moveTo(50,140);ctx.lineTo(670,140);ctx.stroke();ctx.fillStyle="#475b53";ctx.font="14px sans-serif";ctx.fillText("前方（米）",370,20);ctx.fillText("右方（米）",590,130);ctx.fillText(`参考定位：${d.route.status}`,20,270);
+  ctx.fillStyle="#d45e30";ctx.beginPath();ctx.arc(360,140,5,0,Math.PI*2);ctx.fill();ctx.strokeStyle="#177d72";ctx.beginPath();ctx.moveTo(360,140);pts.forEach(p=>ctx.lineTo(360+p[0]*scale,140-p[1]*scale));ctx.stroke();pts.forEach(p=>{ctx.beginPath();ctx.arc(360+p[0]*scale,140-p[1]*scale,4,0,Math.PI*2);ctx.stroke();ctx.fillText(`${fmt(p[0],1)}, ${fmt(p[1],1)}`,368+p[0]*scale,140-p[1]*scale);});
+  el("observations-detail").textContent=JSON.stringify(d,null,2);
+  document.dispatchEvent(new CustomEvent("observation-selected",{detail:d.images.at(-1)}));
+  if(s){const found=samples.findIndex(p=>p.packet_index===s.packet_index);if(found>=0){index=found;playing=false;el("play").textContent="播放";draw();}}
+ }
+ function stopObservations(){active=false;clearTimeout(timer);el("observations-play").textContent="播放观测";}
+ function advanceObservation(){if(!active)return;if(oi+1>=decisions.length){stopObservations();return;}timer=setTimeout(()=>{oi++;showObservation();advanceObservation();},Math.max(1,(decisions[oi+1].decision_ns-decisions[oi].decision_ns)/1e6));}
+ el("observations-play").addEventListener("click",()=>{if(active){stopObservations();return;}if(oi+1>=decisions.length)oi=0;active=true;el("observations-play").textContent="暂停观测";showObservation();advanceObservation();});
+ el("observations-cursor").addEventListener("input",()=>{stopObservations();oi=Number(el("observations-cursor").value);showObservation();});showObservation();
 }
 </script>
 </body></html>

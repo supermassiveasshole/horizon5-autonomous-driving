@@ -51,6 +51,14 @@ uv run --locked fh5 vision --config configs/goliath-fixed-v2.json --output runs/
 
 保持追尾远视角；F8 或输出目录的 `STOP` 文件提前结束。`report.html` 提供彩色回放、当时可用遥测及故障诊断。参数、数据格式和限制见 [彩色观测说明](docs/vision-recording.md)。
 
+T25 / GitHub #26 可将已有 RGB、遥测和独立历史路线构造成因果观测回放：
+
+```powershell
+uv run --locked fh5 observe runs/vision-001 --config configs/observations.example.json --route runs/reference/route.json --report runs/observations-001/report.html
+```
+
+报告展示图像历史、年龄/缺失掩码、本车状态和局部航点；JSON 保留可重读的原图依赖。新采集可记录真实检查时刻，旧采集明确标记为重建时钟。此阶段不控制车辆，见 [因果观测说明](docs/observations.md)。
+
 ## 开发检查
 
 ```powershell

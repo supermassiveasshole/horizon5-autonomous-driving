@@ -16,6 +16,7 @@ from pathlib import Path
 from fh5.control import Control, validate_control_file
 from fh5.events import EventRun, validate_event_file
 from fh5.experiment import Packet, Record, Replay, run_experiment
+from fh5.observations import ObservationReplay
 from fh5.perception import Perception, PerceptionReplay
 from fh5.routes import BuildRoute
 from fh5.vision import VisionRecord
@@ -84,6 +85,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     vision.add_argument("--period", type=float, default=0.1)
     vision.add_argument("--max-age-ms", type=float, default=100)
     vision.add_argument("--max-mib", type=int, default=256)
+    vision.add_argument("--observations", type=Path, help="Record passive observation check times")
+    vision.add_argument("--route", type=Path, help="Independent frozen navigation reference")
+    observe = commands.add_parser("observe", help="Replay causal RGB history, state and navigation")
+    observe.add_argument("recording", type=Path)
+    observe.add_argument("--config", type=Path, required=True)
+    observe.add_argument("--route", type=Path, required=True)
+    observe.add_argument("--report", type=Path, required=True)
     perceive = commands.add_parser("perceive", help="Estimate pixels in a frozen RGB dataset")
     perceive.add_argument("--dataset", type=Path, required=True)
     perceive.add_argument("--protocol", type=Path, required=True)
@@ -98,7 +106,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     perception_replay.add_argument("--labels", type=Path)
     args = parser.parse_args(argv)
     try:
-        if args.mode == "perceive":
+        if args.mode == "observe":
+            result = run_experiment(
+                ObservationReplay(args.recording, args.report, args.route, args.config)
+            )
+        elif args.mode == "perceive":
             from fh5.segformer import SegformerRoadModel
 
             model = SegformerRoadModel(args.model_dir, args.protocol, args.device)
@@ -115,6 +127,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 args.period,
                 args.max_age_ms,
                 args.max_mib * 1024**2,
+                args.observations,
+                args.route,
             )
             if not 0 <= args.port <= 65535:
                 raise ValueError("--port must be between 0 and 65535")
@@ -274,8 +288,18 @@ def main(argv: Sequence[str] | None = None) -> int:
                 **{
                     key: value
                     for key, value in result.summary.items()
-                    if key not in ("route", "vision", "perception")
+                    if key not in ("route", "vision", "perception", "observations")
                 },
+                **(
+                    {
+                        "observations": {
+                            key: result.summary["observations"][key]
+                            for key in ("version", "clock", "decision_count", "usable_decisions")
+                        }
+                    }
+                    if "observations" in result.summary
+                    else {}
+                ),
                 **(
                     {
                         "perception": {
