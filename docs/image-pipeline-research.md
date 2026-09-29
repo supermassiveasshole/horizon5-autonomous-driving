@@ -6,11 +6,12 @@
 
 ## 结论与已确认要求
 
-推荐采用 **WGC 采集 → 最新帧槽 → 独立预处理 → 带源时间的短历史环 → 常驻推理 worker → 独立动作监督器**。模型直接接收 RGB 数组或 tensor；JPEG/NVENC 仅作为异步存档、观看分支。先完成该结构并比较 WGC 与 DXGI，再依据本机测量决定是否实现 D3D11→CUDA 的全 GPU 预处理。
+已按用户在 2026-09-30 的决定，选定 **DXGI Desktop Duplication 采集 → 最新帧槽 → 独立预处理 → 带源时间的短历史环 → 常驻推理 worker → 独立动作监督器**。模型直接接收 RGB 数组或 tensor；JPEG/NVENC 仅作为异步存档、观看分支。Python 首版拟用 DXcam，显式指定 `backend="dxgi"`；WGC 不再作为首选或实现前置。完成该结构后，再依据本机测量决定是否实现 D3D11→CUDA 的全 GPU 预处理。这里确认的是实施选择，当前运行代码尚未切换后端。
 
 用户已明确要求，以下不是可选优化：
 
 - capture、resize 和模型取图分别调度，模型不等待文件落盘或读取 JPEG。
+- 主采集后端使用 DXGI Desktop Duplication，选定目标显示器及其所属 adapter；不依赖包装库的隐式后端选择。
 - **内存中的 JPEG 也不作为模型接口。** 在线主路径不得包含图像编码、图像解码或文件读写。
 - 只取最近、满足时间要求的几帧；保留每帧真实时间信息。不能靠按帧编号、重复旧图、等待补齐旧任务伪造固定帧率。
 - 偶发丢帧、短暂缺图或录像写盘拥塞不能自动终止整次尝试；不够本次观测就跳过本次决策。
@@ -24,7 +25,7 @@
 
 | 环节 | 固定源码中的实现 | 对本项目的意义 |
 | --- | --- | --- |
-| 采集 | `WindowsCapture(window_name=...)`，`start_free_threaded()` | 采集回调与主推理循环分开 |
+| 采集 | `windows-capture` 的 `WindowsCapture(window_name=...)`，`start_free_threaded()`，对应 WGC 窗口捕获路径 | 采集回调与主推理循环分开；本项目选择 DXGI，无需复制其后端 |
 | 预处理 | 回调内 `cv2.resize(..., INTER_AREA)` | resize 仍占用采集回调，尚未三阶段解耦 |
 | 缓存 | `deque(maxlen=240)`，保存缩小的 BGR 数组和时间 | 有限内存，满后淘汰最旧帧，不等待消费者 |
 | 时间 | resize 完成后调用 `perf_counter()` | 是应用处理后的时间，不是原始呈现时间 |
@@ -42,6 +43,8 @@
 ### WGC 并不自动等于 GPU tensor 零拷贝
 
 VisionAI 的 `windows-capture` 依赖没有锁版本，无法据此确定作者当时的二进制行为。[requirements.txt](https://github.com/Ayin1412/ForzaHorizon6-VisionAI/blob/be74b8def76e8c3247f91e310c5375db1e494756/requirements.txt#L15-L20)
+
+后端判断来自其具体调用：Python `WindowsCapture` 创建 `NativeWindowsCapture`，后者通过 `GraphicsCaptureApiHandler` 启动 WGC。当前库另有独立的 DXGI 接口，但 VisionAI 没有调用它；不能因为新版依赖支持 DXGI，就将该项目描述为 DXGI 采集。[Python 包装](https://github.com/NiiightmareXD/windows-capture/blob/c7d106448eb9d9b251345c39047711e1cd408ae2/windows-capture-python/windows_capture/__init__.py#L140-L250)、[原生启动](https://github.com/NiiightmareXD/windows-capture/blob/c7d106448eb9d9b251345c39047711e1cd408ae2/windows-capture-python/src/lib.rs#L313-L383)、[WGC handler](https://github.com/NiiightmareXD/windows-capture/blob/c7d106448eb9d9b251345c39047711e1cd408ae2/windows-capture-python/src/lib.rs#L588-L624)
 
 另行核查当前依赖源码，固定为 `c7d106448eb9d9b251345c39047711e1cd408ae2`：Rust→Python 桥将帧纹理复制至 staging texture，再 `Map` 成 CPU 可读内存；NumPy `frombuffer` 是对该映射内存的视图，不等于画面从显存直接变成 CUDA tensor。它保留 native owner 维持视图生命周期，且将原生 frame timestamp 传为 Python `timespan`；VisionAI 未利用后者。[native 映射](https://github.com/NiiightmareXD/windows-capture/blob/c7d106448eb9d9b251345c39047711e1cd408ae2/windows-capture-python/src/lib.rs#L440-L486)、[timestamp 桥接](https://github.com/NiiightmareXD/windows-capture/blob/c7d106448eb9d9b251345c39047711e1cd408ae2/windows-capture-python/src/lib.rs#L598-L624)、[NumPy 视图](https://github.com/NiiightmareXD/windows-capture/blob/c7d106448eb9d9b251345c39047711e1cd408ae2/windows-capture-python/windows_capture/__init__.py#L267-L283)
 
@@ -85,21 +88,25 @@ VisionAI 的 `windows-capture` 依赖没有锁版本，无法据此确定作者�
 | --- | --- | --- |
 | NVIDIA NvFBC / Capture SDK | 当前 9.0.0 面向 Linux；官方声明 Windows 10 及以上 NvFBC 已弃用，最后支持 1803/build 17134 | 不作为本机 Windows 11 的受支持主线；这不等于断言所有旧版本绝无可能运行 |
 | NVIDIA NvIFR | 官方 FAQ 说明 SDK 7.0 弃用、7.1 移除相关定义、文档和样例 | 也不以它作为新的 Windows 实现基础 |
-| Windows Graphics Capture | Windows 原生 GPU surface；可按窗口采集，free-threaded frame pool 在内部 worker 发事件 | 首选 FH5 HWND 后端；Python wrapper 先走数值数组，原生 GPU 路径作为后续优化 |
-| DXGI Desktop Duplication | Windows 原生桌面复制；NVIDIA 提供 DDA→NVENC 官方示例 | 做同条件备选对照；注意显示器区域、覆盖物与窗口定位语义 |
-| DXcam | 维护者提供有界环缓冲、最新帧、源时间接口；`video_mode=True` 可重复上一帧填充频率 | 用作 DXGI/WGC 包装候选，实时模型应避免把重复帧当作新观测 |
+| Windows Graphics Capture | Windows 原生 GPU surface；可按窗口采集，free-threaded frame pool 在内部 worker 发事件 | 保留为参考资料；不作为本次实施主线或必要对照 |
+| DXGI Desktop Duplication | Windows 原生桌面复制；NVIDIA 提供 DDA→NVENC 官方示例 | 已选定主后端；核对目标显示器、adapter、客户区裁剪及覆盖物 |
+| DXcam | 维护者提供有界环缓冲、最新帧、源时间接口；`video_mode=True` 可重复上一帧填充频率 | 首版包装候选，显式选择 `backend="dxgi"`；关闭录像补帧，向预处理输出数值数组 |
 | NVENC | GPU 硬件视频编码，独立于 CUDA 核心的编码引擎 | 适合旁路录像；它不替代采集，不应在 actor 前先编码再解码；见 [NVIDIA Video Codec SDK](https://developer.nvidia.com/video-codec-sdk) |
 
 来源：[NVIDIA Capture SDK](https://developer.nvidia.com/capture-sdk)、[NvFBC Windows 弃用说明，尤其第 4–6 页](https://developer.download.nvidia.com/designworks/capture-sdk/docs/NVFBC_Win10_Deprecation_Tech_Bulletin.pdf)、[NvIFR FAQ Q30](https://developer.download.nvidia.com/designworks/capture-sdk/docs/7.1/NVIDIA-Capture-SDK-FAQ.pdf)、[NVIDIA DDA 编码示例](https://github.com/NVIDIA/video-sdk-samples/tree/master/nvEncDXGIOutputDuplicationSample)、[WGC frame / surface](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.direct3d11captureframe?view=winrt-28000)、[WGC free-threaded API](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.direct3d11captureframepool.createfreethreaded?view=winrt-26100)、[DXcam 官方仓库接口说明](https://github.com/ra1nty/DXcam#frame-buffer)。
 
-**推荐顺序：**先用有维护的 WGC 数值接口建立正确并发结构；与 DXGI 在同窗口、同尺寸、同游戏负载下比较。若主成本仍是全尺寸 GPU→CPU 映射或 CPU resize，再实现 `WGC/DXGI D3D11 texture → CUDA resize/颜色/归一化 → torch tensor`。GPU 方案需要自有纹理池、图形与计算同步、兼容 adapter，以及明确的 buffer 生命周期；不能将 SDK 返回的纹理随手包装为 tensor 就假定可安全复用。迁移是否值得由 P95/P99 新鲜度和游戏帧时间决定，而非仅看采集峰值 FPS。
+**选择依据及讨论的适用范围：**用户提供的 2024-01-31 GStreamer 讨论中，开发者不推荐当时使用 WGC 做显示器捕获，后续回复还涉及跨 GPU 捕获的性能差异。它支持本次选择 DXGI，但不能外推为所有版本的 WGC 窗口捕获都更慢。同一开发者在 2024-08-01 说明，在 d3d12 路径重写 WGC 捕获逻辑后，解决了旧 d3d11 WGC 路径遇到的低帧率问题。因此本项目直接采用 DXGI，并用本机端到端数据验收，不以旧讨论中的 FPS 作为性能承诺。[用户提供的讨论](https://discourse.gstreamer.org/t/d3d11screencapturesrc-dxgi-vs-wgc/912/2)、[后续实现说明](https://discourse.gstreamer.org/t/d3d11screencapturesrc-vs-d3d12screencapturesrc/2080/2)
+
+**实施顺序：**先接入 DXGI 数值采集并建立正确并发结构，与现有 MSS 基线比较。固定 DXcam 版本及实际 API；用目标显示器所属 adapter 建立捕获，再按 FH5 客户区裁剪，不能把桌面区域捕获当成 HWND 独立窗口捕获。初版输出 BGRA 数组，将颜色转换和 resize 留给预处理 worker；保留源时间，关闭 `video_mode` 补帧，并检查窗口移动、尺寸变化、失焦及设备访问失效后的恢复语义。[DXcam 后端、输出与时间接口](https://github.com/ra1nty/DXcam)
+
+若主成本仍是全尺寸 GPU→CPU 映射或 CPU resize，再实现 `DXGI D3D11 texture → CUDA resize/颜色/归一化 → torch tensor`。GPU 方案需要自有纹理池、图形与计算同步、兼容 adapter，以及明确的 buffer 生命周期；不能将 SDK 返回的纹理随手包装为 tensor 就假定可安全复用。迁移是否值得由 P95/P99 新鲜度和游戏帧时间决定，而非仅看采集峰值 FPS。
 
 消除 CPU 往返不等于消除全部拷贝。常见可控实现是 capture surface 先 GPU copy 至兼容的自有 D3D11 texture 池，初始化时注册资源，逐次 map/unmap 并同步，再以 CUDA resize/颜色/归一化写入线性 tensor；不能假设任意 capture surface 均可注册，也不能把 D3D11 texture 直接当作 DLPack tensor。用 DLPack 共享兼容的数值 tensor 时，仍必须遵守生产方存储的所有权与 stream 同步。[CUDA D3D11 互操作 API](https://docs.nvidia.com/cuda/archive/12.9.1/cuda-runtime-api/group__CUDART__D3D11.html)、[PyTorch DLPack](https://docs.pytorch.org/docs/stable/dlpack.html)
 
 ## 建议的管线契约
 
 ```text
-WGC / DXGI capture
+DXGI Desktop Duplication capture
         │ raw 数值帧 + 源时间 + epoch + frame_id
         ▼
 最新待处理槽（容量 1，覆盖旧的待处理项）
@@ -123,7 +130,7 @@ WGC / DXGI capture
 
 采集回调只获取源时间、窗口/尺寸状态，取得可持续使用的帧引用，或复制进自有缓冲，发布到 latest 槽后返回。它不 resize、不编码、不推理、不写日志文件。只有待处理项被覆盖；被预处理 worker 持有的内容不得改写。若后端资源不能安全保留，就有界复制，不为追求“零拷贝”牺牲所有权正确性。
 
-每帧至少携带 `epoch, frame_id, source_time_ns, capture_received_ns, preprocess_ready_ns, width, height, pixel_format, preprocess_version`。源时间优先用 WGC `SystemRelativeTime` / DXGI 呈现时间，记录原始 clock domain 和转换方式。WGC 的 SystemRelativeTime 是 compositor 渲染时间的 QPC 时间；统一到本机单调时钟后再计算 age，不能直接把不同单位或基准相减。[Microsoft SystemRelativeTime 定义](https://learn.microsoft.com/en-us/uwp/api/windows.graphics.capture.direct3d11captureframe.systemrelativetime?view=winrt-26100)
+每帧至少携带 `epoch, frame_id, source_time_ns, capture_received_ns, preprocess_ready_ns, width, height, pixel_format, preprocess_version`。DXGI 源时间使用 `LastPresentTime`，记录 QPC 原始时钟、单位及包装库的转换方式。统一到本机单调时钟后再计算 age，不能直接把不同单位或基准相减；应用接收时间也不能冒充呈现时间。[Microsoft DXGI 帧时间定义](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/ns-dxgi1_2-dxgi_outdupl_frame_info)
 
 DXGI `LastPresentTime=0` 可能只是鼠标更新，不应当作新游戏画面。DXcam `get_latest_frame()` 默认可能阻塞，必须隔离在取帧 worker；使用 `copy=False` 时数据可能被后续采集覆盖，消费者须持有安全副本或具备正确的池引用约束。[DXGI 帧信息](https://learn.microsoft.com/en-us/windows/win32/api/dxgi1_2/ns-dxgi1_2-dxgi_outdupl_frame_info)、[DXcam API](https://github.com/ra1nty/DXcam)
 
@@ -205,14 +212,14 @@ RL 数据还需记录跳过决策后的实际 action hold 时长 `dt`、监督�
 | 丢失语义 | capture/preprocess/sampling/archive 各自 drop；skip 原因；过期结果；不可重放 transition |
 | 正确性 | 色序/stride/HDR、源时钟转换、被引用槽不可覆盖、epoch 边界、不复用重复源帧 |
 
-对照实验应保持实际客户区、游戏场景、渲染设置、模型、功耗状态及记录负载一致，分别测：当前 MSS+JPEG；MSS 数值输入；WGC 数值输入；DXGI 数值输入；仅在仍有瓶颈时加入 GPU 预处理。这样才能拆开“去 JPEG”“换后端”“缩小源窗口”和“减小模型”各自的收益。预热与冷启动分开统计，GPU kernel 用 GPU event 计时，端到端用统一单调时钟。
+对照实验应保持实际客户区、游戏场景、渲染设置、模型、功耗状态及记录负载一致，分别测：当前 MSS+JPEG；MSS 数值输入；DXGI 数值输入；仅在仍有瓶颈时加入 GPU 预处理。MSS 数值输入仅作为拆分成本的诊断条件；WGC 对照不是本次交付前置。这样才能拆开“去 JPEG”“换后端”“缩小源窗口”和“减小模型”各自的收益。预热与冷启动分开统计，GPU kernel 用 GPU event 计时，端到端用统一单调时钟。
 
 故障注入必须覆盖：5%/10% 随机丢帧、100 ms 突发缺帧、300 ms 断流、writer 卡 1 秒、推理超过 deadline、重复旧帧、槽复用压力、暂停/重开/倒带/尺寸变化。验收目标分别是及时跳过并恢复、存档降级不堵控制、过期结果不发送、动作到期释放、无跨 epoch 历史；不是要求这些测试中 drop 始终为零。
 
 推荐实施分三步，每步可独立比较：
 
 1. **修正数据与调度接口。** 数值 actor、三阶段分离、latest 覆盖旧待处理项、常驻推理、有界异步存档、跳帧与动作租期。先保持当前模型尺寸和决策频率，验证软件行为与现有录制重放。
-2. **替换采集后端并做被动 A/B。** 固定依赖版本，WGC 首选、DXGI 对照，验证源时间、图像一致性、真实负载下的年龄分位数和资源占用；再决定决策频率。
+2. **接入 DXGI 并做被动 A/B。** 固定依赖版本，显式选择 DXGI，与 MSS 基线比较；验证 adapter/显示器匹配、源时间、图像一致性、真实负载下的年龄分位数和资源占用，再决定决策频率。
 3. **按证据优化 GPU 与训练。** 当映射/CPU resize 仍占主导时做 D3D11→CUDA；输入分布和时间契约已变化时重建训练数据并验证新候选，再进入有界实机驾驶验收。
 
 本调研不修改 [ADR 0004](adr/0004-multimodal-learning-before-geometry.md) / [ADR 0005](adr/0005-visual-navigation-optional-reference.md) 的多模态学习方向。后续实现应更新图像观测与模型契约；当前规格中的“缺图即终止”“必须完整存档”等约束若与用户新要求冲突，应明确版本化替换，不能一边宣称容错一边继续由 writer 满队列终止驾驶。
