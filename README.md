@@ -69,7 +69,7 @@ uv run --locked fh5 observe runs/vision-001 --config configs/observations-naviga
 
 ## 人工同步示范
 
-T26 / #27 从实体 XInput 手柄读取原始动作，与 RGB 和遥测同步记录；双踏板、手刹、争用及失焦等片段保留并排除。`fh5 input-devices` 查看设备，`fh5 demonstrate` 被动采集，`fh5 demonstration-dataset` 按独立回合导出无参考/参考辅助视图及未来轨迹监督。校准、质量审阅和命令见[同步示范说明](docs/demonstrations.md)。这一切片不训练或执行驾驶策略。
+T26 / #27 从实体 XInput 手柄读取原始动作，与 RGB 和遥测同步记录；双踏板、手刹、争用及失焦等片段保留并排除。`fh5 input-devices` 查看设备，`fh5 demonstrate` 被动采集，`fh5 demonstration-dataset` 按独立回合导出无参考/参考辅助视图及未来轨迹监督。校准、质量审阅和命令见[同步示范说明](docs/demonstrations.md)，真实短段及失败排除见[验收记录](docs/validation/t26-demonstrations.md)。这一切片不训练或执行驾驶策略。
 
 ## 开发检查
 
