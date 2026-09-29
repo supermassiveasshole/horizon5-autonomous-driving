@@ -21,10 +21,21 @@ if TYPE_CHECKING:
 
 VIEWS = ("no_reference", "reference_assisted")
 ARCHITECTURE = "rgb-history-conv4-64-state64-fusion128-tanh2-v1"
+MODEL_METADATA_KEYS = (
+    "version",
+    "architecture",
+    "contract",
+    "config",
+    "preprocessing",
+    "future_supervision",
+)
 
 
 def _json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8-sig"))
+    value = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(value, dict):
+        raise ValueError(f"Expected a JSON object: {path}")
+    return value
 
 
 def _hash(path: Path) -> str:
@@ -298,6 +309,12 @@ def _report(path: Path, summary: dict[str, Any]) -> None:
 
 def _config(path: Path) -> dict[str, Any]:
     value: dict[str, Any] = _json(path)
+    return _checked_config(value)
+
+
+def _checked_config(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise ValueError("BC config must be an object")
     if value.get("version") != 1 or set(value) != {
         "version",
         "dataset",
@@ -328,7 +345,7 @@ def _config(path: Path) -> dict[str, Any]:
         raise ValueError("Invalid device")
     if value["batch_size"] % 2:
         raise ValueError("Batch size must be even for paired reference views")
-    return value
+    return dict(value)
 
 
 def run_offline(request: BCTrain | BCReplay) -> RunResult:
@@ -373,11 +390,25 @@ def _run_offline(request: BCTrain | BCReplay, torch: Any) -> RunResult:
         output = request.model_dir
         manifest = _json(output / "model.json")
         if (
+            not {
+                "version",
+                "architecture",
+                "weights_sha256",
+                "contract",
+                "config",
+                "preprocessing",
+                "future_supervision",
+                "training",
+            }
+            <= manifest.keys()
+        ):
+            raise ValueError("Incomplete model manifest")
+        if (
             manifest["architecture"] != ARCHITECTURE
             or _hash(output / "actor.pt") != manifest["weights_sha256"]
         ):
             raise ValueError("Bad model artifact")
-        config = manifest["config"]
+        config = _checked_config(manifest["config"])
         dataset_path, report, device = request.dataset_file, request.report_path, request.device
     if device not in ("cpu", "cuda") or (device == "cuda" and not torch.cuda.is_available()):
         raise ValueError("Requested BC device unavailable")
@@ -472,17 +503,7 @@ def _run_offline(request: BCTrain | BCReplay, torch: Any) -> RunResult:
         torch.save(
             {
                 "actor": model.state_dict(),
-                "metadata": {
-                    k: manifest[k]
-                    for k in (
-                        "version",
-                        "architecture",
-                        "contract",
-                        "config",
-                        "preprocessing",
-                        "future_supervision",
-                    )
-                },
+                "metadata": {k: manifest[k] for k in MODEL_METADATA_KEYS},
             },
             output / "actor.pt",
         )
@@ -490,15 +511,10 @@ def _run_offline(request: BCTrain | BCReplay, torch: Any) -> RunResult:
         model = make_actor(contract).to(device)
     try:
         saved = torch.load(output / "actor.pt", map_location=device, weights_only=True)
-        keys = (
-            "version",
-            "architecture",
-            "contract",
-            "config",
-            "preprocessing",
-            "future_supervision",
-        )
-        if saved["metadata"] != {k: manifest[k] for k in keys} or manifest["version"] != 1:
+        if (
+            saved["metadata"] != {k: manifest[k] for k in MODEL_METADATA_KEYS}
+            or manifest["version"] != 1
+        ):
             raise ValueError("Model metadata mismatch")
         model.load_state_dict(saved["actor"], strict=True)
         if not all(torch.isfinite(p).all() for p in model.parameters()):

@@ -1,6 +1,6 @@
 # 歌利亚驾驶学习主方案
 
-状态：多模态学习与视觉导航方向已收敛，产品与验收基线见 [PRD v1.2](PRD.md)；接口与采集已部分验收，学习策略尚未实现或实机验证。用户决定见 [范围记录](scope-decisions.md)，观测/示范/学习契约见 [多模态规格](multimodal-learning-spec.md)。
+状态：多模态学习与视觉导航方向已收敛，产品与验收基线见 [PRD v1.2](PRD.md)；接口与采集已部分验收，已有[离线 BC 初始化](validation/t27-bc.md)，尚未实机验证学习策略或实现 SAC。用户决定见 [范围记录](scope-decisions.md)，观测/示范/学习契约见 [多模态规格](multimodal-learning-spec.md)。
 
 ## 成果方向
 

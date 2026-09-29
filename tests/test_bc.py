@@ -90,7 +90,15 @@ def test_export_cannot_be_edited_to_leak_targets_or_promote_failures(tmp_path, c
 
 
 @pytest.mark.parametrize(
-    "problem", ["missing_image", "action_version", "observation_version", "weights", "manifest"]
+    "problem",
+    [
+        "missing_image",
+        "action_version",
+        "observation_version",
+        "weights",
+        "manifest",
+        "empty_manifest",
+    ],
 )
 def test_incompatible_or_broken_evidence_is_rejected_without_output(tmp_path, problem):
     from fh5.bc import BCReplay
@@ -101,6 +109,8 @@ def test_incompatible_or_broken_evidence_is_rejected_without_output(tmp_path, pr
         next((tmp_path / "train/frames").glob("*.png")).unlink()
     elif problem == "weights":
         (request.output_dir / "actor.pt").write_bytes(b"not a model")
+    elif problem == "empty_manifest":
+        (request.output_dir / "model.json").write_text("{}")
     elif problem == "manifest":
         path = request.output_dir / "model.json"
         data = json.loads(path.read_text(encoding="utf-8"))
