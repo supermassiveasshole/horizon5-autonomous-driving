@@ -75,7 +75,7 @@ def validate_control_file(path: Path) -> dict[str, Any]:
         ("max_speed_kmh", 1, 40),
         ("start_speed_kmh", 0, 5),
         ("max_steer", 0, 0.5),
-        ("max_throttle", 0, 0.25),
+        ("max_throttle", 0, 0.35),
         ("max_brake", 0, 1),
         ("telemetry_timeout_s", 0.1, 0.5),
         ("ready_timeout_s", 0.1, 60),
@@ -91,9 +91,46 @@ def validate_control_file(path: Path) -> dict[str, Any]:
             raise ValueError("Each control step must be an object")
         bounded(step, "seconds", 0.02, 30)
         bounded(step, "steer", -1, 1)
-        bounded(step, "longitudinal", -1, 1)
+        if "target_speed_kmh" in step:
+            if "longitudinal" in step:
+                raise ValueError("A step cannot request both speed feedback and fixed pedals")
+            bounded(step, "target_speed_kmh", 0, config["max_speed_kmh"] - 3)
+        else:
+            bounded(step, "longitudinal", -1, 1)
     if sum(step["seconds"] for step in steps) > 30:
         raise ValueError("Calibration may last at most 30 seconds")
+    feedback = any("target_speed_kmh" in step for step in steps)
+    if not feedback and config["max_throttle"] > 0.25:
+        raise ValueError("Fixed calibration throttle may not exceed 0.25")
+    guard = config.get("spatial_guard")
+    if feedback and not isinstance(guard, dict):
+        raise ValueError("Speed feedback requires an explicit spatial_guard")
+    if feedback and (config["max_steer"] != 0 or any(s["steer"] != 0 for s in steps)):
+        raise ValueError("Speed collection assistance currently requires neutral steering")
+    if feedback and (
+        any("target_speed_kmh" not in s for s in steps) or steps[-1]["target_speed_kmh"] != 0
+    ):
+        raise ValueError("Speed feedback requires speed-only steps ending with a zero target")
+    if feedback and steps[-1]["seconds"] < 0.3:
+        # Longer than the 250 ms stall guard: a non-stalled schedule must
+        # visit the braking phase instead of jumping over it at the next tick.
+        raise ValueError("Final zero-speed phase must last at least 0.3 seconds")
+    if guard is not None:
+        if not isinstance(guard, dict):
+            raise ValueError("spatial_guard must be an object")
+        position = guard.get("start_position_m")
+        if not isinstance(position, list) or len(position) != 3:
+            raise ValueError("spatial_guard requires a three-dimensional start position")
+        for value in position:
+            bounded({"coordinate": value}, "coordinate", -100_000, 100_000)
+        for key, low, high in [
+            ("start_radius_m", 0.1, 2),
+            ("heading_rad", -math.pi, math.pi),
+            ("max_heading_error_rad", 0.01, 0.3),
+            ("max_lateral_m", 0.1, 2),
+            ("max_distance_m", 1, 60),
+        ]:
+            bounded(guard, key, low, high)
     return config
 
 
@@ -118,6 +155,44 @@ def _sample_stop_reason(sample: dict[str, Any], config: dict[str, Any]) -> str |
     return None
 
 
+def _spatial_stop_reason(
+    sample: dict[str, Any], config: dict[str, Any], *, starting: bool
+) -> str | None:
+    guard = config.get("spatial_guard")
+    if guard is None or not sample["is_race_on"]:
+        return None
+    if sample["motion"] is None:
+        return "invalid_motion"
+    position = sample["position_m"]
+    origin = guard["start_position_m"]
+    distance = math.dist(position, origin)
+    if starting and distance > guard["start_radius_m"]:
+        return "start_position_mismatch"
+    if distance > guard["max_distance_m"]:
+        return "distance_limit"
+    yaw = guard["heading_rad"]
+    lateral = math.cos(yaw) * (position[0] - origin[0]) - math.sin(yaw) * (position[2] - origin[2])
+    if abs(lateral) > guard["max_lateral_m"]:
+        return "lateral_limit"
+    if abs(position[1] - origin[1]) > 2:
+        return "height_limit"
+    error = math.atan2(
+        math.sin(sample["motion"]["yaw_rad"] - yaw), math.cos(sample["motion"]["yaw_rad"] - yaw)
+    )
+    if abs(error) > guard["max_heading_error_rad"]:
+        return "heading_limit"
+    return None
+
+
+def _forward_m(sample: dict[str, Any], guard: dict[str, Any]) -> float:
+    position = sample["position_m"]
+    origin = guard["start_position_m"]
+    yaw = guard["heading_rad"]
+    return float(
+        math.sin(yaw) * (position[0] - origin[0]) + math.cos(yaw) * (position[2] - origin[2])
+    )
+
+
 def _run_control(
     request: Control, environment: ControlEnvironment, config: dict[str, Any]
 ) -> RunResult:
@@ -131,6 +206,9 @@ def _run_control(
         "release_sent": False,
         "commands": [],
         "adapter_events": environment.events,
+        "feedback_version": "bounded-speed-v1"
+        if any("target_speed_kmh" in s for s in config["steps"])
+        else None,
     }
 
     def stream() -> Iterator[Packet]:
@@ -164,6 +242,8 @@ def _run_control(
             latest: dict[str, Any] | None = None
             game_advanced_ns = waiting_since
             previous_tick = waiting_since
+            guard = config.get("spatial_guard")
+            max_forward: float | None = None
             try:
                 send(Command(0, 0, 0), None, "stop_guard")
                 while True:
@@ -210,6 +290,12 @@ def _run_control(
                             game_advanced_ns = sample["received_monotonic_ns"]
                         if started is not None:
                             reason = _sample_stop_reason(sample, config) or reason
+                            reason = _spatial_stop_reason(sample, config, starting=False) or reason
+                            if guard is not None and max_forward is not None:
+                                forward = _forward_m(sample, guard)
+                                if forward < max_forward - 0.5:
+                                    reason = "reverse_motion"
+                                max_forward = max(max_forward, forward)
                         latest = sample
                     if frame.fault:
                         reason = frame.fault
@@ -225,6 +311,10 @@ def _run_control(
                         reason = "telemetry_stale"
                     elif sample_reason := _sample_stop_reason(latest, config):
                         reason = sample_reason
+                    elif spatial_reason := _spatial_stop_reason(
+                        latest, config, starting=started is None
+                    ):
+                        reason = spatial_reason
                     elif now - game_advanced_ns > config["telemetry_timeout_s"] * 1e9:
                         reason = "game_time_stalled"
                     if started is None:
@@ -242,6 +332,9 @@ def _run_control(
                         break
                     if started is None:
                         started = now
+                        if guard is not None:
+                            assert latest is not None
+                            max_forward = _forward_m(latest, guard)
                     elapsed = now - started
                     end = 0
                     for step in config["steps"]:
@@ -249,12 +342,34 @@ def _run_control(
                         if elapsed < end:
                             break
                     else:
-                        result["stop_reason"] = "completed"
+                        result["stop_reason"] = (
+                            "not_stopped"
+                            if result["feedback_version"]
+                            and latest is not None
+                            and latest["speed_kmh"] > 0.5
+                            else "completed"
+                        )
                         break
                     steer = max(-config["max_steer"], min(config["max_steer"], step["steer"]))
-                    longitudinal = max(
-                        -config["max_brake"], min(config["max_throttle"], step["longitudinal"])
-                    )
+                    requested = {"steer": step["steer"]}
+                    if "target_speed_kmh" in step:
+                        assert latest is not None
+                        target = step["target_speed_kmh"]
+                        speed = latest["speed_kmh"]
+                        # Never hold the brake at rest: LT can select reverse in
+                        # automatic shifting. The independent hard speed stop remains.
+                        pedal = (
+                            -config["max_brake"]
+                            if speed > target + 0.5
+                            else config["max_throttle"]
+                            if speed < target - 0.5
+                            else 0.0
+                        )
+                        requested.update(target_speed_kmh=target, observed_speed_kmh=speed)
+                    else:
+                        pedal = step["longitudinal"]
+                    requested["longitudinal"] = pedal
+                    longitudinal = max(-config["max_brake"], min(config["max_throttle"], pedal))
                     command = Command(
                         round(steer * 32767),
                         round(max(0, longitudinal) * 255),
@@ -262,7 +377,7 @@ def _run_control(
                     )
                     send(
                         command,
-                        {"steer": step["steer"], "longitudinal": step["longitudinal"]},
+                        requested,
                         "calibration",
                     )
                 send(Command(0, 0, 0), None, "stop_guard")
