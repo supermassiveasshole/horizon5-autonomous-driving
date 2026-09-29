@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>BC 离线预测</title>
+<style>
+  body {font:16px system-ui;margin:24px;background:#f3f5f7;color:#172537}
+  main {max-width:1200px;margin:auto}
+  section {background:white;padding:20px;border-radius:12px;margin:20px 0}
+  table {border-collapse:collapse;width:100%} td,th {text-align:left;padding:10px;border-bottom:1px solid #ddd}
+  img {width:100%;aspect-ratio:16/9;object-fit:contain;background:#162331}
+  input {width:100%} button,select {padding:10px;margin:5px} button {cursor:pointer}
+  pre {white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px}
+  .cards {display:flex;gap:8px}.cards img{min-width:0;flex:1}
+  canvas {width:100%;height:240px} #status {min-height:1.5em;color:#5b6473}
+  .numbers {font-size:18px;font-variant-numeric:tabular-nums;padding:12px;background:#edf3fa}
+  @media(max-width:720px){body{margin:8px}section{padding:12px}table{font-size:12px}}
+</style>
+<main>
+<h1>BC 离线预测</h1>
+<p>真实截图 + 本车状态 + 先前动作 + 可选参考。这里只展示离线预测，未验证闭环驾驶或视觉驾驶收益。</p>
+<section>
+  <h2>训练与留出</h2><div id="metrics"></div>
+  <details><summary>训练配置与来源</summary><pre id="config"></pre></details>
+</section>
+<section>
+  <h2>逐帧预测回放</h2>
+  <select id="run" aria-label="录制"></select>
+  <select id="view" aria-label="参考条件"><option value="no_reference">无参考</option><option value="reference_assisted">有参考</option></select>
+  <button id="play">播放</button><button id="first">首个可评分样本</button><button id="worst">最大误差</button>
+  <input id="seek" type="range" min="0" value="0" aria-label="观测时间">
+  <div id="status"></div><div class="cards" id="cards"></div>
+  <p class="numbers" id="numbers"></p>
+  <canvas id="chart" width="1100" height="240" aria-label="转向和纵向预测时间线"></canvas>
+  <p>蓝：人工输入　橙：模型预测　灰竖线：当前时刻。失误片段保留，但不计入正确动作误差。</p>
+  <details><summary>当前样本详情</summary><pre id="detail"></pre></details>
+</section>
+<section>
+  <h2>分层误差与失败</h2>
+  <p>转向与纵向均为 [-1, 1]；负纵向代表 LT 减速刹车。failed/unknown 不作正确动作评分。历史动作基线仅复制最近一次已知输入。</p>
+  <div id="counts"></div><pre id="strata"></pre>
+</section>
+</main>
+<script type="application/json" id="data"><!--BC_DATA--></script>
+<script>
+const d = JSON.parse(document.getElementById('data').textContent);
+const $ = id => document.getElementById(id);
+let selection = [], timer = null, generation = 0;
+const fmt = x => x === null ? '—' : x.map(v => v.toFixed(4)).join(' / ');
+const table = document.createElement('table');
+const header = table.insertRow();
+for (const text of ['划分 / 参考', '样本数', 'MAE 转向 / 纵向', '历史动作基线 MAE']) {
+  const th = document.createElement('th'); th.textContent = text; header.appendChild(th);
+}
+for (const [split, views] of Object.entries(d.metrics)) {
+  for (const [view, metric] of Object.entries(views)) {
+    const row = table.insertRow();
+    for (const text of [`${split} / ${view}`, metric.count, fmt(metric.mae), fmt(metric.previous_action_baseline.mae)]) {
+      row.insertCell().textContent = text;
+    }
+  }
+}
+$('metrics').appendChild(table);
+$('config').textContent = JSON.stringify({architecture:d.architecture, training:d.training,
+  preprocessing:d.preprocessing, visual_intervention:d.visual_intervention,
+  contract:d.contract, weights_sha256:d.weights_sha256, evaluation_dataset_sha256:d.evaluation_dataset_sha256}, null, 2);
+d.sources.forEach((s, i) => {
+  const option = document.createElement('option'); option.value = i;
+  option.textContent = `${s.split} · 录制 ${i}`; $('run').appendChild(option);
+});
+for (let i = 0; i < d.contract.image_count; i++) {
+  const node = document.createElement('img'); node.id = 'i' + i;
+  node.alt = `历史图像 ${i + 1}`; $('cards').appendChild(node);
+}
+function chart() {
+  const canvas = $('chart'), ctx = canvas.getContext('2d'), w = canvas.width, h = canvas.height;
+  ctx.clearRect(0,0,w,h); ctx.font = '13px system-ui';
+  for (let axis = 0; axis < 2; axis++) {
+    const center = 60 + axis * 120;
+    ctx.fillStyle = '#172537'; ctx.fillText(axis ? '纵向 −刹车 / +油门' : '转向 −左 / +右', 8, center-43);
+    ctx.strokeStyle = '#dde4ec'; ctx.beginPath();ctx.moveTo(0,center);ctx.lineTo(w,center);ctx.stroke();
+    for (const [field,color] of [['target','#2563eb'],['prediction','#ea6b15']]) {
+      ctx.strokeStyle = color;ctx.beginPath();let active=false;
+      selection.forEach((row,i) => {
+        if (!row[field]) {active=false;return;}
+        const x = i/Math.max(1,selection.length-1)*w, y = center-row[field][axis]*40;
+        if (active) ctx.lineTo(x,y); else ctx.moveTo(x,y);active=true;
+      });ctx.stroke();
+    }
+  }
+  const x = Number($('seek').value)/Math.max(1,selection.length-1)*w;
+  ctx.strokeStyle='#777';ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,h);ctx.stroke();
+}
+function imageUrl(row,img) {
+  return new URL(img.path,'file:///'+d.sources[row.run_index].directory.replaceAll('\\','/')+'/').href;
+}
+async function render() {
+  const row = selection[Number($('seek').value)]; if (!row) return;
+  const token = ++generation; $('status').textContent = '正在加载本次观测图像…';
+  const loaded = await Promise.all(row.images.map((img,i) => new Promise(resolve => {
+    if (!img) {resolve(null);return;}
+    const url = imageUrl(row,img), node = $('i'+i);
+    if (node.dataset.path === url) {resolve(url);return;}
+    const preload = new Image();preload.onload=()=>resolve(url);preload.onerror=()=>resolve(null);preload.src=url;
+  })));
+  if (token !== generation) return;
+  loaded.forEach((url,i) => {
+    const node=$('i'+i);
+    if (url) {if(node.dataset.path!==url)node.src=url;node.dataset.path=url;}
+    else {node.removeAttribute('src');delete node.dataset.path;}
+  });
+  $('status').textContent = `${row.elapsed_s.toFixed(1)} 秒 · ${row.quality} · ${row.scored ? '计入误差' : '不计分'} · ${loaded.filter(Boolean).length}/${row.images.length} 张图像`;
+  $('numbers').textContent = `人工输入 ${fmt(row.target)}　模型预测 ${fmt(row.prediction)}　速度 ${row.speed_kmh===null?'—':row.speed_kmh.toFixed(1)} km/h`;
+  $('detail').textContent = JSON.stringify({...row,images:undefined},null,2);chart();
+}
+function stop() {if(timer)clearInterval(timer);timer=null;$('play').textContent='播放';}
+function choose() {
+  stop();selection=d.predictions.filter(r=>r.run_index===Number($('run').value)&&r.view===$('view').value);
+  $('seek').max=Math.max(0,selection.length-1);$('seek').value=0;
+  const split=d.sources[Number($('run').value)].split;
+  $('strata').textContent=JSON.stringify(d.metrics[split][$('view').value],null,2);
+  $('counts').textContent=`本段 ${selection.length} 次观测，${selection.filter(r=>r.scored).length} 次计分，${selection.filter(r=>r.quality==='failed').length} 次已确认失败观测。`;
+  render();
+}
+$('run').onchange=$('view').onchange=choose;
+$('seek').oninput=()=>{stop();render();};
+$('first').onclick=()=>{stop();$('seek').value=Math.max(0,selection.findIndex(r=>r.scored));render();};
+$('worst').onclick=()=>{
+  stop();let worst=-1,index=0;
+  selection.forEach((r,i)=>{if(r.scored){const error=Math.abs(r.prediction[0]-r.target[0])+Math.abs(r.prediction[1]-r.target[1]);if(error>worst){worst=error;index=i;}}});
+  $('seek').value=index;render();
+};
+$('play').onclick=()=>{
+  if(timer){stop();return;}
+  if(+$('seek').value>=selection.length-1)$('seek').value=0;
+  timer=setInterval(()=>{if(+$('seek').value>=selection.length-1){stop();return;}$('seek').value=+$('seek').value+1;render();},d.contract.observation.period_ms);
+  $('play').textContent='暂停';
+};
+choose();
+</script>
+</html>

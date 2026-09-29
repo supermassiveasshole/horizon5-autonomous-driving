@@ -13,6 +13,7 @@ from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from fh5.bc import BCReplay, BCTrain
 from fh5.control import Control, validate_control_file
 from fh5.demonstration_dataset import DemonstrationDataset
 from fh5.demonstrations import DemonstrationRecord, DemonstrationReplay
@@ -38,6 +39,14 @@ def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Record and replay FH5 Data Out experiments")
     commands = parser.add_subparsers(dest="mode", required=True)
+    bc = commands.add_parser("bc-train", help="Train a bounded offline multimodal BC actor")
+    bc.add_argument("--config", type=Path, required=True)
+    bc.add_argument("--output", type=Path, required=True)
+    bc_replay = commands.add_parser("bc-replay", help="Replay a frozen BC actor; no game input")
+    bc_replay.add_argument("--model", type=Path, required=True)
+    bc_replay.add_argument("--dataset", type=Path, required=True)
+    bc_replay.add_argument("--report", type=Path, required=True)
+    bc_replay.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     record = commands.add_parser("record", help="Receive UDP; stop on Ctrl+C or the time limit")
     record.add_argument("--config", type=Path, required=True)
     record.add_argument("--output", type=Path, required=True)
@@ -134,7 +143,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             print(json.dumps({"devices": input_devices(), "commands_sent": False}))
             return 0
-        if args.mode == "demonstration-replay":
+        if args.mode == "bc-train":
+            result = run_experiment(BCTrain(args.config, args.output))
+        elif args.mode == "bc-replay":
+            result = run_experiment(BCReplay(args.model, args.dataset, args.report, args.device))
+        elif args.mode == "demonstration-replay":
             result = run_experiment(DemonstrationReplay(args.recording, args.report))
         elif args.mode == "demonstration-dataset":
             result = run_experiment(DemonstrationDataset(args.config, args.output))
@@ -333,6 +346,19 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError, ImportError) as error:
         print(json.dumps({"status": "error", "message": str(error)}), file=sys.stderr)
         return 2
+    if "bc" in result.summary:
+        print(
+            json.dumps(
+                {
+                    "status": "offline_complete",
+                    "report": str(result.report_path),
+                    "game_validation": "unverified",
+                    "commands_sent": False,
+                    "weights_sha256": result.summary["bc"]["weights_sha256"],
+                }
+            )
+        )
+        return 0
     print(
         json.dumps(
             {

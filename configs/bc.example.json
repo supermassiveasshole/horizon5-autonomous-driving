@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "dataset": "../runs/t27-dataset-reviewed/dataset.json",
+  "seed": 20260929,
+  "steps": 200,
+  "batch_size": 32,
+  "learning_rate": 0.001,
+  "image_size": [480, 270],
+  "device": "cuda"
+}

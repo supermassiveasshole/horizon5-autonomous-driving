@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from fh5.bc import BCReplay, BCTrain, run_bc
 from fh5.control import Control, ControlEnvironment, read_control, run_control
 from fh5.demonstration_dataset import DemonstrationDataset, export_demonstrations
 from fh5.demonstrations import (
@@ -172,7 +173,9 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 
 def run_experiment(
-    request: DemonstrationRecord
+    request: BCTrain
+    | BCReplay
+    | DemonstrationRecord
     | DemonstrationDataset
     | DemonstrationReplay
     | Record
@@ -192,6 +195,8 @@ def run_experiment(
     road_model: RoadModel | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, (BCTrain, BCReplay)):
+        return run_bc(request)
     if isinstance(request, DemonstrationDataset):
         return export_demonstrations(request)
     if isinstance(request, DemonstrationReplay):
