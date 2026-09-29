@@ -273,6 +273,15 @@ def read_policy(directory: Path) -> dict[str, Any]:
         path = directory / name
         if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != hashes.get(name):
             errors.append("Policy evidence changed: " + name)
+    journal = directory / "policy-decisions.jsonl"
+    if journal.is_file():
+        try:
+            if [json.loads(line) for line in journal.read_bytes().splitlines()] != value.get(
+                "decisions"
+            ):
+                errors.append("Policy decisions differ from the finalized journal")
+        except ValueError:
+            errors.append("Invalid policy decision journal")
     value["artifact_errors"] = errors
     value["formal_validity"] = "pending_independent_review"
     return value

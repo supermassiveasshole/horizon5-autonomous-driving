@@ -192,6 +192,78 @@ def test_declared_manual_start_inside_verified_region_is_not_a_fake_trajectory(t
     assert result.samples[0]["position_m"][0] == 1.5
 
 
+def test_deadline_crossed_in_final_receive_brakes_without_an_extra_prediction_send(tmp_path):
+    path = config(tmp_path)
+    root = json.loads(path.read_text())
+    root["policy"]["max_duration_s"] = 0.108
+    path.write_text(json.dumps(root))
+    result = run_experiment(
+        PolicyDrive(path, tmp_path / "drive"),
+        policy_environment=DrivingGame(),
+        policy_actor=VisualActor(),
+    )
+    p = result.summary["policy"]
+    assert p["stop_reason"] == "time_limit"
+    assert len([c for c in p["commands"] if c["owner"] == "policy"]) == 1
+    assert p["decisions"][-1]["rejection"] == "time_limit"
+
+
+def test_stalled_game_clock_never_arms_even_with_fresh_rgb_and_packets(tmp_path):
+    class FrozenGame(DrivingGame):
+        def read(self, period_s):
+            batch = super().read(period_s)
+            raw = bytearray(batch.packets[0].payload)
+            struct.pack_into("<I", raw, 4, 1000)
+            return replace(batch, packets=(replace(batch.packets[0], payload=bytes(raw)),))
+
+    result = run_experiment(
+        PolicyDrive(config(tmp_path), tmp_path / "drive"),
+        policy_environment=FrozenGame(),
+        policy_actor=VisualActor(),
+    )
+    assert not result.summary["policy"]["decisions"]
+
+
+def test_blocked_image_disk_does_not_block_control_release(tmp_path, monkeypatch):
+    import threading
+    from pathlib import Path
+
+    path = config(tmp_path)
+    unblock, done = threading.Event(), threading.Event()
+    original = Path.write_bytes
+
+    def write_bytes(file, value):
+        if file.parent.name == "frames":
+            unblock.wait(5)
+        return original(file, value)
+
+    monkeypatch.setattr(Path, "write_bytes", write_bytes)
+    game, results = DrivingGame(), []
+
+    def run():
+        try:
+            results.append(
+                run_experiment(
+                    PolicyDrive(path, tmp_path / "drive"),
+                    policy_environment=game,
+                    policy_actor=VisualActor(),
+                )
+            )
+        finally:
+            done.set()
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    try:
+        assert done.wait(2), "Blocked image persistence stalled the experiment runner"
+        assert results[0].summary["policy"]["stop_reason"] == "image_writer_backpressure"
+        assert results[0].summary["policy"]["release_sent"] and game.closed
+        assert not results[0].summary["policy"]["image_writer_released"]
+    finally:
+        unblock.set()
+        worker.join(2)
+
+
 @pytest.mark.parametrize("value", [[float("nan"), 0], [0, float("inf")], [0], [False, 0], [0, 2]])
 def test_invalid_prediction_is_a_retained_rejection(tmp_path, value):
     class BadActor(VisualActor):

@@ -13,6 +13,7 @@ from queue import Empty, Queue
 from typing import TYPE_CHECKING, Any
 
 from fh5.control import Command
+from fh5.policy_writer import PolicyImageWriter
 from fh5.routes import locate_route
 
 if TYPE_CHECKING:
@@ -22,6 +23,10 @@ if TYPE_CHECKING:
 
 class StopAttempt(Exception):
     pass
+
+
+class FinishPolicy(Exception):
+    """Cancel the pending inference, then let the stop guard finish braking."""
 
 
 def write_json(path: Path, value: Any) -> None:
@@ -58,6 +63,8 @@ class PolicySession:
         self.prior_state: dict[str, Any] = {}
         self.started = self.env.now_ns()
         self.boundary_ns = self.started
+        self.clock_advanced_ns = self.started
+        self.clock_advances = 0
         self.armed: int | None = None
         self.braking: int | None = None
         self.focused = False
@@ -111,6 +118,9 @@ class PolicySession:
         from fh5.experiment import _decode
 
         now = self.env.now_ns()
+        if guard and self.writer.error:
+            self.result["image_writer_error"] = self.writer.error
+            raise StopAttempt("image_writer_error")
         self.focused = batch.focused
         if guard and (batch.stop_requested or batch.fault):
             # Keep the raw batch even when F8/fault arrives with it.
@@ -131,6 +141,9 @@ class PolicySession:
                 raise StopAttempt("invalid_telemetry")
             if self.latest and s["received_monotonic_ns"] <= self.latest["received_monotonic_ns"]:
                 raise StopAttempt("telemetry_clock_discontinuity")
+            if self.latest and s["game_timestamp_ms"] > self.latest["game_timestamp_ms"]:
+                self.clock_advanced_ns = s["received_monotonic_ns"]
+                self.clock_advances += 1
             if self.armed is None and (
                 not s["is_race_on"]
                 or (
@@ -144,6 +157,7 @@ class PolicySession:
                 )
             ):
                 self.boundary_ns = s["received_monotonic_ns"]
+                self.clock_advances = 0
                 self.frames.clear()
                 self.pixels.clear()
                 self.prior_state.clear()
@@ -162,7 +176,8 @@ class PolicySession:
             if self.armed is not None:
                 self.check()
         for event in batch.events:
-            self.vj.write(json.dumps(event) + "\n")
+            if not self.writer.append(event):
+                raise StopAttempt("image_writer_backpressure")
             if self.armed is None and event.get("kind") in (
                 "focus_lost",
                 "focus_restored",
@@ -190,26 +205,24 @@ class PolicySession:
             self.written += len(f.encoded) + 2048
             if self.written > 256 * 1024**2:
                 raise StopAttempt("byte_limit")
-            (self.directory / relative).write_bytes(f.encoded)
             row = {k: v for k, v in asdict(f).items() if k != "encoded"}
             row.update(
                 kind="frame",
                 path=relative,
                 sha256=hashlib.sha256(f.encoded).hexdigest(),
                 delivered_ns=now,
-                stored_ns=self.env.now_ns(),
             )
             if f.capture_start_ns >= self.boundary_ns:
                 self.frames.append(row)
                 self.pixels[relative] = f.encoded
-            self.vj.write(json.dumps(row) + "\n")
+            if not self.writer.append(row, f.encoded):
+                raise StopAttempt("image_writer_backpressure")
             # Keep sufficient history in memory; all frames remain on disk.
             horizon = (
                 max(self.settings["history_offsets_ms"]) + self.settings["max_image_age_ms"] + 1000
             ) * 1e6
             while len(self.frames) > 1 and now - self.frames[0]["delivered_ns"] > horizon:
                 self.pixels.pop(self.frames.pop(0)["path"])
-        self.vj.flush()
         if guard and (not self.focused or not self.latest or not self.latest["is_race_on"]):
             if self.armed is not None:
                 raise StopAttempt("inactive")
@@ -218,6 +231,7 @@ class PolicySession:
             self.prior_state.clear()
         if guard and self.armed is not None:
             self.check()
+            self.brake_if_due()
 
     def check(self) -> None:
         s, cfg = self.latest, self.config
@@ -239,12 +253,34 @@ class PolicySession:
             raise StopAttempt("stale_telemetry")
         if not s["motion"]:
             raise StopAttempt("invalid_motion")
+        if self.env.now_ns() - self.clock_advanced_ns > 100_000_000:
+            raise StopAttempt("stalled_game_clock")
         if s["speed_kmh"] >= cfg["max_speed_kmh"]:
             raise StopAttempt("speed_limit")
         if self.geometry["status"] not in ("matched", "awaiting_checkpoint"):
             raise StopAttempt("task_location_untrusted")
         if (self.directory / "STOP").exists():
             raise StopAttempt("stop_file")
+
+    def brake_if_due(self) -> bool:
+        if self.braking is not None:
+            return True
+        if self.armed is None:
+            return False
+        reached = (
+            self.geometry["confirmed_progress_m"]
+            >= self.route["length_m"] - self.config.get("end_margin_m", 0) - 1e-6
+        )
+        if not reached and self.env.now_ns() - self.armed < self.config["max_duration_s"] * 1e9:
+            return False
+        self.result["geometry_completed"] = reached
+        self.result["stop_reason"] = "local_end" if reached else "time_limit"
+        self.braking = self.env.now_ns()
+        if self.latest and self.latest["speed_kmh"] > 0.5:
+            self.send(Command(0, 0, round(self.config["max_brake"] * 255)), "stop_guard", {})
+        else:
+            self.send(Command(0, 0, 0), "stop_guard", {})
+        return True
 
     def infer(self, decision: dict[str, Any]) -> Iterator[Packet]:
         observation = decision["observation"]
@@ -261,6 +297,8 @@ class PolicySession:
         self.worker.start()
         deadline = decision["decision_ns"] + self.config["inference_timeout_ms"] * 1e6
         while True:
+            if self.brake_if_due():
+                raise FinishPolicy(self.result["stop_reason"])
             if self.env.now_ns() > deadline:
                 raise StopAttempt("inference_timeout")
             try:
@@ -284,6 +322,8 @@ class PolicySession:
                 raise StopAttempt("inference_timeout")
             # Recheck the most recent environment after inference, before actuator send.
             yield from self.receive(self.env.read(0.005))
+            if self.brake_if_due():
+                raise FinishPolicy(self.result["stop_reason"])
             now = self.env.now_ns()
             if now - decision["decision_ns"] > self.config["max_command_age_ms"] * 1e6:
                 raise StopAttempt("stale_command")
@@ -307,9 +347,9 @@ class PolicySession:
         (self.directory / "vision-config.json").write_text(
             json.dumps(self.config), encoding="utf-8"
         )
+        self.writer = PolicyImageWriter(self.directory, self.env.now_ns)
         with (
             (self.directory / "commands.jsonl").open("x", encoding="utf-8") as self.cj,
-            (self.directory / "vision.jsonl").open("x", encoding="utf-8") as self.vj,
             (self.directory / "policy-decisions.jsonl").open("x", encoding="utf-8") as dj,
         ):
             try:
@@ -333,26 +373,6 @@ class PolicySession:
                         self.send(
                             Command(0, 0, round(self.config["max_brake"] * 255)), "stop_guard", {}
                         )
-                        continue
-                    if self.armed is not None and (
-                        self.geometry["confirmed_progress_m"]
-                        >= self.route["length_m"] - self.config.get("end_margin_m", 0) - 1e-6
-                        or now - self.armed >= self.config["max_duration_s"] * 1e9
-                    ):
-                        self.result["geometry_completed"] = (
-                            self.geometry["confirmed_progress_m"]
-                            >= self.route["length_m"] - self.config.get("end_margin_m", 0) - 1e-6
-                        )
-                        self.result["stop_reason"] = (
-                            "local_end" if self.result["geometry_completed"] else "time_limit"
-                        )
-                        self.braking = now
-                        if self.latest["speed_kmh"] > 0.5:
-                            self.send(
-                                Command(0, 0, round(self.config["max_brake"] * 255)),
-                                "stop_guard",
-                                {},
-                            )
                         continue
                     if now - last_decision < self.settings["period_ms"] * 1e6:
                         continue
@@ -385,6 +405,8 @@ class PolicySession:
                             or self.latest["speed_kmh"] > self.config["start_speed_kmh"]
                             or not observation["usable"]
                             or heading_error > 0.35
+                            or self.clock_advances < 2
+                            or now - self.clock_advanced_ns > 100_000_000
                         ):
                             continue
                         self.check()
@@ -409,6 +431,8 @@ class PolicySession:
                     self.result["decisions"].append(decision)
                     try:
                         yield from self.infer(decision)
+                        if self.brake_if_due():
+                            raise FinishPolicy(self.result["stop_reason"])
                         steer, longitudinal = decision["prediction"]
                         cfg = self.config
                         command = Command(
@@ -435,6 +459,9 @@ class PolicySession:
                                 "longitudinal": (command.throttle_u8 - command.brake_u8) / 255,
                             }
                         )
+                    except FinishPolicy as error:
+                        decision["rejection"] = str(error)
+                        continue
                     except StopAttempt as error:
                         decision["rejection"] = str(error)
                         raise
@@ -464,6 +491,17 @@ class PolicySession:
                 self.result["inference_worker_released"] = (
                     self.worker is None or not self.worker.is_alive()
                 )
+                self.result["image_writer_released"] = self.writer.close()
+                self.result["environment_released"] = self.result["resources_released"]
+                self.result["resources_released"] = (
+                    self.result["environment_released"]
+                    and self.result["image_writer_released"]
+                    and self.result["inference_worker_released"]
+                )
+                if self.writer.error:
+                    self.result["image_writer_error"] = self.writer.error
+                    if self.result["stop_reason"] in ("local_end", "time_limit"):
+                        self.result["stop_reason"] = "image_writer_error"
                 self.result["ended_ns"] = self.env.now_ns()
                 self.result["final_task_location"] = self.geometry
                 self.result["last_policy_packet"] = (
