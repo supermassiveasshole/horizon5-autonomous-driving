@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal
 
+from fh5.attempts import AttemptReplay, review_attempts
 from fh5.bc import BCReplay, BCTrain, run_bc
 from fh5.control import Control, ControlEnvironment, read_control, run_control
 from fh5.demonstration_dataset import DemonstrationDataset, export_demonstrations
@@ -180,7 +181,8 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 
 def run_experiment(
-    request: BCTrain
+    request: AttemptReplay
+    | BCTrain
     | BCReplay
     | DemonstrationRecord
     | DemonstrationDataset
@@ -203,6 +205,8 @@ def run_experiment(
     road_model: RoadModel | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, AttemptReplay):
+        return review_attempts(request)
     if isinstance(request, (BCTrain, BCReplay)):
         return run_bc(request)
     if isinstance(request, DemonstrationDataset):
@@ -450,7 +454,12 @@ def run_experiment(
         "segments": segment + bool(samples),
     }
     if metadata.get("control_source") == "calibration" or (directory / "control.json").exists():
-        summary["control"] = read_control(directory, samples)
+        try:
+            summary["control"] = read_control(directory, samples)
+        except ValueError as error:
+            events.append(
+                {"kind": "control_evidence_incomplete", "packet_index": None, "detail": str(error)}
+            )
     if any(
         (directory / name).exists()
         for name in ("event-run.json", "event-config.json", "event-journal.jsonl")

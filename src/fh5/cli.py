@@ -13,6 +13,7 @@ from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
 
+from fh5.attempts import AttemptReplay
 from fh5.bc import BCReplay, BCTrain
 from fh5.control import Control, validate_control_file
 from fh5.demonstration_dataset import DemonstrationDataset
@@ -39,6 +40,14 @@ def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Record and replay FH5 Data Out experiments")
     commands = parser.add_subparsers(dest="mode", required=True)
+    attempt = commands.add_parser(
+        "attempt-review",
+        help="Review complete local attempts with independent evidence; no game input",
+    )
+    attempt.add_argument("recording", type=Path)
+    attempt.add_argument("--task", type=Path, required=True)
+    attempt.add_argument("--evidence", type=Path)
+    attempt.add_argument("--output", type=Path, required=True)
     bc = commands.add_parser("bc-train", help="Train a bounded offline multimodal BC actor")
     bc.add_argument("--config", type=Path, required=True)
     bc.add_argument("--output", type=Path, required=True)
@@ -158,6 +167,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = run_experiment(BCReplay(args.model, args.dataset, args.report, args.device))
         elif args.mode == "demonstration-replay":
             result = run_experiment(DemonstrationReplay(args.recording, args.report))
+        elif args.mode == "attempt-review":
+            result = run_experiment(
+                AttemptReplay(args.recording, args.output, args.task, args.evidence)
+            )
         elif args.mode == "route-check":
             result = run_experiment(
                 RouteCheck(
@@ -379,6 +392,23 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         return 0
+    if "attempt_review" in result.summary:
+        review = result.summary["attempt_review"]
+        print(
+            json.dumps(
+                {
+                    "rules_version": review["rules_version"],
+                    "recording_packet_count": review["recording_packet_count"],
+                    "attempts": [
+                        {k: a[k] for k in ("attempt_id", "outcome", "reasons", "record_eligible")}
+                        for a in review["attempts"]
+                    ],
+                    "report": str(result.report_path),
+                    "commands_sent": False,
+                }
+            )
+        )
+        return 0 if all(a["record_eligible"] for a in review["attempts"]) else 4
     print(
         json.dumps(
             {

@@ -426,6 +426,10 @@ def read_control(directory: Path, samples: list[dict[str, Any]]) -> dict[str, An
         or result["version"] != 1
     ):
         raise ValueError("Unsupported control recording version")
+    if type(result.get("release_sent")) is not bool or not isinstance(
+        result.get("stop_reason"), str
+    ):
+        raise ValueError("Invalid control outcome or release confirmation")
     commands = []
     try:
         lines = (directory / "commands.jsonl").read_bytes().splitlines()

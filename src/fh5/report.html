@@ -54,6 +54,7 @@ td{overflow-wrap:anywhere}summary{cursor:pointer;font-weight:600}code{font-size:
 <p id="vision-readout"></p><details><summary>采集时序、事后配对与完整性</summary><pre id="vision-detail" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre><pre id="vision-timing" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details>
 </section>
 <section class="panel" id="route-panel" hidden><h2>局部路线与核验覆盖</h2><p id="route-quality"></p><p id="route-check"></p><p class="muted">橙色虚线：参考轨迹，不代表道路边界；绿色区域：已核实走廊；紫色线：检查点门。确认进度仅属于当前前向片段，不是全程成绩。</p><p id="route-position"></p><div class="table-wrap"><table><thead><tr><th>检查点顺序</th><th>距路线起点</th><th>核验状态</th></tr></thead><tbody id="route-gates"></tbody></table></div></section>
+<section class="panel" id="attempt-panel" hidden><h2>完整尝试与局部有效性</h2><p id="attempt-status"></p><p class="muted">局部结论依赖独立几何与人工证据。失败、恢复、接管和接口异常全部保留；局部完成不等于歌利亚全程完赛。当前不允许自动晋升，也不导出训练转移。</p><div class="table-wrap"><table><thead><tr><th>完整尝试 / 包范围</th><th>起点方式 / 控制归属</th><th>局部结果 / 核验模式</th><th>局部起终点 / 进度</th><th>原因 / 未覆盖项目</th><th>正式全程</th></tr></thead><tbody id="attempt-rows"></tbody></table></div><details><summary>前向片段、恢复排除区与证据</summary><pre id="attempt-evidence" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details><p id="attempt-position"></p></section>
 <section class="panel" aria-label="回放控制">
 <div class="controls">
 <button id="play" type="button">播放</button>
@@ -88,6 +89,14 @@ for(const [label,value] of [["数据包",summary.packet_count],["格式有效",s
 }
 const kinds={unsupported_packet:"未知包格式",invalid_value:"异常字段",receive_gap:"接收间隔过长",receive_clock_discontinuity:"接收时钟异常",game_time_discontinuity:"游戏时间跳变",position_jump:"位置跳变",capture_interrupted:"用户停止",capture_source_error:"接收故障",capture_recording:"录制未正常结束",no_telemetry:"未收到有效遥测",paused:"游戏非活动状态",resumed:"恢复活动状态",game_clock_wrap:"游戏计时回绕",corrupt_record:"记录损坏",incomplete_tail:"末尾记录不完整"};
 function row(target,values){const tr=document.createElement("tr");for(const value of values){const td=document.createElement("td");td.textContent=value??"—";tr.append(td);}el(target).append(tr);}
+const attemptReview=summary.attempt_review;
+if(attemptReview){
+ el("attempt-panel").hidden=false;
+ const names={valid_complete:"有效局部完成",driving_failed:"驾驶失败",invalid:"确认违规",pending_review:"待核验",interface_error:"接口异常"};
+ el("attempt-status").textContent=`规则 ${attemptReview.rules_version} · 来源 ${attemptReview.source_kind} · 完整记录 ${attemptReview.recording_packet_count} 包 · ${attemptReview.attempts.length} 次尝试 · 人工置位/审核，非无人值守`;
+ for(const a of attemptReview.attempts)row("attempt-rows",[`${a.attempt_id} / ${a.packet_range.join("–")}`,`${a.start_mode} / ${a.control_owner}`,`${names[a.outcome]??a.outcome} / ${a.evidence_mode}`,`${a.task_packet_range?.join("–")??"未建立连续任务"} / ${fmt(a.confirmed_progress_m,2)} m`,[...a.reasons,...a.uncovered_checks.map(c=>`缺少 ${c}`)].join("、")||"局部人工证据齐备",names[a.formal_result.outcome]??a.formal_result.outcome]);
+ el("attempt-evidence").textContent=JSON.stringify({source_hashes:attemptReview.source_hashes,evidence:attemptReview.evidence,attempts:attemptReview.attempts},null,2);
+}
 const route=summary.route;
 if(route){
  el("route-panel").hidden=false;
@@ -152,7 +161,8 @@ function draw(){
   el("trajectory-status").textContent=current?`当前位置（活动遥测，${fmt(location.speed_kmh,1)} km/h）：${coordinates}`:`当前遥测非活动，当前位置未知；橙色点为最后已知位置，距当前游标 ${fmt(times[index]-times[locationIndex])} s：${coordinates}`;
  }else el("trajectory-status").textContent="当前位置未知：当前游标之前尚无活动位置记录。";
  const s=samples[index],c=s.telemetry_controls;el("cursor").value=index;el("clock").textContent=`${fmt(times[index])} / ${fmt(elapsed)} s`;
- if(s.route){const r=s.route,names={matched:"走廊与检查点匹配",unverified_corridor:"走廊未覆盖",unverified_reference:"参考轨迹未核验",unverified_checkpoints:"检查点未核验",missing_checkpoint:"未确认经过检查点",checkpoint_order:"检查点穿越顺序错误",awaiting_checkpoint:"等待穿过斜向检查点",unanchored:"未从本段起点定位",ambiguous:"位置有歧义",discontinuity:"连续性中断",outside_reference:"远离参考轨迹",inactive:"非驾驶状态",continuity_unverified:"此前连续性未核实"};el("route-position").textContent=`片段 ${s.segment} · 参考里程 ${fmt(r.reference_s_m,1)} m · 到参考线 ${fmt(r.distance_m,2)} m · 已确认进度 ${fmt(r.confirmed_progress_m,1)} m · ${names[r.status]??r.status} · 下一检查点 ${r.next_checkpoint??"无/未标注"}`;}
+ if(attemptReview)el("attempt-position").textContent=`当前包 ${s.packet_index} · 尝试 ${s.attempt_id??"未知"} · 片段 ${s.forward_segment_id??"未知"} · 阶段 ${s.attempt_phase??"未知"}`;
+ if(s.route){const r=s.route,names={matched:"走廊与检查点匹配",unverified_corridor:"走廊未覆盖",unverified_reference:"参考轨迹未核验",unverified_checkpoints:"检查点未核验",missing_checkpoint:"未确认经过检查点",checkpoint_order:"检查点穿越顺序错误",awaiting_checkpoint:"等待穿过斜向检查点",unanchored:"未从本段起点定位",ambiguous:"位置有歧义",discontinuity:"连续性中断",outside_reference:"远离参考轨迹",inactive:"非驾驶状态",continuity_unverified:"此前连续性未核实"};el("route-position").textContent=`片段 ${s.segment} · 参考里程 ${fmt(r.reference_s_m,1)} m · 到参考线 ${fmt(r.distance_m,2)} m · 已确认进度 ${fmt(r.confirmed_progress_m,1)} m · ${names[r.status]??r.status} · 下一检查点 ${r.next_checkpoint??"无/未标注"}`;}else if(attemptReview)el("route-position").textContent="恢复/停止排除区：不计算合法进度";
  el("readout").textContent=`包 ${s.packet_index} · ${s.is_race_on?"活动":"非活动"} · 片段 ${s.segment} · ${fmt(s.speed_kmh,1)} km/h · 游戏时间 ${s.game_timestamp_ms} ms · 遥测油门 ${c.accel} / 减速刹车 ${c.brake} / 转向 ${c.steer} · CarOrdinal ${s.car_ordinal} / PI ${s.car_performance_index}`;
 }
 el("cursor").addEventListener("input",()=>{index=Number(el("cursor").value);playing=false;el("play").textContent="播放";draw();});
