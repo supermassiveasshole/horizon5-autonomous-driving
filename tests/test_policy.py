@@ -121,10 +121,17 @@ def config(tmp_path):
     return path
 
 
-def test_visual_policy_sends_bounded_actions_with_causal_history_and_stops(tmp_path):
+@pytest.mark.parametrize("steer_limit, sent_steer", [(0.2, 6553), (0.4, 13107)])
+def test_visual_policy_sends_bounded_actions_with_causal_history_and_stops(
+    tmp_path, steer_limit, sent_steer
+):
     game, actor = DrivingGame(), VisualActor()
+    path = config(tmp_path)
+    root = json.loads(path.read_text())
+    root["policy"]["max_steer"] = steer_limit
+    path.write_text(json.dumps(root))
     result = run_experiment(
-        PolicyDrive(config(tmp_path), tmp_path / "drive"),
+        PolicyDrive(path, tmp_path / "drive"),
         policy_environment=game,
         policy_actor=actor,
     )
@@ -135,7 +142,7 @@ def test_visual_policy_sends_bounded_actions_with_causal_history_and_stops(tmp_p
     decisions = [d for d in p["decisions"] if d["prediction"] is not None]
     assert decisions
     assert decisions[0]["prediction"] == [0.8, 0.6]
-    assert decisions[0]["sent"] == {"steer_i16": 6553, "throttle_u8": 64, "brake_u8": 0}
+    assert decisions[0]["sent"] == {"steer_i16": sent_steer, "throttle_u8": 64, "brake_u8": 0}
     assert decisions[0]["observation"]["actor"]["action_mask"] == [False, False, False]
     assert all(d["observation"]["actor"]["reference"]["mask"] == [False] * 5 for d in decisions)
     assert any(d["observation"]["actor"]["action_mask"][-1] for d in decisions[1:])
@@ -148,6 +155,21 @@ def test_visual_policy_sends_bounded_actions_with_causal_history_and_stops(tmp_p
     assert replay.summary["vision"]["integrity_errors"] == []
     assert replay.summary["control"]["artifact_errors"] == []
     assert replay.summary["control"]["timing"]["max_interval_ms"] is not None
+
+
+def test_policy_rejects_steering_above_the_calibrated_range_before_sending(tmp_path):
+    path = config(tmp_path)
+    root = json.loads(path.read_text())
+    root["policy"]["max_steer"] = 0.51
+    path.write_text(json.dumps(root))
+    game = DrivingGame()
+    with pytest.raises(ValueError, match="max_steer"):
+        run_experiment(
+            PolicyDrive(path, tmp_path / "drive"),
+            policy_environment=game,
+            policy_actor=VisualActor(),
+        )
+    assert game.sent == [] and game.closed
 
 
 def test_missing_optional_reference_masks_prior_but_required_mode_refuses(tmp_path):

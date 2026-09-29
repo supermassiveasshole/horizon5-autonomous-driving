@@ -70,7 +70,7 @@ def validate_policy_file(path: Path) -> tuple[dict[str, Any], dict[str, Any]]:
     for key, low, high in (
         ("max_speed_kmh", 1, 15),
         ("start_speed_kmh", 0, 1),
-        ("max_steer", 0, 0.2),
+        ("max_steer", 0, 0.5),
         ("max_throttle", 0, 0.25),
         ("max_brake", 0.1, 0.5),
         ("max_duration_s", 0.1, 30),

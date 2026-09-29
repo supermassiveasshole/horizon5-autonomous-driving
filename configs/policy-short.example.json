@@ -68,7 +68,7 @@
     "max_speed_kmh": 15,
     "start_speed_kmh": 0.5,
     "end_margin_m": 3,
-    "max_steer": 0.2,
+    "max_steer": 0.4,
     "max_throttle": 0.25,
     "max_brake": 0.5,
     "max_duration_s": 15,
