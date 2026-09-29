@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from fh5.demonstrations import _mapped, _profile
+from fh5.demonstrations import _profile
 from fh5.live import WindowsDesktop
 from fh5.vision import VisionEnvironment, VisionInput
 
@@ -28,7 +28,6 @@ class HumanInputEnvironment:
         self.profile = _profile(profile_file.read_bytes())
         if isinstance(inputs, XInputReader) and inputs.identity() != self.profile["device"]:
             raise ValueError("Connected XInput capabilities differ from the frozen input profile")
-        self._previous: int | None = None
         self._closed = False
 
     def now_ns(self) -> int:
@@ -39,16 +38,7 @@ class HumanInputEnvironment:
         if batch.stop_requested or batch.fault:
             return batch
         raw = self.inputs.read()
-        mapped = _mapped(raw, self.profile)
-        reasons = list(mapped["reasons"])
-        if self._previous is not None and raw["observed_ns"] - self._previous > 100_000_000:
-            reasons.append("input_poll_gap")
-        self._previous = raw["observed_ns"]
         events = [*batch.events, raw]
-        if reasons:
-            events.append(
-                {"kind": "input_boundary", "observed_ns": raw["observed_ns"], "reasons": reasons}
-            )
         return replace(
             batch,
             events=tuple(events),
@@ -153,7 +143,10 @@ class XInputReader:
                         peer.gamepad.buttons
                         or peer.gamepad.left_trigger
                         or peer.gamepad.right_trigger
-                        or abs(peer.gamepad.thumb_lx) > 8000
+                        or any(
+                            abs(getattr(peer.gamepad, axis)) > 8000
+                            for axis in ("thumb_lx", "thumb_ly", "thumb_rx", "thumb_ry")
+                        )
                     )
         return {
             "kind": "human_input",

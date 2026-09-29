@@ -108,6 +108,12 @@ def _preflight(config_file: Path, config: dict[str, Any]) -> list[tuple[Path, di
             raise ValueError("Overlapping recording windows are not independent runs")
         windows.append((start, end))
         prepared.append((directory, review))
+    for directory, _ in prepared:
+        reference = directory / "observation-route/route.json"
+        if reference.exists():
+            source = json.loads(reference.read_text(encoding="utf-8"))["source"]["packets_sha256"]
+            if source in seen:
+                raise ValueError("Frozen reference must be independent of all demonstration splits")
     return prepared
 
 
@@ -134,9 +140,10 @@ def _future(
         valid = (
             origin is not None
             and origin["motion"] is not None
+            and bisect_right(boundaries, origin["received_monotonic_ns"]) == decision["segment"]
             and 0 < index < len(samples)
             and bisect_right(boundaries, target) == decision["segment"]
-            and _trusted_span(review, decision["decision_ns"], target)
+            and _trusted_span(review, origin["received_monotonic_ns"], target)
         )
         point = None
         if valid:
@@ -148,7 +155,10 @@ def _future(
                 and 0 < times[index] - times[index - 1] <= 250_000_000
                 and b["game_timestamp_ms"] > a["game_timestamp_ms"]
                 and bisect_right(boundaries, times[index]) == decision["segment"]
-                and _trusted_span(review, decision["decision_ns"], times[index])
+                and bisect_right(boundaries, times[index - 1]) == decision["segment"]
+                and _trusted_span(
+                    review, min(origin["received_monotonic_ns"], times[index - 1]), times[index]
+                )
             )
             if valid:
                 fraction = (target - times[index - 1]) / (times[index] - times[index - 1])

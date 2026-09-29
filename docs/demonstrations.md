@@ -23,7 +23,7 @@ uv run --locked fh5 demonstration-replay runs/demo-001 --report runs/demo-review
 ## 原始证据、时序和排除规则
 
 - `vision.jsonl` 保存每次原始手柄轮询及开始/可用时刻。它们是主机时钟，不是真实按键跃迁时刻；游戏是否采用单次输入保持 `unverified`。报告并列显示邻近遥测，不把相关性当作因果延迟证明。
-- 双踏板、任意按钮（包括手刹/倒带）、右摇杆观察镜头、键盘驾驶或其他 XInput 槽活动、失焦、断连及无效数值保留原始证据，但不生成双轴标签。输入中断切断图像/动作历史；未知按键绑定不支持自动推断。
+- 双踏板、任意按钮（包括手刹/倒带）、右摇杆观察镜头、键盘驾驶或其他 XInput 槽活动、失焦、断连及无效数值保留原始证据，但不生成双轴标签。轮询间隔超过 250 ms 时切断图像/动作历史；未知按键绑定不支持自动推断。
 - `actions.jsonl` 只保存可映射输入，`action-history.json` 绑定动作与遥测哈希。当前监督动作取决策时刻之后的首次轮询；动作历史严格早于该时刻且已经可用。超时标签排除，不向过去倒填未来读数。
 - `demonstration-session.json` 冻结遥测、画面索引、配置、相机记录、输入配置、动作及历史参考包；画面像素另由索引哈希验证。源变更失败而非静默重算。
 
@@ -52,7 +52,7 @@ uv run --locked fh5 demonstration-replay runs/demo-001 --report runs/demo-review
 uv run --locked fh5 demonstration-dataset --config runs/dataset-config.json --output runs/dataset-001
 ```
 
-路径相对配置文件；源和输出分开保存。重复、重叠录制、条件/版本不一致、审阅哈希不符拒绝导出。当前双视图要求观测 v2、`reference_mode=optional`，历史参考须来自独立旧回合。短段只能建立同路线留出，不能据此宣称跨路线泛化。
+路径相对配置文件；源和输出分开保存。重复、重叠录制、条件/版本不一致、审阅哈希不符拒绝导出。当前双视图要求观测 v2、`reference_mode=optional`，历史参考须来自独立旧回合，不得来自数据集任何训练/留出录制。短段只能建立同路线留出，不能据此宣称跨路线泛化。
 
 `dataset.json` 的 `sources` 保存来源/条件/审阅；每例 `views` 含实际屏蔽航点的 `no_reference` 及 `reference_assisted`。两者均只含 actor 契约字段，回合标识与世界位置不进入模型输入。图像路径相对各自源录制目录，训练器必须读取并校验真实 RGB。
 

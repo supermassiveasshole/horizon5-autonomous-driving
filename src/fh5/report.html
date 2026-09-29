@@ -195,7 +195,7 @@ if(summary.demonstration){
  }
  el("demonstration-cursor").addEventListener("input",()=>showInput(Number(el("demonstration-cursor").value)));
  document.addEventListener("observation-state-selected",e=>{showInput(inputs.findLastIndex(r=>r.available_ns<=e.detail.decision_ns));const s=e.detail.supervision;el("demonstration-target").textContent=JSON.stringify(s??{status:"尚未导出监督标签"},null,2);
-  const c=el("demonstration-future"),ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height);ctx.fillStyle="#dbe7ef";ctx.fillText("未来局部位置监督 · 右/前（米） · 缺失目标不外推",10,15);
+  const c=el("demonstration-future"),ctx=c.getContext("2d");ctx.clearRect(0,0,c.width,c.height);ctx.fillStyle="#253d33";ctx.fillText("未来局部位置监督 · 右/前（米） · 缺失目标不外推",10,15);
   if(s){const points=s.future_waypoints_m.filter((p,i)=>p&&s.future_mask[i]);const extent=Math.max(10,...points.flatMap(p=>p.map(Math.abs)));ctx.strokeStyle="#75e4b7";ctx.beginPath();ctx.moveTo(240,180);for(const p of points)ctx.lineTo(240+p[0]*150/extent,180-p[1]*150/extent);ctx.stroke();ctx.fillText(`范围 ±${fmt(extent,1)} m · ${s.action_mask?"动作可用":"动作排除"}`,10,195);}
  });showInput(0);
 }

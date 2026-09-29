@@ -186,7 +186,7 @@ def test_demo_replay_binds_raw_input_and_profile_and_builds_only_prior_action_hi
         run_experiment(replace(DemonstrationReplay(directory, directory / "bad.html")))
 
 
-def dataset_fixture(tmp_path):
+def dataset_fixture(tmp_path, boundary=False):
     from test_navigation_observations import navigation_fixture
 
     from fh5.demonstrations import DemonstrationRecord
@@ -209,7 +209,17 @@ def dataset_fixture(tmp_path):
                     frame=frame(
                         shift + 1000 + i * 200, shift + 1020 + i * 200, shift + 1030 + i * 200
                     ),
-                    events=(raw_input(shift + 1050 + i * 200, lx=-32768 if i % 2 == 0 else 32767),),
+                    events=(raw_input(shift + 1050 + i * 200, lx=-32768 if i % 2 == 0 else 32767),)
+                    + (
+                        (
+                            {
+                                "kind": "input_boundary",
+                                "observed_ns": (shift + 1060 + i * 200) * 1_000_000,
+                            },
+                        )
+                        if boundary and i == 0
+                        else ()
+                    ),
                 )
                 for i in range(8)
             ]
@@ -395,3 +405,53 @@ def test_invalid_input_cuts_previous_action_history_even_with_injected_environme
     )
     decision = result.summary["observations"]["decisions"][-1]
     assert not any(decision["actor"]["action_mask"])
+
+
+def test_future_targets_do_not_bridge_old_origin_telemetry(tmp_path):
+    from fh5.demonstration_dataset import DemonstrationDataset
+
+    result = run_experiment(
+        DemonstrationDataset(dataset_fixture(tmp_path, boundary=True), tmp_path / "dataset")
+    )
+    first = result.summary["demonstration_dataset"]["examples"][0]
+    assert first["supervision"]["future_mask"] == [False, False]
+
+
+def test_reference_cannot_be_sourced_from_another_held_out_recording(tmp_path):
+    from fh5.demonstration_dataset import DemonstrationDataset
+
+    manifest = dataset_fixture(tmp_path)
+    # Construct a hash-consistent training recording whose reference source is the holdout.
+    route = tmp_path / "train/observation-route/route.json"
+    value = json.loads(route.read_text())
+    value["source"]["packets_sha256"] = hashlib.sha256(
+        (tmp_path / "holdout/packets.jsonl").read_bytes()
+    ).hexdigest()
+    route.write_text(json.dumps(value))
+    bound = tmp_path / "train/demonstration-session.json"
+    session = json.loads(bound.read_text())
+    session["hashes"]["observation-route/route.json"] = hashlib.sha256(
+        route.read_bytes()
+    ).hexdigest()
+    bound.write_text(json.dumps(session))
+    with pytest.raises(ValueError, match="reference.*demonstration"):
+        run_experiment(DemonstrationDataset(manifest, tmp_path / "dataset"))
+
+
+@pytest.mark.parametrize("break_kind", ["intent", "review"])
+def test_future_origin_cannot_precede_trusted_review_or_intent(tmp_path, break_kind):
+    from fh5.demonstration_dataset import DemonstrationDataset
+
+    manifest = dataset_fixture(tmp_path)
+    path = tmp_path / "train-review.json"
+    review = json.loads(path.read_text())
+    if break_kind == "intent":
+        review["intent_changes"] = [{"observed_ns": 1_060_000_000, "evidence": "new intent"}]
+    else:
+        review["intervals"][0]["start_ns"] = 1_060_000_000
+    path.write_text(json.dumps(review))
+    result = run_experiment(DemonstrationDataset(manifest, tmp_path / "dataset"))
+    assert result.summary["demonstration_dataset"]["examples"][0]["supervision"]["future_mask"] == [
+        False,
+        False,
+    ]
