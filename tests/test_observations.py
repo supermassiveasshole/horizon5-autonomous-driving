@@ -458,3 +458,20 @@ def test_new_frame_after_restart_cannot_use_pre_restart_telemetry(tmp_path):
     assert decision["telemetry_age_ms"] == 10
     assert "telemetry_discontinuity" in decision["reasons"]
     assert decision["route"]["waypoints_m"] == [None, None, None]
+
+
+def test_duplicate_history_prefers_latest_slot_without_refreshing_old_image(tmp_path):
+    request = observation_fixture(
+        tmp_path,
+        [
+            VisionInput(packets=(motion_packet(990), motion_packet(1090)), frame=frame()),
+            VisionInput(packets=(motion_packet(1290),)),
+        ],
+        max_image_age_ms=1000,
+    )
+    decisions = run_experiment(request).summary["observations"]["decisions"]
+    assert decisions[-2]["images"][-1] is not None
+    assert decisions[-1]["images"][-1] is not None  # The display must not blank on reuse.
+    assert decisions[-1]["history_mask"] == [False, True]
+    assert decisions[-1]["images"][-1]["age_ms"] == 290
+    assert decisions[-1]["images"][0] is None  # Never duplicate it into another history slot.

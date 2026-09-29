@@ -158,7 +158,7 @@ if(summary.vision){
   if(s){const found=samples.findIndex(p=>p.packet_index===s.packet_index);if(found>=0){index=found;playing=false;el("play").textContent="播放";draw();}}
  }
  function stopFrames(){active=false;clearTimeout(timer);el("vision-play").textContent="播放画面";}
- document.addEventListener("observation-selected",event=>{stopFrames();const f=event.detail;if(!f){el("vision-image").hidden=true;el("vision-image").removeAttribute("src");el("vision-clock").textContent="当前观测缺少最新历史槽";el("vision-readout").textContent="未用旧图填补缺失。";el("vision-detail").textContent="";return;}const found=frames.findIndex(item=>item.path===f.path);if(found>=0){fi=found;showFrame();}});
+ document.addEventListener("observation-selected",event=>{stopFrames();const f=event.detail;if(!f){el("vision-image").hidden=true;el("vision-image").removeAttribute("src");el("vision-clock").textContent="当前观测缺少最新历史槽";el("vision-readout").textContent="未用旧图填补缺失。";el("vision-detail").textContent="";return;}const found=frames.findIndex(item=>item.path===f.path);if(found>=0){fi=found;showFrame();el("vision-readout").textContent+=` · 在当前决策时刻：${f.valid?"图像槽有效":`已屏蔽，仅展示历史图（${f.reasons.join("、")}）`} / 实际图像年龄 ${fmt(f.age_ms)} ms`;}});
  function advanceFrame(){if(!active)return;if(fi+1>=frames.length){stopFrames();return;}const delay=Math.max(1,(frames[fi+1].capture_start_ns-frames[fi].capture_start_ns)/1e6);timer=setTimeout(()=>{fi++;showFrame();advanceFrame();},delay);}
  el("vision-play").addEventListener("click",()=>{if(active){stopFrames();return;}if(fi+1>=frames.length)fi=0;active=true;el("vision-play").textContent="暂停画面";showFrame();advanceFrame();});
  el("vision-cursor").addEventListener("input",()=>{stopFrames();fi=Number(el("vision-cursor").value);showFrame();});showFrame();

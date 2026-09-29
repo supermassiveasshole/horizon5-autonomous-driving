@@ -247,7 +247,9 @@ def build_observations(
         age = (tick - sample["received_monotonic_ns"]) / 1e6
         images: list[dict[str, Any] | None] = []
         seen = set()
-        for offset in config["history_offsets_ms"]:
+        # Preserve the freshest slot when delivery jitter maps several slots to
+        # the same image. Older slots stay missing; the image keeps its true age.
+        for offset in reversed(config["history_offsets_ms"]):
             index = bisect_right(deliveries, tick - int(offset * 1e6)) - 1
             if index < 0 or index in seen:
                 images.append(None)
@@ -285,6 +287,7 @@ def build_observations(
                     "reasons": image_reasons,
                 }
             )
+        images.reverse()
         preview = _preview(sample, route, config["waypoint_distances_m"])
         mask = [bool(f and f["valid"]) for f in images]
         reasons = []
@@ -364,10 +367,10 @@ def build_observations(
         if tick_rows
         else "reconstructed_receipt_grid_not_actual_policy_calls",
         "preprocessing": {
-            "version": "source-rgb-v1",
+            "version": "source-rgb-v2",
             "normalization": "none_rgb_uint8",
             "resize": "source_frame_metadata",
-            "history": "causal_unique_frames",
+            "history": "causal_unique_frames_latest_first",
         },
         "coordinate_frame": "heading_plane_right_forward_metres_v1",
         "camera": (vision or {}).get("session", {}).get("camera_mode", "unknown"),
