@@ -28,6 +28,13 @@ td{overflow-wrap:anywhere}summary{cursor:pointer;font-weight:600}code{font-size:
 <p class="muted" id="identity"></p>
 <div class="notice" id="evidence"></div>
 <section class="stats" id="stats" aria-label="数据摘要"></section>
+<section class="panel" id="policy-panel" hidden>
+<h2>冻结 BC 短段驾驶</h2><p id="policy-status"></p>
+<p class="muted">本面板来自实际推理和发送日志。原始预测、限幅命令、驱动返回分别记录；stop_guard 制动不计为策略独立驾驶。到达局部目标仍待独立审核，未进行 RL 更新。</p>
+<div class="controls"><button id="policy-play" type="button">播放决策</button><input id="policy-cursor" type="range" min="0" max="0" value="0" aria-label="策略决策位置"><output id="policy-clock"></output></div>
+<p id="policy-readout"></p><div id="policy-images" style="display:flex;gap:12px"></div>
+<details><summary>当前决策、来源与时序</summary><pre id="policy-detail" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details>
+</section>
 <section class="panel" id="observations-panel" hidden>
 <h2>因果多模态观测</h2><p id="observations-status"></p><p id="observations-coverage" class="muted"></p>
 <p class="muted">每个时刻只取已交付画面及已收到遥测。检查时刻不代表策略已运行；旧记录按固定时间网格重建。局部航点是航向平面中的导航参考，不是路宽、相机投影或合法进度。</p>
@@ -240,6 +247,27 @@ if(summary.observations){
  el("observations-play").addEventListener("click",()=>{if(active){stopObservations();return;}if(oi+1>=decisions.length)oi=0;active=true;el("observations-play").textContent="暂停观测";showObservation();advanceObservation();});
  el("observations-first").addEventListener("click",()=>{stopObservations();oi=firstComplete;showObservation();});
  el("observations-cursor").addEventListener("input",()=>{stopObservations();oi=Number(el("observations-cursor").value);showObservation();});showObservation();
+}
+if(summary.policy){
+ const p=summary.policy,decisions=p.decisions;let pi=0,active=false,timer=null;
+ el("policy-panel").hidden=false;
+ el("policy-status").textContent=`参考模式：${p.reference_mode} · 模型 ${p.model.weights_sha256.slice(0,16)} · 决策 ${decisions.length} 次 · 结束 ${p.stop_reason} · 归零 ${p.release_sent?"成功":"未确认"} · 局部目标 ${p.geometry_completed?"已达到，待审核":"未达到"} · 证据问题 ${(p.artifact_errors??[]).length}`;
+ const cards=p.model.contract.observation.history_offsets_ms.map(offset=>{const box=document.createElement("figure"),label=document.createElement("figcaption"),img=document.createElement("img");box.style.cssText="margin:0;flex:1;min-width:0";label.textContent=`历史 -${offset} ms`;img.style.cssText="width:100%;aspect-ratio:16/9;object-fit:contain;background:#e6ece9";box.append(label,img);el("policy-images").append(box);return img;});
+ el("policy-cursor").max=Math.max(0,decisions.length-1);el("policy-play").disabled=!decisions.length;el("policy-cursor").disabled=!decisions.length;
+ function showPolicy(){
+  if(!decisions.length){el("policy-readout").textContent="未满足起步条件，没有下发策略动作。";return;}
+  const d=decisions[pi],o=d.observation;
+  el("policy-cursor").value=pi;el("policy-clock").textContent=`${pi+1} / ${decisions.length}`;
+  el("policy-readout").textContent=`${d.status} ${d.rejection??""} · 请求 ${JSON.stringify(d.prediction)} · 发送 ${JSON.stringify(d.sent)} · 推理 ${d.inference_returned_ns?fmt((d.inference_returned_ns-d.decision_ns)/1e6):"未返回"} ms · 决策包 ${o.telemetry_packet_index} · 参考 ${o.route.status}`;
+  o.images.forEach((f,i)=>{const frame=summary.vision?.frames.find(v=>v.path===f?.path),url=frame?.image_url;cards[i].hidden=!url;if(url&&cards[i].getAttribute("src")!==url)cards[i].src=url;cards[i].alt=`策略输入历史 ${i+1}`;});
+  el("policy-detail").textContent=JSON.stringify(d,null,2);
+  document.dispatchEvent(new CustomEvent("observation-selected",{detail:o.images.at(-1)}));
+  const found=samples.findIndex(s=>s.packet_index===o.telemetry_packet_index);if(found>=0){index=found;playing=false;el("play").textContent="播放";draw();}
+ }
+ function stopPolicy(){active=false;clearTimeout(timer);el("policy-play").textContent="播放决策";}
+ function advancePolicy(){if(!active)return;if(pi+1>=decisions.length){stopPolicy();return;}timer=setTimeout(()=>{pi++;showPolicy();advancePolicy();},Math.max(1,(decisions[pi+1].decision_ns-decisions[pi].decision_ns)/1e6));}
+ el("policy-play").addEventListener("click",()=>{if(active){stopPolicy();return;}if(pi+1>=decisions.length)pi=0;active=true;el("policy-play").textContent="暂停决策";showPolicy();advancePolicy();});
+ el("policy-cursor").addEventListener("input",()=>{stopPolicy();pi=Number(el("policy-cursor").value);showPolicy();});showPolicy();
 }
 </script>
 </body></html>

@@ -480,7 +480,7 @@ def read_control(directory: Path, samples: list[dict[str, Any]]) -> dict[str, An
     intervals = [
         (b["issued_ns"] - a["issued_ns"]) / 1e6
         for a, b in zip(commands, commands[1:])
-        if a.get("owner") == b.get("owner") == "calibration"
+        if a.get("owner") == b.get("owner") and a.get("owner") in ("calibration", "policy")
     ]
     durations = [(c["returned_ns"] - c["issued_ns"]) / 1e6 for c in commands]
     result["timing"] = {

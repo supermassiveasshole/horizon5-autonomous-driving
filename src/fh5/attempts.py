@@ -149,7 +149,7 @@ def _task(path: Path) -> dict[str, Any]:
             raise ValueError(f"Task requires {name}")
     if task.get("start_mode") != "manual_placement":
         raise ValueError("Only reviewed manual placement is supported in local validity v1")
-    if task.get("control_owner") not in ("human", "calibration"):
+    if task.get("control_owner") not in ("human", "calibration", "policy"):
         raise ValueError("Task requires a known control owner")
     for name in ("expected_car_ordinal", "expected_pi"):
         if type(task.get(name)) is not int or task[name] <= 0:

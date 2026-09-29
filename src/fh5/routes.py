@@ -489,14 +489,21 @@ def _projections(position: list[float], points: list[dict[str, Any]]) -> list[tu
     return candidates
 
 
-def locate_route(samples: list[dict[str, Any]], route: dict[str, Any]) -> list[dict[str, Any]]:
+def locate_route(
+    samples: list[dict[str, Any]],
+    route: dict[str, Any],
+    *,
+    state: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Locate sequential samples; optional state supports the same checks online."""
     points = route["points"]
     events = []
-    progress = 0.0
-    next_gate = 0
-    previous = None
-    blocked = False
-    clock_advanced_ns = 0
+    saved = state or {}
+    progress = saved.get("progress", 0.0)
+    next_gate = saved.get("next_gate", 0)
+    previous = saved.get("previous")
+    blocked = saved.get("blocked", False)
+    clock_advanced_ns = saved.get("clock_advanced_ns", 0)
     for sample in samples:
         if previous is not None and sample["segment"] != previous["segment"]:
             previous = None
@@ -546,7 +553,7 @@ def locate_route(samples: list[dict[str, Any]], route: dict[str, Any]) -> list[d
             status = "ambiguous"
         elif distance > 10:
             status = "outside_reference"
-        elif previous is None and (station > 1 or distance > 2):
+        elif previous is None and (abs(station - saved.get("anchor_s_m", 0)) > 1 or distance > 2):
             status = "unanchored"
         elif not covered:
             status = "unverified_corridor"
@@ -602,4 +609,12 @@ def locate_route(samples: list[dict[str, Any]], route: dict[str, Any]) -> list[d
             "next_checkpoint": gates[next_gate]["id"] if next_gate < len(gates) else None,
         }
         previous = sample
+    if state is not None:
+        state.update(
+            progress=progress,
+            next_gate=next_gate,
+            previous=previous,
+            blocked=blocked,
+            clock_advanced_ns=clock_advanced_ns,
+        )
     return events

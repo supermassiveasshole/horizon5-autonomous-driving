@@ -31,6 +31,7 @@ from fh5.perception import (
     replay_perception,
     run_perception,
 )
+from fh5.policy import PolicyActor, PolicyDrive, PolicyEnvironment, read_policy, run_policy
 from fh5.report import write_report
 from fh5.routes import (
     BuildRoute,
@@ -153,7 +154,7 @@ def _validate_config(config: object) -> dict[str, Any]:
         raise ValueError("Config must be an object with integer schema_version")
     if config["schema_version"] != 1:
         raise ValueError("Unsupported config schema_version")
-    if config.get("control_source") not in ("human", "unknown", "calibration"):
+    if config.get("control_source") not in ("human", "unknown", "calibration", "policy"):
         raise ValueError("Unknown control_source")
     snapshot = config.get("snapshot")
     if not isinstance(snapshot, dict):
@@ -181,7 +182,8 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 
 def run_experiment(
-    request: AttemptReplay
+    request: PolicyDrive
+    | AttemptReplay
     | BCTrain
     | BCReplay
     | DemonstrationRecord
@@ -203,8 +205,14 @@ def run_experiment(
     event_environment: EventEnvironment | None = None,
     vision_environment: VisionEnvironment | None = None,
     road_model: RoadModel | None = None,
+    policy_environment: PolicyEnvironment | None = None,
+    policy_actor: PolicyActor | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, PolicyDrive):
+        if policy_environment is None:
+            raise ValueError("Policy execution requires an explicit game environment")
+        return run_policy(request, policy_environment, policy_actor)
     if isinstance(request, AttemptReplay):
         return review_attempts(request)
     if isinstance(request, (BCTrain, BCReplay)):
@@ -460,6 +468,9 @@ def run_experiment(
             events.append(
                 {"kind": "control_evidence_incomplete", "packet_index": None, "detail": str(error)}
             )
+    if (directory / "policy.json").exists():
+        summary["policy"] = read_policy(directory)
+        summary["route"] = summary["policy"]["evaluation_route"]
     if any(
         (directory / name).exists()
         for name in ("event-run.json", "event-config.json", "event-journal.jsonl")

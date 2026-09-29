@@ -32,6 +32,10 @@ def _hash(path: Path) -> str:
 
 def read_settings(path: Path) -> dict[str, Any]:
     value = json.loads(path.read_text(encoding="utf-8-sig"))
+    return validate_settings(value)
+
+
+def validate_settings(value: Any) -> dict[str, Any]:
     expected = {
         "version",
         "period_ms",
@@ -538,44 +542,47 @@ def build_observations(
                 config["max_action_age_ms"],
             )
             decision["action_history"] = slots
-            telemetry = decision["telemetry"]
-            motion = telemetry["motion"] if telemetry else None
-            decision["actor"] = {
-                "actions": [
-                    [s["steer"], s["longitudinal"]] if s and s["valid"] else None for s in slots
-                ],
-                "action_mask": [bool(s and s["valid"]) for s in slots],
-                "action_age_ms": [s["age_ms"] if s else None for s in slots],
-                "images": [
-                    {"path": f["path"], "sha256": f["sha256"]} if f and f["valid"] else None
-                    for f in decision["images"]
-                ],
-                "image_mask": decision["history_mask"],
-                "image_age_ms": [f["age_ms"] if f else None for f in decision["images"]],
-                "ego_mask": decision["usable"]
-                or not any(
-                    r in decision["reasons"]
-                    for r in (
-                        "missing_telemetry",
-                        "inactive_telemetry",
-                        "stale_telemetry",
-                        "invalid_motion",
-                        "stalled_game_clock",
-                        "telemetry_discontinuity",
-                        "artifact_integrity",
-                    )
-                ),
-                "ego_age_ms": decision["telemetry_age_ms"],
-                "ego": {
-                    "speed_mps": telemetry["speed_mps"],
-                    "velocity_car_mps": motion["velocity_car_mps"],
-                    "angular_velocity_car_radps": motion["angular_velocity_car_radps"],
-                }
-                if motion
-                else None,
-                "reference": {
-                    "waypoints_m": decision["route"]["waypoints_m"],
-                    "mask": decision["route"]["waypoint_mask"],
-                },
-            }
+            decision["actor"] = actor_fields(decision, slots)
     return result
+
+
+def actor_fields(decision: dict[str, Any], slots: list[dict[str, Any] | None]) -> dict[str, Any]:
+    """Shared offline/live actor schema; keep adjudication metadata outside the actor."""
+    telemetry = decision["telemetry"]
+    motion = telemetry["motion"] if telemetry else None
+    return {
+        "actions": [[s["steer"], s["longitudinal"]] if s and s["valid"] else None for s in slots],
+        "action_mask": [bool(s and s["valid"]) for s in slots],
+        "action_age_ms": [s["age_ms"] if s else None for s in slots],
+        "images": [
+            {"path": f["path"], "sha256": f["sha256"]} if f and f["valid"] else None
+            for f in decision["images"]
+        ],
+        "image_mask": decision["history_mask"],
+        "image_age_ms": [f["age_ms"] if f else None for f in decision["images"]],
+        "ego_mask": decision["usable"]
+        or not any(
+            r in decision["reasons"]
+            for r in (
+                "missing_telemetry",
+                "inactive_telemetry",
+                "stale_telemetry",
+                "invalid_motion",
+                "stalled_game_clock",
+                "telemetry_discontinuity",
+                "artifact_integrity",
+            )
+        ),
+        "ego_age_ms": decision["telemetry_age_ms"],
+        "ego": {
+            "speed_mps": telemetry["speed_mps"],
+            "velocity_car_mps": motion["velocity_car_mps"],
+            "angular_velocity_car_radps": motion["angular_velocity_car_radps"],
+        }
+        if motion
+        else None,
+        "reference": {
+            "waypoints_m": decision["route"]["waypoints_m"],
+            "mask": decision["route"]["waypoint_mask"],
+        },
+    }

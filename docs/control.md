@@ -1,5 +1,7 @@
 # 低速控制校准（T02）
 
+冻结 BC 的有界闭环接口另见 [短段策略驾驶](policy-driving.md)。下述 T02 校准权限不自动开放长时自主采样。
+
 入口：`run_experiment(Control(config_file, output_dir), environment=...)`。本切片执行固定限时动作或直行速度反馈采集；不跟随路线，也不进行自主训练。
 
 ## 安装与运行
