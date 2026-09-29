@@ -77,6 +77,7 @@ class PolicySession:
             "commands": [],
             "adapter_events": environment.events,
             "decisions": [],
+            "scheduling_waits": {"new_frame": 0, "image_budget": 0},
             "model": actor.manifest,
             "actor_kind": actor.kind,
             "config": config,
@@ -381,6 +382,28 @@ class PolicySession:
                     observation = _observation(
                         self.settings, now, sample, self.frames, self.actions, self.reference
                     )
+                    if self.armed is not None and not observation["usable"]:
+                        raise StopAttempt(observation["reasons"][0])
+                    # The policy and camera clocks can drift. Start on a newly
+                    # delivered frame, rather than consuming most of its age
+                    # allowance while waiting for an unrelated policy tick.
+                    # Keep checking faults/history above while waiting; a lost
+                    # camera must still end the attempt.
+                    if not self.frames or now - self.frames[-1]["delivered_ns"] > 20_000_000:
+                        self.result["scheduling_waits"]["new_frame"] += 1
+                        continue
+                    # Every historical slot needs room for the configured
+                    # inference deadline and final receive, not just the latest
+                    # image. Dispatch still rechecks their actual ages.
+                    if observation["usable"] and any(
+                        frame["age_ms"] + self.config["inference_timeout_ms"] + 5
+                        > offset + self.settings["max_image_age_ms"]
+                        for offset, frame in zip(
+                            self.settings["history_offsets_ms"], observation["images"]
+                        )
+                    ):
+                        self.result["scheduling_waits"]["image_budget"] += 1
+                        continue
                     if self.armed is None:
                         a, b = (
                             self.route["points"][0]["position_m"],
@@ -417,8 +440,6 @@ class PolicySession:
                             start_station_m=self.geometry["reference_s_m"],
                         )
                         locate_route([self.latest], self.route, state=self.task_state)
-                    elif not observation["usable"]:
-                        raise StopAttempt(observation["reasons"][0])
                     last_decision = now
                     decision: dict[str, Any] = {
                         "decision_ns": now,

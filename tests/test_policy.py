@@ -177,6 +177,46 @@ def test_missing_optional_reference_masks_prior_but_required_mode_refuses(tmp_pa
     assert game.sent == [] and game.closed
 
 
+def test_capture_and_decision_phase_drift_does_not_expire_a_healthy_image(tmp_path):
+    class DelayedCapture(DrivingGame):
+        def __init__(self):
+            super().__init__()
+            self.last_capture = 0
+
+        def read(self, period_s):
+            batch = super().read(period_s)
+            # A 100 ms camera cadence with 80 ms capture/encoding latency,
+            # independently clocked from the 100 ms policy period.
+            capture = ((self.time_ns - 80_000_000) // 100_000_000) * 100_000_000
+            if capture == self.last_capture:
+                return replace(batch, frame=None)
+            self.last_capture = capture
+            frame = replace(
+                batch.frame,
+                capture_start_ns=capture,
+                capture_end_ns=capture + 40_000_000,
+                available_ns=capture + 80_000_000,
+            )
+            return replace(batch, frame=frame)
+
+    game = DelayedCapture()
+
+    class TimedActor(VisualActor):
+        def predict(self, actor, images):
+            game.time_ns += 40_000_000
+            return super().predict(actor, images)
+
+    result = run_experiment(
+        PolicyDrive(config(tmp_path), tmp_path / "drive"),
+        policy_environment=game,
+        policy_actor=TimedActor(),
+    )
+    p = result.summary["policy"]
+    assert p["stop_reason"] == "local_end"
+    assert len([d for d in p["decisions"] if d["sent"]]) > 5
+    assert p["release_sent"] and game.closed
+
+
 def test_declared_manual_start_inside_verified_region_is_not_a_fake_trajectory(tmp_path):
     path = config(tmp_path)
     root = json.loads(path.read_text())

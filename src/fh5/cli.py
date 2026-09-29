@@ -444,6 +444,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError, ImportError) as error:
         print(json.dumps({"status": "error", "message": str(error)}), file=sys.stderr)
         return 2
+    if args.mode == "policy":
+        if result.summary["capture_status"] == "source_error":
+            print(json.dumps({"status": "source_error", "report": str(result.report_path)}))
+            return 2
+        p = result.summary["policy"]
+        print(
+            json.dumps(
+                {
+                    **{
+                        k: p[k]
+                        for k in (
+                            "stop_reason",
+                            "release_sent",
+                            "resources_released",
+                            "geometry_completed",
+                            "formal_validity",
+                        )
+                    },
+                    "report": str(result.report_path),
+                }
+            )
+        )
+        return (
+            0
+            if p["stop_reason"] == "local_end" and p["release_sent"] and p["resources_released"]
+            else 4
+        )
     if "bc" in result.summary:
         print(
             json.dumps(
@@ -550,27 +577,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     if result.summary["capture_status"] == "source_error":
         return 2
-    if args.mode == "policy":
-        p = result.summary["policy"]
-        print(
-            json.dumps(
-                {
-                    k: p[k]
-                    for k in (
-                        "stop_reason",
-                        "release_sent",
-                        "resources_released",
-                        "geometry_completed",
-                        "formal_validity",
-                    )
-                }
-            )
-        )
-        return (
-            0
-            if p["stop_reason"] == "local_end" and p["release_sent"] and p["resources_released"]
-            else 4
-        )
     if "perception" in result.summary:
         return 4 if result.summary["perception"]["evaluation"]["invalid_frames"] else 0
     if "route_check" in result.summary:
