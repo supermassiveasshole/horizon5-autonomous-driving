@@ -176,3 +176,51 @@ def test_invalid_range_or_unbounded_speed_cannot_produce_a_quality_report(tmp_pa
         with pytest.raises(ValueError):
             run_experiment(RouteCheck(source, tmp_path / "check.html", bundle, first, last, limit))
         assert not (tmp_path / "check.html").exists()
+
+
+@pytest.mark.parametrize("finish", [True, False])
+def test_late_slanted_gate_must_finish_crossing_before_local_check_passes(tmp_path, finish):
+    route(tmp_path)
+    notes = tmp_path / "annotations.json"
+    data = json.loads(notes.read_text())
+    data["checkpoints"] = [
+        {
+            "id": "slanted",
+            "s_m": 2,
+            "left_xz": [1, 1],
+            "right_xz": [3, -1],
+            "y_min_m": 1,
+            "y_max_m": 3,
+            "status": "verified",
+            "evidence": ["evidence.txt"],
+        }
+    ]
+    notes.write_text(json.dumps(data))
+    run_experiment(
+        BuildRoute(
+            tmp_path / "reference",
+            tmp_path / "gated",
+            0,
+            3,
+            annotations_file=notes,
+        )
+    )
+    end = 30 if finish else 25
+    source = record(tmp_path, "drive", [(i / 10, -0.8) for i in range(end + 1)], speed=1)
+    result = run_experiment(
+        RouteCheck(
+            source,
+            tmp_path / "check.html",
+            tmp_path / "gated/route.json",
+            0,
+            end,
+            20,
+        )
+    )
+    assert any(s["route"]["status"] == "awaiting_checkpoint" for s in result.samples)
+    assert any(e["kind"] == "route_checkpoint_passed" for e in result.events) is finish
+    assert result.summary["route_check"]["passed"] is finish
+    if finish:
+        assert result.summary["route_check"]["confirmed_progress_m"] == 3
+    else:
+        assert "route_end_missing" in result.summary["route_check"]["reasons"]

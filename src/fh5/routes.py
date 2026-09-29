@@ -72,7 +72,12 @@ def check_route_recording(
         == 1,
         "route_not_reviewed": route["low_speed_ready"],
         "speed_limit_exceeded": speed <= request.max_speed_kmh,
-        "unconfirmed_path": all(s["route"]["status"] == "matched" for s in samples),
+        # A slanted gate may be crossed after its reference-line station. The
+        # locator defers progress while waiting; completing the route below is
+        # still required, so an unresolved gate cannot pass this data check.
+        "unconfirmed_path": all(
+            s["route"]["status"] in ("matched", "awaiting_checkpoint") for s in samples
+        ),
         "route_start_missing": samples[0]["route"]["reference_s_m"] <= 0.25,
         "route_end_missing": progress >= route["length_m"] - 1e-6,
     }
