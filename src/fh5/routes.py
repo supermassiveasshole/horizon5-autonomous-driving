@@ -9,6 +9,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+UNLOCATED_ROUTE_STATUSES = frozenset(
+    {"ambiguous", "outside_reference", "inactive", "discontinuity"}
+)
+
 
 @dataclass(frozen=True)
 class BuildRoute:
@@ -441,12 +445,7 @@ def locate_route(samples: list[dict[str, Any]], route: dict[str, Any]) -> list[d
             )
             # An unresolved projection is not a trustworthy station prior. Keeping
             # its arbitrary branch would turn repeated ambiguity into false certainty.
-            if previous["route"]["status"] not in {
-                "ambiguous",
-                "outside_reference",
-                "inactive",
-                "discontinuity",
-            }:
+            if previous["route"]["status"] not in UNLOCATED_ROUTE_STATUSES:
                 candidates = [
                     c for c in candidates if abs(c[1] - previous["route"]["reference_s_m"]) <= bound
                 ]

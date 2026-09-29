@@ -432,3 +432,29 @@ def test_nearby_return_road_remains_ambiguous_until_position_disambiguates(tmp_p
         o["route"]["waypoints_m"] == [None, None, None]
         for o in result.summary["observations"]["decisions"]
     )
+
+
+def test_new_frame_after_restart_cannot_use_pre_restart_telemetry(tmp_path):
+    request = observation_fixture(
+        tmp_path,
+        [
+            VisionInput(
+                packets=(motion_packet(990), motion_packet(1090)),
+                frame=frame(1096, 1097, 1098),
+                events=({"kind": "restart", "observed_ns": 1_095_000_000},),
+            )
+        ],
+        history_offsets_ms=[0],
+    )
+    journal = request.recording_dir / "vision.jsonl"
+    with journal.open("a") as f:
+        f.write(json.dumps({"kind": "observation_tick", "observed_ns": 1_100_000_000}) + "\n")
+    session = request.recording_dir / "vision-session.json"
+    value = json.loads(session.read_text())
+    value["hashes"]["vision.jsonl"] = hashlib.sha256(journal.read_bytes()).hexdigest()
+    session.write_text(json.dumps(value))
+    decision = run_experiment(request).summary["observations"]["decisions"][0]
+    assert not decision["usable"]
+    assert decision["telemetry_age_ms"] == 10
+    assert "telemetry_discontinuity" in decision["reasons"]
+    assert decision["route"]["waypoints_m"] == [None, None, None]

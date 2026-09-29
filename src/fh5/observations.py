@@ -11,6 +11,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from fh5.routes import UNLOCATED_ROUTE_STATUSES
+
 
 @dataclass(frozen=True)
 class ObservationReplay:
@@ -78,7 +80,9 @@ def freeze_inputs(config_file: Path | None, route_file: Path | None) -> dict[str
     load_route(route_file)
     manifest = json.loads(route_file.read_text(encoding="utf-8"))
     files = {
-        "observation-config.json": json.dumps(config, allow_nan=False).encode(),
+        "observation-config.json": (json.dumps(config, allow_nan=False, indent=2) + "\n").encode(
+            "utf-8"
+        ),
         "observation-route/route.json": route_file.read_bytes(),
     }
     for item in [*manifest["assets"].values(), *manifest["evidence"]]:
@@ -99,11 +103,7 @@ def _preview(
     distance, station = match["distance_m"], match["reference_s_m"]
     # Reuse the causal route matcher, but do not require legal-progress annotations
     # to consume a navigation prior. "unanchored" only forbids formal progress.
-    status = (
-        match["status"]
-        if match["status"] in {"discontinuity", "ambiguous", "outside_reference", "inactive"}
-        else "located"
-    )
+    status = match["status"] if match["status"] in UNLOCATED_ROUTE_STATUSES else "located"
     result: dict[str, Any] = {
         "status": status,
         "reference_s_m": station if status == "located" else None,
@@ -288,6 +288,16 @@ def build_observations(
         preview = _preview(sample, route, config["waypoint_distances_m"])
         mask = [bool(f and f["valid"]) for f in images]
         reasons = []
+        if bisect_right(boundaries, tick) > bisect_right(
+            boundaries, sample["received_monotonic_ns"]
+        ):
+            reasons.append("telemetry_discontinuity")
+            preview.update(
+                status="telemetry_discontinuity",
+                reference_s_m=None,
+                waypoints_m=[None] * len(config["waypoint_distances_m"]),
+                waypoint_mask=[False] * len(config["waypoint_distances_m"]),
+            )
         if not sample["is_race_on"]:
             reasons.append("inactive_telemetry")
         if age > config["max_telemetry_age_ms"]:
@@ -300,7 +310,7 @@ def build_observations(
             reasons.append("artifact_integrity")
         if not all(mask):
             reasons.append("incomplete_image_history")
-        if preview["status"] != "located":
+        if preview["status"] != "located" and preview["status"] not in reasons:
             reasons.append(preview["status"])
         if not all(preview["waypoint_mask"]):
             reasons.append("incomplete_route_preview")
