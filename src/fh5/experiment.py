@@ -49,6 +49,7 @@ from fh5.evaluation import (
     prepare_evaluation,
     review_evaluation,
 )
+from fh5.evaluation_run import EvaluationEnvironment, EvaluationRun, run_evaluation
 from fh5.events import EventEnvironment, EventRun, read_event, run_event
 from fh5.learning_schedule import LearningResources, ScheduledBCTrain, run_scheduled_bc
 from fh5.numeric_images import (
@@ -231,6 +232,7 @@ def run_experiment(
     request: RealtimeReplay
     | EvaluationPrepare
     | EvaluationReview
+    | EvaluationRun
     | RealtimeRun
     | RealtimeNumericReplay
     | CollectionRun
@@ -291,6 +293,7 @@ def run_experiment(
     realtime_journal_sink: Callable[[bytes], None] | None = None,
     collection_environment: CollectionEnvironment | None = None,
     learning_resources: LearningResources | None = None,
+    evaluation_environment: EvaluationEnvironment | None = None,
     collection_write: WriteFile | None = None,
     collection_installer: CollectionInstaller | None = None,
 ) -> RunResult:
@@ -299,6 +302,10 @@ def run_experiment(
         return prepare_evaluation(request)
     if isinstance(request, EvaluationReview):
         return review_evaluation(request)
+    if isinstance(request, EvaluationRun):
+        if evaluation_environment is None:
+            raise ValueError("Repeated evaluation requires an explicit environment")
+        return run_evaluation(request, evaluation_environment)
     if isinstance(request, CollectionPrepare):
         return prepare_collection(request, collection_installer)
     if isinstance(request, CollectionStart):

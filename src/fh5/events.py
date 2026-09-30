@@ -21,6 +21,11 @@ if TYPE_CHECKING:
 class EventRun:
     config_file: Path
     output_dir: Path
+    operation: Literal["event", "start_ready", "restart_ready", "finish_ready"] = "event"
+
+    def __post_init__(self) -> None:
+        if self.operation not in ("event", "start_ready", "restart_ready", "finish_ready"):
+            raise ValueError("Unknown event lifecycle operation")
 
 
 @dataclass(frozen=True)
@@ -235,6 +240,12 @@ def _recognize(frame: ScreenFrame, config: dict[str, Any], templates: dict[str, 
 def run_event(request: EventRun, environment: EventEnvironment) -> RunResult:
     try:
         root = validate_event_file(request.config_file)
+        if request.operation != "event" and (
+            environment.source_kind != "synthetic"
+            or not root["event_run"]["conditions_verified"]
+            or root["event_run"]["purpose"] != "event"
+        ):
+            raise ValueError("Ready handoff requires verified synthetic event conditions")
         return _run_event(request, environment, root)
     finally:
         environment.close()
@@ -296,6 +307,9 @@ def _run_event(request: EventRun, environment: EventEnvironment, root: dict[str,
         "release_sent": False,
         "purpose": config["purpose"],
         "conditions_verified": config["conditions_verified"],
+        "operation": request.operation,
+        "ready_verified": False,
+        "ready_state": None,
     }
     events: list[dict[str, Any]] = []
 
@@ -307,9 +321,16 @@ def _run_event(request: EventRun, environment: EventEnvironment, root: dict[str,
             (request.output_dir / name).write_bytes(data)
         _write_json(request.output_dir / "event-config.json", root)
         now = environment.now_ns()
-        phase = "prepare"
+        phase = "restart" if request.operation in ("restart_ready", "finish_ready") else "prepare"
         phase_since = now
-        steps = config["start_steps"]
+        ready_after_ns = now
+        recipe = {
+            "event": "start_steps",
+            "start_ready": "start_steps",
+            "restart_ready": "restart_steps",
+            "finish_ready": "finish_steps",
+        }[request.operation]
+        steps = config[recipe]
         step = 0
         frame_index = 0
         previous_screen = "unknown"
@@ -430,6 +451,7 @@ def _run_event(request: EventRun, environment: EventEnvironment, root: dict[str,
                                 raise
                             else:
                                 log("menu_action", button=action["button"], status="sent")
+                            ready_after_ns = environment.now_ns()
                             step += 1
                             stable = 0
                         continue
@@ -443,9 +465,26 @@ def _run_event(request: EventRun, environment: EventEnvironment, root: dict[str,
                         and latest["speed_kmh"] <= 3
                         and math.dist(latest["position_m"], config["start_position_m"])
                         <= config["start_radius_m"]
+                        and (
+                            request.operation == "event"
+                            or (
+                                latest["received_monotonic_ns"] > ready_after_ns
+                                and frame.received_monotonic_ns > ready_after_ns
+                            )
+                        )
                     ):
                         if phase == "restart":
                             log("recovery_verified")
+                        if request.operation != "event":
+                            event_summary.update(
+                                stop_reason="ready",
+                                ready_verified=True,
+                                ready_state=deepcopy(latest),
+                                ready_after_ns=ready_after_ns,
+                                ready_observed_ns=now,
+                            )
+                            log("ready_verified", state=deepcopy(latest))
+                            break
                         attempt = {
                             "attempt_id": f"{run_id}-{len(event_summary['attempts']) + 1}",
                             "started_ns": now,
@@ -498,6 +537,7 @@ def _run_event(request: EventRun, environment: EventEnvironment, root: dict[str,
             if release_error is None:
                 log("released")
             else:
+                event_summary.update(ready_verified=False, ready_state=None)
                 log("release_failed", error=release_error)
             for adapter_event in getattr(environment, "events", []):
                 log("adapter_event", detail=adapter_event)
@@ -609,6 +649,12 @@ def read_event(directory: Path) -> dict[str, Any]:
         except (OSError, ValueError) as error:
             errors.append(f"frame: {error}")
     if errors:
-        summary.update(evidence_status="incomplete", release_sent=False, unattended_verified=False)
+        summary.update(
+            evidence_status="incomplete",
+            release_sent=False,
+            unattended_verified=False,
+            ready_verified=False,
+            ready_state=None,
+        )
         events.append({"kind": "event_evidence_incomplete", "detail": "; ".join(errors)})
     return {"summary": summary, "events": events}

@@ -87,6 +87,70 @@ def test_unverified_empty_event_exits_with_evidence_and_never_presses_start(tmp_
     assert (tmp_path / "run" / "frames" / "000000.pgm").is_file()
 
 
+def test_ready_operation_hands_off_stationary_state_without_claiming_a_driving_attempt(tmp_path):
+    game = RestartGame()
+    result = run_experiment(
+        EventRun(verified_config(tmp_path), tmp_path / "run", operation="start_ready"),
+        event_environment=game,
+    )
+    summary = result.summary["event_run"]
+    assert summary["stop_reason"] == "ready"
+    assert summary["ready_verified"] is True
+    assert summary["attempts"] == []
+    assert summary["ready_state"]["position_m"] == [0, 0, 0]
+    assert summary["ready_state"]["speed_kmh"] == 0
+    assert summary["ready_state"]["car_ordinal"] == 123
+    assert game.pulses == ["A"]
+    assert game.closed and game.released
+    replay = run_experiment(Replay(tmp_path / "run", tmp_path / "replay.html"))
+    assert replay.summary["event_run"]["ready_state"] == summary["ready_state"]
+
+
+def test_restart_ready_executes_restart_recipe_then_returns_without_driving(tmp_path):
+    game = RestartGame()
+    game.screen = "driving"
+    result = run_experiment(
+        EventRun(verified_config(tmp_path), tmp_path / "run", operation="restart_ready"),
+        event_environment=game,
+    )
+    summary = result.summary["event_run"]
+    assert game.pulses == ["START", "X", "A", "A"]
+    assert summary["ready_verified"] is True
+    assert summary["attempts"] == []
+    assert game.released and game.closed
+
+
+def test_ready_handoff_rejects_telemetry_from_before_the_last_menu_action(tmp_path):
+    class BufferedTelemetry(RestartGame):
+        buffered = None
+
+        def read(self, period_s):
+            value = super().read(period_s)
+            if not self.pulses:
+                self.buffered = value.packets
+            return replace(value, packets=self.buffered or value.packets)
+
+    game = BufferedTelemetry()
+    result = run_experiment(
+        EventRun(verified_config(tmp_path), tmp_path / "run", operation="start_ready"),
+        event_environment=game,
+    )
+    assert result.summary["event_run"]["ready_verified"] is False
+    assert result.summary["event_run"]["ready_state"] is None
+    assert game.released and game.closed
+
+
+def test_changed_ready_frame_revokes_replayed_handoff_evidence(tmp_path):
+    run_experiment(
+        EventRun(verified_config(tmp_path), tmp_path / "run", operation="start_ready"),
+        event_environment=RestartGame(),
+    )
+    (tmp_path / "run/frames/000000.pgm").write_bytes(b"changed")
+    result = run_experiment(Replay(tmp_path / "run", tmp_path / "review.html"))
+    assert result.summary["event_run"]["ready_verified"] is False
+    assert result.summary["event_run"]["ready_state"] is None
+
+
 def test_visual_templates_are_frozen_before_the_first_observation(tmp_path):
     path = verified_config(tmp_path)
 
