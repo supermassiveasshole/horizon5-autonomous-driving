@@ -314,8 +314,12 @@ class _Supervisor:
         if not self.acknowledgement_valid(row):
             self.stop("invalid_acknowledgement")
             return
-        if kind == "failure" and self.phase == "driving":
-            self.fail(row["reason"])
+        if kind == "failure":
+            if self.phase == "driving":
+                self.fail(row["reason"])
+            else:
+                self.failures.append({"at_s": self.now, "reason": row["reason"]})
+                self.stop("failure_during_recovery")
         elif kind == "released" and self.phase == "releasing":
             self.command("rewind")
             self.phase = "rewind_pending"

@@ -271,3 +271,17 @@ def test_cli_replays_frozen_signals_without_controller_or_game(tmp_path):
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout)["commands_sent"] is False
     assert json.loads((tmp_path / "replayed/recovery.json").read_text(encoding="utf-8")) == expected
+
+
+@pytest.mark.parametrize("prefix,at", [(2, 0.15), (3, 0.25), (4, 0.35), (7, 0.65)])
+def test_confirmed_failure_during_recovery_is_retained_and_vetoes_resume(tmp_path, prefix, at):
+    inputs = successful_recovery()
+    inputs.insert(prefix, event(at, "failure", reason="unrecoverable_heading"))
+    recovery = replay(tmp_path, inputs).summary["recovery"]
+    assert [f["reason"] for f in recovery["attempt"]["failures"]] == [
+        "off_road",
+        "unrecoverable_heading",
+    ]
+    assert recovery["reason"] == "failure_during_recovery"
+    assert recovery["recoveries"][0]["status"] == "failed"
+    assert not any(d["command"] == "allow_driving" for d in recovery["directives"])
