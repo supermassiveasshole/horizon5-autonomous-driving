@@ -6,7 +6,7 @@ import json
 import math
 import struct
 import time
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -14,6 +14,8 @@ from typing import Any, Literal
 
 from fh5.attempts import AttemptReplay, review_attempts
 from fh5.bc import BCReplay, BCTrain, run_bc
+from fh5.capture import CaptureReplay, CaptureRun, replay_capture
+from fh5.capture_runtime import CaptureSource, run_capture
 from fh5.control import Control, ControlEnvironment, read_control, run_control
 from fh5.demonstration_dataset import DemonstrationDataset, export_demonstrations
 from fh5.demonstrations import (
@@ -196,7 +198,9 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 
 def run_experiment(
-    request: TemporalBCPrepare
+    request: CaptureReplay
+    | CaptureRun
+    | TemporalBCPrepare
     | TemporalBCTrain
     | TemporalBCReplay
     | LegacyNumericImport
@@ -233,8 +237,16 @@ def run_experiment(
     policy_actor: PolicyActor | None = None,
     numeric_inputs: Iterable[NumericDecision] | None = None,
     numeric_actor: NumericActor | None = None,
+    capture_source_factory: Callable[[], CaptureSource] | None = None,
+    capture_activity: Callable[[], dict[str, Any] | None] | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, CaptureReplay):
+        return replay_capture(request)
+    if isinstance(request, CaptureRun):
+        if capture_source_factory is None:
+            raise ValueError("Capture requires an explicit passive source factory")
+        return run_capture(request, capture_source_factory, capture_activity)
     if isinstance(request, TemporalBCPrepare):
         return prepare_temporal(request)
     if isinstance(request, (TemporalBCTrain, TemporalBCReplay)):

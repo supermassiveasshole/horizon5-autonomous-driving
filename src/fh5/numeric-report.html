@@ -30,7 +30,7 @@ let cursor=0, playing=false, generation=0, timer=null;
 const cache=new Map();
 const text=(id,value)=>{document.getElementById(id).textContent=value;};
 text('contract',JSON.stringify({contract:data.contract,model:data.model,availability_note:data.availability_note},null,2));
-text('integrity',JSON.stringify({archive:data.archive,stop_reason:data.stop_reason,execution_error:data.execution_error,replay_errors:data.replay_errors,replay_tolerance:data.replay_tolerance},null,2));
+text('integrity',JSON.stringify({pipeline:data.pipeline,timing_kind:data.timing_kind,resources_released:data.resources_released,archive:data.archive,stop_reason:data.stop_reason,execution_error:data.execution_error,replay_errors:data.replay_errors,replay_tolerance:data.replay_tolerance},null,2));
 document.getElementById('metrics-section').hidden=!data.metrics;
 text('metrics',JSON.stringify({training:data.training,metrics:data.metrics},null,2));
 text('notice',data.model?.diagnostic_only || data.diagnostic_only ? '旧数据兼容诊断：尚未验证新采集分布、实时性或驾驶能力。' : '数值接口诊断：不构成实时驾驶验收。');

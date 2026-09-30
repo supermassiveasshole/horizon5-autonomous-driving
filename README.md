@@ -117,3 +117,5 @@ uv run --locked ruff format --check .
 安装 `learning` 可选依赖后，通过 `fh5 bc-train --config configs/bc.example.json --output runs/bc-first` 训练固定预算的多模态 BC；`fh5 bc-replay` 重放冻结模型。两者不发送游戏输入。数据、参考遮蔽、模型与误差解释见 [BC 说明](docs/bc.md)，首轮结果见 [T27 验证](docs/validation/t27-bc.md)。
 
 #35 新增 `fh5 temporal-prepare`、`temporal-train`、`temporal-replay`：历史画面仅在导入时解码，训练与推理使用数值像素和明确的帧间 Δt。支持实际/固定时间对照及冻结输入/预测核验，见[数值 Δt BC](docs/temporal-bc.md)和[离线验证](docs/validation/t33-temporal-bc.md)。首轮结果未证明 Δt 收益或起步能力，尚未接入实时驾驶。
+
+#34 已有 [DXGI 数值采集基础入口](docs/dxgi-capture.md)，`fh5 capture-dxgi` 默认只校验配置。独立采集/预处理、最新待处理槽和带 QPC 时间的历史支持软件验证；原生动态采集、性能对照与页面交互仍待验收，不构成实时驾驶通过。

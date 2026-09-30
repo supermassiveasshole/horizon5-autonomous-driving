@@ -14,6 +14,7 @@ control = ["vgamepad @ https://github.com/yannbouteiller/vgamepad/archive/3f910a
 events = ["mss>=10,<11", "Pillow>=11.3,<13"]
 perception = ["torch==2.8.0", "transformers==4.57.6", "numpy>=2,<3", "Pillow>=11.3,<13"]
 learning = ["torch==2.8.0", "Pillow>=11.3,<13"]
+capture = ["dxcam==0.3.0 ; sys_platform == 'win32'", "Pillow==12.3.0"]
 
 [[tool.uv.index]]
 name = "pytorch-cu128"

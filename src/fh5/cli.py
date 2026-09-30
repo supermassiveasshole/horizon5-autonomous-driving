@@ -45,6 +45,16 @@ def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Record and replay FH5 Data Out experiments")
     commands = parser.add_subparsers(dest="mode", required=True)
+    capture = commands.add_parser(
+        "capture-dxgi", help="Validate DXGI probe; --live passively captures FH5"
+    )
+    capture.add_argument("--config", type=Path, required=True)
+    capture.add_argument("--output", type=Path, required=True)
+    capture.add_argument("--seconds", type=float, default=30)
+    capture.add_argument("--port", type=int, default=5300)
+    capture.add_argument(
+        "--live", action="store_true", help="Read-only physical client capture; F8 stops"
+    )
     policy = commands.add_parser(
         "policy", help="Validate frozen BC assets; --live drives one bounded attempt"
     )
@@ -230,6 +240,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     perception_replay.add_argument("--labels", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.mode == "capture-dxgi":
+            from fh5.capture_cli import capture_command
+
+            return capture_command(args)
         if args.mode in ("temporal-prepare", "temporal-train", "temporal-replay"):
             return _temporal_command(args)
         if args.mode in ("numeric-prepare", "numeric-infer", "numeric-replay"):

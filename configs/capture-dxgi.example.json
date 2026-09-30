@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "pixels": {
+    "version": 1,
+    "size": [480, 270],
+    "resize": "full-frame-pillow-bilinear-v1",
+    "origin": "direct_numeric",
+    "history_order": "oldest_first",
+    "history_offsets_ms": [200, 100, 0],
+    "color": "RGB",
+    "dtype": "uint8",
+    "layout": "HWC-contiguous",
+    "normalization": "float32/255",
+    "crop": "full_frame"
+  },
+  "pipeline": {
+    "history_capacity": 32,
+    "max_age_ms": 100,
+    "selection_error_ms": 40,
+    "capture_hz": 60,
+    "preprocess_hz": 60,
+    "observation_hz": 20
+  },
+  "target": {
+    "device_idx": 0,
+    "output_idx": 0,
+    "expected_client_size": [3840, 2160],
+    "condition_id": "fh5-chase-far-4k-unverified-v1"
+  },
+  "input_conditions": {
+    "version": 1,
+    "id": "fh5-chase-far-4k-unverified-v1",
+    "status": "requires_live_confirmation",
+    "camera": "chase_far",
+    "client_pixels": [3840, 2160],
+    "game_render_resolution": "unverified",
+    "upscaling_and_dynamic_resolution": "unverified",
+    "hud_navigation": "unverified",
+    "hdr": "unverified",
+    "fov": "unverified",
+    "blueprint": "105657219",
+    "vehicle": "2011 Lamborghini Sesto Elemento Forza Edition X 999",
+    "tune": "existing fixed user tune"
+  }
+}
