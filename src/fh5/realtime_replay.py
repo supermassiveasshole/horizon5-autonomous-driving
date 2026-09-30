@@ -59,4 +59,4 @@ def replay_realtime(request: RealtimeReplay) -> RunResult:
         "started_ns": start,
         "ended_ns": end,
     }
-    return write_realtime_result(request.output_dir, result)
+    return write_realtime_result(request.output_dir, result, request.config)

@@ -4,20 +4,25 @@ from __future__ import annotations
 
 import json
 from collections import Counter
+from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fh5.capture_metrics import percentiles
 from fh5.numeric_images import asset
+from fh5.realtime import RealtimeConfig
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
 
 
-def write_realtime_result(directory: Path, result: dict[str, Any]) -> RunResult:
+def write_realtime_result(
+    directory: Path, result: dict[str, Any], config: RealtimeConfig
+) -> RunResult:
     from fh5.experiment import RunResult
 
     decisions = result["decisions"]
+    result["configuration"] = {**asdict(config), "pixels": config.pixels.metadata()}
     accepted = [d for d in decisions if d["status"] == "accepted"]
     end = result["ended_ns"]
     longest = 0

@@ -97,6 +97,10 @@ def test_skips_do_not_renew_absolute_action_lease_and_recovery_uses_new_images(t
     assert r["metrics"]["maximum_consecutive_skip_ms"] == 100
     assert result.report_path.suffix == ".html"
     assert "动作有效期" in result.report_path.read_text(encoding="utf-8")
+    assert r["configuration"]["action_lease_ms"] == 150
+    assert r["configuration"]["pixels"]["dtype"] == "uint8"
+    assert r["decisions"][0]["telemetry_received_ns"] == BASE + 250 * MS
+    assert r["decisions"][0]["safety_at_decision"]["car_ordinal"] == 2941
 
 
 @pytest.mark.parametrize("delay,reason", [(110, "discard_deadline"), (None, "abandoned_inference")])
@@ -467,3 +471,55 @@ def test_capture_boundary_wins_over_result_arriving_at_the_same_instant(tmp_path
         )
     )
     assert result.summary["realtime"]["decisions"][0]["status"] == "discard_capture_epoch"
+
+
+@pytest.mark.parametrize(
+    "change,reason",
+    [
+        ({"active": False}, "inactive"),
+        ({"stop_requested": True}, "user_stop"),
+        ({"speed_kmh": 15}, "speed_limit"),
+    ],
+)
+def test_input_hard_fault_is_latched_even_if_normal_input_arrives_before_next_guard_poll(
+    tmp_path, change, reason
+):
+    class BurstGame(ThreadedGame):
+        def __init__(self):
+            super().__init__()
+            self.activated = threading.Event()
+            self.restored = threading.Event()
+            self.phase = 0
+
+        def send(self, command):
+            super().send(command)
+            if command.throttle_u8:
+                self.activated.set()
+
+        def signals(self):
+            if self.activated.is_set():
+                self.restored.wait(0.2)
+            return True, False
+
+        def read(self, period_s):
+            point = super().read(period_s)
+            if self.activated.is_set() and self.phase == 0:
+                self.phase = 1
+                return replace(point, safety=replace(point.safety, **change))
+            if self.phase == 1:
+                self.phase = 2
+                self.restored.set()
+            return point
+
+    game = BurstGame()
+    result = run_experiment(
+        RealtimeRun(
+            tmp_path / "burst", RealtimeConfig(pixels=PixelContract(size=(2, 1))), seconds=0.4
+        ),
+        realtime_environment=game,
+        numeric_actor_factory=FastActor,
+    )
+    r = result.summary["realtime"]
+    assert r["stop_reason"] == reason
+    assert len([c for c in r["commands"] if c["owner"] == "policy"]) == 1
+    assert game.closed

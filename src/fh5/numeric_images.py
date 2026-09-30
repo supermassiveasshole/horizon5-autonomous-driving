@@ -156,10 +156,27 @@ class NumericActor(Protocol):
 
 
 def validate_decision(decision: NumericDecision, contract: PixelContract) -> str | None:
+    reason = validate_frame_history(decision.epoch, decision.decision_ns, decision.frames, contract)
+    if reason is not None:
+        return reason
     frames = decision.frames
+    ages = [(decision.decision_ns - f.source_time_ns) / 1e6 for f in frames]
+    if decision.actor.get("image_age_ms") != ages:
+        return "image_age_mismatch"
+    if not decision.actor.get("ego_mask") or decision.actor.get("image_mask") != [True] * len(
+        frames
+    ):
+        return "incomplete_actor_state"
+    return None
+
+
+def validate_frame_history(
+    epoch: str, decision_ns: int, frames: tuple[NumericFrame, ...], contract: PixelContract
+) -> str | None:
+    """Codec-free structural checks shared by offline evidence and live numerical decisions."""
     if len(frames) != len(contract.history_offsets_ms):
         return "incomplete_history"
-    if any(f.epoch != decision.epoch for f in frames):
+    if any(f.epoch != epoch for f in frames):
         return "history_crosses_epoch"
     if len({f.frame_id for f in frames}) != len(frames):
         return "repeated_image"
@@ -177,17 +194,10 @@ def validate_decision(decision: NumericDecision, contract: PixelContract) -> str
     layouts = [tuple(f.source_layout.get(key) for key in layout_keys) for f in frames]
     if any(layout != layouts[0] for layout in layouts[1:]):
         return "history_layout_changed"
-    if any(f.preprocess_ready_ns > decision.decision_ns for f in frames):
+    if any(f.preprocess_ready_ns > decision_ns for f in frames):
         return "image_not_available"
     if any(a.source_time_ns >= b.source_time_ns for a, b in zip(frames, frames[1:])):
         return "nonforward_image_time"
-    ages = [(decision.decision_ns - f.source_time_ns) / 1e6 for f in frames]
-    if decision.actor.get("image_age_ms") != ages:
-        return "image_age_mismatch"
-    if not decision.actor.get("ego_mask") or decision.actor.get("image_mask") != [True] * len(
-        frames
-    ):
-        return "incomplete_actor_state"
     return None
 
 

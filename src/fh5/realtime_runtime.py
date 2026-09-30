@@ -197,4 +197,4 @@ def run_realtime(
         and archive_result["resources_released"],
         "real_game_validation": False,
     }
-    return write_realtime_result(request.output_dir, result)
+    return write_realtime_result(request.output_dir, result, request.config)

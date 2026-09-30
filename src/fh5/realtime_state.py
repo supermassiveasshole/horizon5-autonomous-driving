@@ -9,6 +9,7 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 from fh5.control import Command
+from fh5.numeric_images import validate_frame_history
 from fh5.realtime import RealtimeConfig, RealtimeObservation, SafetyState
 
 NEUTRAL = Command(0, 0, 0)
@@ -62,6 +63,12 @@ class DecisionState:
             elif safety.game_timestamp_ms < old.game_timestamp_ms:
                 self.safety_fault = "game_clock_discontinuity"
         self.safety = safety
+        # An observed hard fault must survive a newer healthy sample and a
+        # later signals() poll. Only the supervisor sends the resulting stop.
+        if self.last_accepted_ns is not None or self.pending is not None or safety.stop_requested:
+            reason = self.safety_reason(self.clock() if self.clock else safety.received_ns)
+            if reason is not None:
+                self.safety_fault = reason
 
     def safety_reason(self, now: int) -> str | None:
         s, cfg = self.safety, self.config
@@ -192,18 +199,15 @@ class DecisionState:
 
     def observation_reason(self, now: int, observation: RealtimeObservation) -> str | None:
         cfg, frames = self.config, observation.frames
-        if len(frames) != len(cfg.pixels.history_offsets_ms):
-            return "history"
-        if any(f.epoch != observation.epoch for f in frames):
-            return "capture_epoch"
-        if len({f.frame_id for f in frames}) != len(frames):
-            return "repeated_image"
-        if any(a.source_time_ns >= b.source_time_ns for a, b in zip(frames, frames[1:])):
-            return "nonforward_image_time"
-        if any(
-            f.size != cfg.pixels.size or f.preprocess_version != cfg.pixels.resize for f in frames
-        ):
-            return "pixel_contract"
+        structural = validate_frame_history(observation.epoch, now, frames, cfg.pixels)
+        if structural:
+            return {
+                "incomplete_history": "history",
+                "history_crosses_epoch": "capture_epoch",
+                "pixel_contract_mismatch": "pixel_contract",
+                "history_layout_changed": "layout_changed",
+                "image_not_available": "unavailable_image",
+            }.get(structural, structural)
         layout_keys = (
             "size",
             "client_size",
@@ -219,8 +223,6 @@ class DecisionState:
         layouts = [tuple(f.source_layout.get(k) for k in layout_keys) for f in frames]
         if any(layout != layouts[0] for layout in layouts):
             return "layout_changed"
-        if any(f.preprocess_ready_ns > now for f in frames):
-            return "unavailable_image"
         if not 0 <= now - observation.telemetry_received_ns <= cfg.max_telemetry_age_ms * MS:
             return "stale_input"
         if any(
@@ -295,6 +297,8 @@ class DecisionState:
                 epoch=observation.epoch,
                 frames=[f.metadata() for f in observation.frames],
                 actor=actor,
+                safety_at_decision=asdict(self.safety) if self.safety else None,
+                telemetry_received_ns=observation.telemetry_received_ns,
             )
             work = Work(row, observation, actor)
             self.pending = work
