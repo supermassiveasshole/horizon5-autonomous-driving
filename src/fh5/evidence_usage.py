@@ -29,6 +29,10 @@ class RecordUsage:
     model_sha256: str | None = None
 
 
+class RegisteredSlotChanged(ValueError):
+    """A previously reviewed attempt cannot disappear or become another recording."""
+
+
 @contextmanager
 def _registry(path: Path, *, create: bool = False) -> Iterator[sqlite3.Connection]:
     existed = path.exists()
@@ -55,14 +59,22 @@ def _registry(path: Path, *, create: bool = False) -> Iterator[sqlite3.Connectio
                 "CREATE TABLE reservations (batch TEXT PRIMARY KEY, model TEXT NOT NULL, "
                 "purpose TEXT NOT NULL, reserved_utc TEXT NOT NULL)"
             )
+            db.execute(
+                "CREATE TABLE slots (batch TEXT NOT NULL, slot TEXT NOT NULL, binding TEXT NOT NULL, "
+                "PRIMARY KEY(batch, slot))"
+            )
             db.execute("PRAGMA user_version=1")
         elif version != 1:
             raise ValueError("Unsupported evidence usage registry")
         if db.execute("SELECT count(*) FROM uses").fetchone()[0] > 20_000:
             raise ValueError("Evidence usage registry exceeds 20000-key bound")
+        if db.execute("SELECT count(*) FROM slots").fetchone()[0] > 20_000:
+            raise ValueError("Evidence usage registry exceeds 20000-slot bound")
         yield db
         if db.execute("SELECT count(*) FROM uses").fetchone()[0] > 20_000:
             raise ValueError("Evidence usage registry exceeds 20000-key bound")
+        if db.execute("SELECT count(*) FROM slots").fetchone()[0] > 20_000:
+            raise ValueError("Evidence usage registry exceeds 20000-slot bound")
         db.commit()
     except sqlite3.Error as error:
         db.rollback()
@@ -93,6 +105,7 @@ def _snapshot(db: sqlite3.Connection) -> dict[str, Any]:
         "reservations": [
             dict(row) for row in db.execute("SELECT * FROM reservations ORDER BY batch")
         ],
+        "slots": [dict(row) for row in db.execute("SELECT * FROM slots ORDER BY batch, slot")],
     }
 
 
@@ -122,6 +135,37 @@ def reserve_batch(registry: Path, batch: dict[str, Any]) -> None:
                 datetime.now(UTC).isoformat(),
             ),
         )
+
+
+def bind_evaluation_slots(
+    registry: Path | None, batch_sha256: str, entries: list[dict[str, Any]]
+) -> str | None:
+    if registry is None:
+        return None
+    bindings = {row["slot_id"]: hashlib.sha256(encode(row["files"])).hexdigest() for row in entries}
+    try:
+        with _registry(registry) as db:
+            previous = {
+                row["slot"]: row["binding"]
+                for row in db.execute(
+                    "SELECT slot, binding FROM slots WHERE batch=?", (batch_sha256,)
+                )
+            }
+            if any(bindings.get(slot) != binding for slot, binding in previous.items()):
+                raise RegisteredSlotChanged(
+                    "A registered evaluation slot was omitted or its recording changed; retain the original attempts"
+                )
+            db.executemany(
+                "INSERT OR IGNORE INTO slots VALUES (?, ?, ?)",
+                [(batch_sha256, slot, binding) for slot, binding in bindings.items()],
+            )
+    except RegisteredSlotChanged:
+        raise
+    except (OSError, ValueError, sqlite3.Error) as error:
+        # The review still reports all supplied attempts and the registry error.
+        # A missing/broken registry never creates positive independence evidence.
+        return str(error)
+    return None
 
 
 def _recorded_after(created: Any, reserved: str) -> bool:
@@ -193,9 +237,17 @@ def review_usage(
     batch_sha256: str,
     sources: list[dict[str, Any]],
     output: Path,
+    binding_error: str | None = None,
 ) -> dict[str, Any]:
     if registry is None:
         return {"status": "untracked", "independence_proven": False, "conflicts": []}
+    if binding_error is not None:
+        return {
+            "status": "unknown",
+            "independence_proven": False,
+            "conflicts": [],
+            "error": binding_error,
+        }
     try:
         return _review_usage(registry, batch, batch_sha256, sources, output)
     except (OSError, ValueError, KeyError, TypeError, sqlite3.Error) as error:

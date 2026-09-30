@@ -19,7 +19,7 @@ from fh5.bc_learning import VIEWS
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.evaluation_execution import review_execution
 from fh5.evaluation_metrics import combine_execution_metrics
-from fh5.evidence_usage import reserve_batch, review_usage, source_keys
+from fh5.evidence_usage import bind_evaluation_slots, reserve_batch, review_usage, source_keys
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_images import PixelContract
 from fh5.realtime import RealtimeConfig
@@ -351,6 +351,7 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
         if identity in sources:
             raise ValueError("One recording cannot count as independent repeated evaluations")
         sources.add(identity)
+    binding_error = bind_evaluation_slots(request.registry_file, digest, entries)
     request.output_dir.mkdir(parents=True)
     write_file(request.output_dir / "batch.json", raw)
     write_file(request.output_dir / "ledger.json", ledger_raw)
@@ -515,7 +516,7 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
         "closed_loop_validated": False,
         "scope": "local validity accounting; recorded policy execution, timing and autonomous restart still require evidence",
         "independence": review_usage(
-            request.registry_file, batch, digest, usage_sources, request.output_dir
+            request.registry_file, batch, digest, usage_sources, request.output_dir, binding_error
         ),
     }
     write_file(request.output_dir / "batch-report.json", encode(summary))

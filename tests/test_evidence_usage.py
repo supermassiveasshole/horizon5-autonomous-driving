@@ -271,3 +271,52 @@ def test_cli_damaged_registry_returns_input_error_without_replacing_history(tmp_
     )
     assert "registry" in capsys.readouterr().err.lower()
     assert registry.read_bytes() == b"damaged existing registry"
+
+
+@pytest.mark.parametrize("change", ["replace_failed", "omit_failed"])
+def test_registered_slot_cannot_hide_a_previous_failure(tmp_path, policy, change):
+    _, config = prepare(tmp_path, policy, purpose="final")
+    registry = tmp_path / "usage.sqlite"
+    batch = tmp_path / "reserved"
+    run_experiment(EvaluationPrepare(config, batch, registry))
+    failed = record(tmp_path, "failed", [(0, 0.2), (1, 0.2)], speed=30)
+    original = ledger(tmp_path, [entry("run-0", failed, evidence(tmp_path, failed))])
+    data = json.loads(original.read_bytes())
+    data["batch_sha256"] = sha(batch / "batch.json")
+    original.write_text(json.dumps(data))
+    first = run_experiment(EvaluationReview(batch, original, tmp_path / "first", registry))
+    assert first.summary["evaluation"]["metrics"]["outcomes"]["driving_failed"] == 1
+    first_bytes = (tmp_path / "first/batch-report.json").read_bytes()
+    success = record(tmp_path, "success", [(0, 0.2), (1, 0.2), (2, 0.2), (3, 0.2)])
+    data["entries"] = [entry("run-0", success)] if change == "replace_failed" else []
+    original.write_text(json.dumps(data))
+    with pytest.raises(ValueError, match="registered.*slot|registered.*attempt"):
+        run_experiment(EvaluationReview(batch, original, tmp_path / "second", registry))
+    assert (tmp_path / "first/batch-report.json").read_bytes() == first_bytes
+    assert not (tmp_path / "second/batch-report.json").exists()
+
+
+def test_unstarted_slot_can_be_added_without_changing_previously_reviewed_attempts(
+    tmp_path, policy
+):
+    from test_evaluation import separate_clock
+
+    _, config = prepare(tmp_path, policy, ["no_reference"] * 2, purpose="final")
+    registry = tmp_path / "usage.sqlite"
+    batch = tmp_path / "reserved"
+    run_experiment(EvaluationPrepare(config, batch, registry))
+    first = record(tmp_path, "first-drive", [(0, 0.2), (1, 0.2)])
+    path = ledger(tmp_path, [entry("run-0", first)])
+    data = json.loads(path.read_bytes())
+    data["batch_sha256"] = sha(batch / "batch.json")
+    path.write_text(json.dumps(data))
+    partial = run_experiment(EvaluationReview(batch, path, tmp_path / "partial", registry))
+    assert partial.summary["evaluation"]["unstarted_slots"] == ["run-1"]
+    second = record(tmp_path, "second-drive", [(0, 0.2), (1, 0.2)])
+    separate_clock(second, 10_000_000_000)
+    data["entries"].append(entry("run-1", second))
+    path.write_text(json.dumps(data))
+    complete = run_experiment(EvaluationReview(batch, path, tmp_path / "complete", registry))
+    assert complete.summary["evaluation"]["metrics"]["all_attempts"] == 2
+    assert complete.summary["evaluation"]["unstarted_slots"] == []
+    assert complete.summary["evaluation"]["independence"]["status"] == "no_known_overlap"
