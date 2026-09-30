@@ -1,6 +1,32 @@
 # 持续被动采集（T35 / #37）
 
-状态：已实现实验入口的数据与存储核心，**尚未实现冻结环境的独立进程启动及 Windows DXGI/UDP/XInput 组合适配器，也未实机采集**。本票保持开放。本切片不要求启动 FH5 或 Steam，不连接虚拟手柄。
+状态：已实现数据/存储核心、冻结环境的独立进程启动和 Windows DXGI/UDP/XInput 被动组合适配器。软件测试使用隔离的合成输入；**真实两次人工驾驶与重开、4K 性能及边采集边开发仍待实机验收**，本票保持开放。不连接虚拟手柄。
+
+## 冻结与后台运行
+
+在开发仓库执行准备命令。它复制当前源文件、锁文件、配置和已校准输入档案，通过 `uv sync --locked --no-dev --no-editable --link-mode copy` 安装独立依赖；不打开采集设备。原配置与源码以后改变，不影响已经准备好的副本。记录实际 Python 基础运行时路径/版本和包版本；基础 Python 与 Windows 系统库仍属于机器运行环境，第三方包和项目代码独立复制。
+
+```powershell
+uv run --locked fh5 collection-prepare --capture-config configs/capture-dxgi.example.json --input-profile runs/t27-demo-a-20260929/input-profile.json --output runs/collector-001
+uv run --locked fh5 collection-start runs/collector-001 --live
+uv run --locked fh5 collection-status runs/collector-001
+uv run --locked fh5 collection-stop runs/collector-001
+uv run --locked fh5 collection-review runs/collector-001/recording --report runs/collector-001-reviewed.html
+```
+
+输入档案必须是已核验的真实档案；命令中的路径是本机现有实例。可用 `--uv` 指定 uv，`--offline` 只使用已缓存依赖，`--seconds` 调整采集时长。默认 4 小时；准备失败保留 `install.log`/失败原因，不把半成品当可启动环境。
+
+每个 bundle 只启动一次，重新采集准备新目录，不覆盖旧证据。启动前与子进程入口分别核对源文件、配置及安装环境的哈希。Windows 使用隐藏的独立进程，标准输入关闭，日志写入本目录；不依赖启动命令或聊天回合保持运行。状态查询向操作系统核对 PID 和创建时间，不能把旧心跳当作存活证据；无法核对时报告 unknown。进程异常退出且缺少最终状态会标为 interrupted，不自动重启或覆盖记录。
+
+正常开发继续在原仓库和原 `.venv` 中进行；冻结副本采集期间不修改或同步依赖。纯软件诊断可在准备时加 `--source synthetic --seconds 15`，随后启动不加 `--live`；它仅生成合成数据，最多 60 秒，不打开屏幕、UDP 或手柄，不是训练示范。
+
+## 原生资源与诊断
+
+原生采集实例使用同一个 OS 文件锁，在任何读取前排除另一个合作采集实例；崩溃后操作系统自动释放锁，不因遗留文件永久阻塞。Windows UDP 使用独占绑定，端口争用明确失败。该锁约束本程序的持续采集器，不代表能排除任意第三方录屏或输入软件；并发开发检查只能使用合成/隔离输入。
+
+实体手柄按冻结的 XInput 逻辑槽和能力核对，断连或能力不符的记录隔离；这不是硬件序列号认证。DXGI 沿用固定客户区和来源时间约束。失焦、菜单或断连时保留状态，恢复后由片段起点限制新历史；F8 可结束被动采集。原生源连续报错或阻塞超时保留错误并结束。若资源未释放，锁保留到进程退出，不谎报可再次接管。
+
+最终状态包含采集阶段计数/延迟与资源采样。图像延迟最多保留最近 72000 次测量，资源详情最多保留最近 601 次（约 10 分钟）采样，不能称全程逐帧测量。没有已验证的 GPU 并行预算，重 GPU 训练仍须交错或在实测后安排。
 
 ## 已有接口
 
@@ -16,7 +42,7 @@ uv run --locked fh5 collection-stop runs/collection-001
 uv run --locked fh5 collection-review runs/collection-001 --report runs/collection-001-reviewed.html
 ```
 
-状态查询读取最新心跳或最终状态；停止创建可见请求，采集退出并封存尾块。状态文件单独不能证明进程仍存活，当前接口明确标记 `process_liveness=not_checked`。独立进程的实际句柄与生命周期检查留给下一切片，不用文件存在冒充进程存活。
+直接查询 recording 目录只读取最新心跳/最终状态，标记 `process_liveness=not_checked`；查询其 bundle 则额外向操作系统核对实际进程。停止请求使采集退出并封存尾块。数据是否完整与进程是否存活分别报告。
 
 ## 数据与边界
 
@@ -39,4 +65,4 @@ uv run --locked fh5 collection-review runs/collection-001 --report runs/collecti
 
 ## 剩余验收
 
-下一步实现冻结代码/锁文件/配置与独立依赖环境、单一真实资源所有者、独立进程的启动/存活/停止，以及原生 DXGI+UDP+已校准 XInput 被动适配器。之后才进行真实两次人工驾驶、手动重开和边采集边编码/读取封存块的验收。自动重开 #4 不是本票前置。
+剩余为原生 4K 条件与性能核验，以及真实两次人工驾驶、手动重开和边采集边编码/读取封存块的验收。自动重开 #4 不是本票前置。#38 可基于封存格式继续实现数据集软件；合成采集不能冒充重新采集的人工示范。

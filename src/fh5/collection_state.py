@@ -99,6 +99,8 @@ class CollectionState:
         if value.human_input is not None:
             try:
                 mapped = _mapped(value.human_input, self.profile)
+                if value.human_input.get("device_profile_matches") is False:
+                    reasons.append("device_identity_mismatch")
                 poll, available = mapped["poll_ns"], mapped["available_ns"]
                 if not 0 <= now - poll <= cfg.max_age_ms * 1_000_000 or available > now:
                     reasons.append("stale_human_input")

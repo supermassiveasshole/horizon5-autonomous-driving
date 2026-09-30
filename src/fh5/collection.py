@@ -151,6 +151,7 @@ class CollectionRun:
     config: CollectionConfig = field(default_factory=CollectionConfig)
     software_snapshot: dict[str, Any] = field(default_factory=lambda: {"status": "unfrozen"})
     input_conditions: dict[str, Any] = field(default_factory=dict)
+    stop_path: Path | None = None
 
 
 @dataclass(frozen=True)

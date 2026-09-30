@@ -45,6 +45,21 @@ def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Record and replay FH5 Data Out experiments")
     commands = parser.add_subparsers(dest="mode", required=True)
+    prepare = commands.add_parser(
+        "collection-prepare", help="Freeze a separate passive collector; no devices"
+    )
+    prepare.add_argument("--repository", type=Path, default=Path.cwd())
+    prepare.add_argument("--capture-config", type=Path, required=True)
+    prepare.add_argument("--input-profile", type=Path, required=True)
+    prepare.add_argument("--output", type=Path, required=True)
+    prepare.add_argument("--seconds", type=float, default=14400)
+    prepare.add_argument("--source", choices=("native", "synthetic"), default="native")
+    prepare.add_argument("--port", type=int, default=5300)
+    prepare.add_argument("--uv", type=Path)
+    prepare.add_argument("--offline", action="store_true")
+    start = commands.add_parser("collection-start", help="Start the frozen independent collector")
+    start.add_argument("bundle", type=Path)
+    start.add_argument("--live", action="store_true")
     for name in ("collection-status", "collection-stop", "collection-review"):
         collection = commands.add_parser(
             name, help="Inspect, stop or verify a passive collection session"
@@ -279,6 +294,49 @@ def main(argv: Sequence[str] | None = None) -> int:
     perception_replay.add_argument("--labels", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.mode == "collection-prepare":
+            from fh5.capture_config import parse_capture_config
+            from fh5.collection import CollectionConfig
+            from fh5.collection_process import CollectionPrepare
+            from fh5.collection_store import read_bounded
+
+            pipeline, _ = parse_capture_config(
+                json.loads(read_bounded(args.capture_config, 1024**2))
+            )
+            prepared = run_experiment(
+                CollectionPrepare(
+                    args.repository,
+                    args.output,
+                    args.capture_config,
+                    args.input_profile,
+                    CollectionConfig(
+                        pixels=pipeline.pixels,
+                        seconds=args.seconds,
+                        observation_hz=pipeline.observation_hz,
+                        max_age_ms=pipeline.max_age_ms,
+                    ),
+                    source=args.source,
+                    port=args.port,
+                    uv=args.uv,
+                    offline=args.offline,
+                )
+            )
+            print(
+                json.dumps(
+                    {
+                        "state": prepared.summary["collection"]["state"],
+                        "manifest": str(prepared.report_path),
+                        "commands_sent": False,
+                    }
+                )
+            )
+            return 0
+        if args.mode == "collection-start":
+            from fh5.collection_process import CollectionStart
+
+            started = run_experiment(CollectionStart(args.bundle, live=args.live))
+            print(json.dumps(started.summary["collection"]))
+            return 0
         if args.mode.startswith("collection-"):
             from fh5.collection import CollectionControl, CollectionReview
 

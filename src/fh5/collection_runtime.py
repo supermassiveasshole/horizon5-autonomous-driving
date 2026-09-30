@@ -31,6 +31,10 @@ def control_collection(request: CollectionControl) -> RunResult:
     from fh5.experiment import RunResult
 
     root = request.recording_dir
+    if (root / "frozen.json").is_file():
+        from fh5.collection_process import control_bundle
+
+        return control_bundle(request)
     session = json.loads(read_bounded(root / "session.json", 1024**2))
     if session.get("kind") != "continuous-numeric-collection-v1":
         raise ValueError("Not a continuous collection session")
@@ -85,7 +89,9 @@ def collect(
     error: str | None = None
     try:
         while time.monotonic() - started < cfg.seconds:
-            if (root / "stop.request").exists():
+            if (root / "stop.request").exists() or (
+                request.stop_path is not None and request.stop_path.exists()
+            ):
                 reason = "requested_stop"
                 break
             if archive.error:

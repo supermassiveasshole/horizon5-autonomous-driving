@@ -28,6 +28,8 @@ class UDPTelemetry:
             raise OSError("Telemetry receiver is closed")
         if self.receiver is None:
             self.receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                self.receiver.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
             self.receiver.bind(("127.0.0.1", self.port))
         receiver = self.receiver
         receiver.setblocking(False)

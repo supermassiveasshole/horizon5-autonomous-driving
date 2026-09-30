@@ -18,6 +18,13 @@ from fh5.capture import CaptureReplay, CaptureRun, replay_capture
 from fh5.capture_runtime import CaptureSource, run_capture
 from fh5.capture_trace import CaptureTraceReview, review_capture_trace
 from fh5.collection import CollectionControl, CollectionEnvironment, CollectionReview, CollectionRun
+from fh5.collection_process import (
+    CollectionInstaller,
+    CollectionPrepare,
+    CollectionStart,
+    prepare_collection,
+    start_collection,
+)
 from fh5.collection_review import review_collection
 from fh5.collection_runtime import collect, control_collection
 from fh5.collection_store import WriteFile
@@ -211,6 +218,8 @@ def run_experiment(
     | RealtimeRun
     | RealtimeNumericReplay
     | CollectionRun
+    | CollectionPrepare
+    | CollectionStart
     | CollectionReview
     | CollectionControl
     | CaptureReplay
@@ -261,8 +270,13 @@ def run_experiment(
     realtime_journal_sink: Callable[[bytes], None] | None = None,
     collection_environment: CollectionEnvironment | None = None,
     collection_write: WriteFile | None = None,
+    collection_installer: CollectionInstaller | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, CollectionPrepare):
+        return prepare_collection(request, collection_installer)
+    if isinstance(request, CollectionStart):
+        return start_collection(request)
     if isinstance(request, CollectionControl):
         return control_collection(request)
     if isinstance(request, CollectionReview):
