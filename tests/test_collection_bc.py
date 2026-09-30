@@ -95,6 +95,7 @@ def test_exported_collection_trains_and_reloads_without_final_holdout_feedback(t
     assert {r["split"] for r in summary["decisions"]} == {"train", "development"}
     assert all(r["timing"]["adjacent_delta_s"] == [0.1, 0.1] for r in summary["decisions"])
     assert summary["model"]["provenance"]["diagnostic_only"]
+    assert summary["model"]["diagnostic_only"]
     reloaded = run_experiment(
         TemporalBCReplay(tmp_path / "model", dataset, tmp_path / "replay.html")
     )

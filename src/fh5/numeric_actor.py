@@ -93,7 +93,11 @@ class FrozenNumericActor:
             "numeric_contract": contract.metadata(),
             "model_contract": c,
             "original_preprocessing": original["preprocessing"],
-            "diagnostic_only": not temporal or contract.origin == "legacy_offline",
+            "diagnostic_only": (
+                not temporal
+                or contract.origin == "legacy_offline"
+                or original.get("provenance", {}).get("diagnostic_only") is not False
+            ),
             "new_capture_distribution_validated": False,
             "explicit_dt_model": temporal,
         }

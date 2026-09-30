@@ -49,7 +49,7 @@ for(const sample of originals){
 }
 document.getElementById('metrics-section').hidden=!data.metrics;
 text('metrics',JSON.stringify({training:data.training,metrics:data.metrics},null,2));
-text('notice',data.model?.diagnostic_only || data.diagnostic_only ? '旧数据兼容诊断：尚未验证新采集分布、实时性或驾驶能力。' : '数值接口诊断：不构成实时驾驶验收。');
+text('notice',data.model?.diagnostic_only || data.diagnostic_only ? '仅限诊断：包含合成、未核实或旧来源条件，尚未验证实时驾驶能力。' : '数值接口诊断：不构成实时驾驶验收。');
 slider.max=Math.max(0,rows.length-1);slider.disabled=play.disabled=!rows.length;
 function loadImage(url){
   if(!url)return Promise.resolve(null);
