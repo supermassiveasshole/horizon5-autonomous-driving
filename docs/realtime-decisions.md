@@ -53,6 +53,8 @@ uv run --locked fh5 realtime-shadow --config configs/realtime-shadow.example.jso
 
 新实时记录使用 v2：常驻 worker 保存数值特征及执行起止时刻，日志绑定最终预测和接受/丢弃结果，数值旁路保存调度时快照。停止控制后生成 `realtime-manifest.json`，绑定完整报告的 SHA-256；编码、哈希、文件读写不进入决策或动作监督循环。阶段计量分别列出 worker 排队、特征计算与推理、结果监督等待。
 
+特征与预测取独立数值副本，模型复用内部缓冲区不会改写历史。重放同时核对调度开始快照、最终结果和数值输入存档；模型的特征与预测接口各自接收独立输入副本，与在线语义一致。报告读取上限为 256 MiB，与写出侧共用：超出时仍保留记录，但明确取消精确重放资格，避免完整长记录被静默误判。
+
 ```powershell
 uv run --locked fh5 realtime-replay runs/shadow-10hz --model runs/t35-temporal-20260930/actual-reviewed --report runs/shadow-10hz-verified.html --allow-legacy-source-diagnostic
 ```
