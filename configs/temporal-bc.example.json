@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "dataset": "../runs/numeric-candidate/dataset.json",
+  "dataset_sha256": "replace-with-the-numeric-dataset-sha256",
+  "seed": 7,
+  "steps": 200,
+  "batch_size": 8,
+  "learning_rate": 0.001,
+  "device": "cpu",
+  "time_mode": "actual"
+}

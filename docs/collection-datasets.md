@@ -39,4 +39,14 @@ uv run --locked fh5 collection-dataset-review runs/dataset-001/dataset.json --re
 
 补录建议只依据 train/development；evaluation 的行为覆盖不出现在就绪报告中，也不参与补录建议。报告仅展示最终留出组数和样本数；当前数据准备不会使用它调参。`ready_for_software_training` 只说明选中了合格训练和开发样本，`real_candidate_ready` 仍为 false。合成源或未冻结来源标 `diagnostic_only`，不能作为新采集的人工驾驶示范。
 
-后续工作：从固定选择构造数值历史、本车状态、严格因果动作历史及配对参考视图，接入 #35 的实际 Δt 训练和加载回放；完成独立最终留出入口、候选/复制最近动作诊断，以及继续采集时的资源预算验证。实际 4K 条件与新人工多次驾驶仍按 #34/#37 验收。
+## 导出数值历史并训练
+
+`collection-bc-prepare --config configs/collection-bc.example.json --output runs/numeric-candidate` 从固定选择导出数值历史、本车状态、严格因果动作历史及配对参考视图。先替换输入路径与 SHA-256。每帧逐字节复制 RGB 数值数据并按内容去重，不经过 JPEG，也不再次缩放；命名空间保留不同来源的帧身份。沿用 #35 的模型尺寸范围 32–640，每个方向均需满足；超出范围拒绝，而非静默改变已采集分布。独立帧的解码预算共 512 MiB，超限时减小上一步的选择规模。
+
+动作历史取每个偏移截止之前已获得且发生在当前核验区间内的实际输入；没有合格输入时保留缺失 mask。监督标签仍为决策之后的下一轮询，与 actor 的历史分离。本车世界坐标、来源身份、尝试 ID、标签时刻与筛选原因不进入 actor。
+
+默认参考缺失，两种视图的参考 mask 均为空。可选 `reference` 为 `{"route_file":"../runs/independent-route/route.json","independence_evidence":["说明为何独立于当前训练/留出尝试"]}`；先绑定资产哈希，再加载复制后的路线包。禁止与当前采集 session 同源；其他独立性依赖给出的证据，不能仅凭哈希不同就认定独立。参考只生成局部航点，其与无参考视图保持同组，不能把未核实路线当作合法进度依据。
+
+输出 `dataset.json` 只含 train/development，`evaluation.json` 单独保留最终留出。准备报告不显示最终行为或误差。训练配置按 `configs/temporal-bc.example.json` 的字段填写，`dataset` 指向新 `dataset.json`，SHA-256 取准备报告，`time_mode` 使用 `actual`；然后运行 `temporal-train --config <配置> --output <新模型目录>` 和 `temporal-replay --model <模型目录> --dataset <数值数据集> --report <新回放.html>`。模型读取内存中的 RGB 数值，PNG 只用于离线报告预览。参考缺失不声称已经验证有参考驾驶；合成来源始终带有 `diagnostic_only`。
+
+后续工作：独立最终留出评估入口、兼容冻结基线比较，以及真实共享 GPU/CPU 的资源调度验证。当前已经能在后台合成采集继续封存时，用固定快照完成 CPU 训练与加载回放；该原型不代表 4K 游戏负载通过。实际 4K 条件与新人工多次驾驶仍按 #34/#37 验收。

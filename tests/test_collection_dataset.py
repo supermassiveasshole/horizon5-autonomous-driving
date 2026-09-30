@@ -14,14 +14,29 @@ from test_collection import Stream, input_at, request
 from fh5.experiment import run_experiment
 
 
-def dataset_inputs(tmp_path, invalid_packet=False, vary_action=False, overlap=False):
+def dataset_inputs(tmp_path, invalid_packet=False, vary_action=False, overlap=False, size=(2, 1)):
+    from fh5.numeric_images import PixelContract
+
     sources = []
     for index, split in enumerate(("train", "development", "evaluation")):
         folder = tmp_path / f"source-{index}"
         folder.mkdir()
         req = request(folder)
         req = replace(req, input_conditions={"camera": "chase_far", "blueprint": "105657219"})
+        req = replace(req, config=replace(req.config, pixels=PixelContract(size=size)))
         points = [input_at(ms + (0 if overlap else index * 10000)) for ms in range(250, 951, 50)]
+        points = [
+            replace(
+                p,
+                frames=tuple(
+                    replace(
+                        f, size=size, pixels=memoryview(bytes([51, 17, 34] * (size[0] * size[1])))
+                    )
+                    for f in p.frames
+                ),
+            )
+            for p in points
+        ]
         if invalid_packet and index == 0:
             points[6] = replace(points[6], packets=(replace(points[6].packets[0], payload=b"bad"),))
         if vary_action and index == 0:

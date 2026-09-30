@@ -70,6 +70,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     dataset_review.add_argument("dataset", type=Path)
     dataset_review.add_argument("--report", type=Path, required=True)
+    collection_bc = commands.add_parser(
+        "collection-bc-prepare", help="Export sealed numeric BC inputs"
+    )
+    collection_bc.add_argument("--config", type=Path, required=True)
+    collection_bc.add_argument("--output", type=Path, required=True)
     for name in ("collection-status", "collection-stop", "collection-review"):
         collection = commands.add_parser(
             name, help="Inspect, stop or verify a passive collection session"
@@ -356,6 +361,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else CollectionDatasetReview(args.dataset, args.report)
             )
             print(json.dumps(selected.summary["collection_dataset"], ensure_ascii=False))
+            return 0
+        if args.mode == "collection-bc-prepare":
+            from fh5.collection_bc import CollectionBCPrepare
+
+            prepared = run_experiment(CollectionBCPrepare(args.config, args.output))
+            print(json.dumps(prepared.summary["collection_bc"], ensure_ascii=False))
             return 0
         if args.mode.startswith("collection-"):
             from fh5.collection import CollectionControl, CollectionReview

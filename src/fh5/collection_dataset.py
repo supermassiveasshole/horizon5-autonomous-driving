@@ -295,7 +295,7 @@ def _summary(data: dict[str, Any], digest: str) -> dict[str, Any]:
             "groups": sum(g["split"] == "evaluation" for g in data["groups"]),
             "coverage": "withheld",
         },
-        "training_adapter": "pending",
+        "training_adapter": "collection-bc-prepare",
         "closed_loop_validated": False,
     }
 

@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "dataset": "../runs/collection-selection/dataset.json",
+  "dataset_sha256": "replace-with-the-frozen-selection-sha256",
+  "action_history_offsets_ms": [200, 100, 0],
+  "max_action_age_ms": 100,
+  "waypoint_distances_m": [5, 10, 20, 30, 50],
+  "reference": null
+}
