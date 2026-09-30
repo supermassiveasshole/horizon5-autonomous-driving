@@ -17,6 +17,8 @@ from typing import TYPE_CHECKING, Any
 from fh5.attempts import AttemptReplay, _task
 from fh5.bc_learning import VIEWS
 from fh5.collection_store import encode, read_bounded, write_file
+from fh5.evaluation_execution import review_execution
+from fh5.evaluation_metrics import combine_execution_metrics
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_images import PixelContract
 from fh5.realtime import RealtimeConfig
@@ -319,7 +321,7 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
     sources = set()
     for row in entries:
         if (
-            set(row) != {"slot_id", "recording", "files", "evidence"}
+            set(row) - {"execution"} != {"slot_id", "recording", "files", "evidence"}
             or row["slot_id"] not in plan
             or row["slot_id"] in seen
         ):
@@ -341,6 +343,7 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
     write_file(request.output_dir / "batch.json", raw)
     write_file(request.output_dir / "ledger.json", ledger_raw)
     rows = []
+    executions = []
     for i, entry in enumerate(entries):
         source = request.ledger_file.parent / entry["recording"]
         try:
@@ -361,6 +364,16 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
             if evidence is not None and _read(evidence)[1] != proof["sha256"]:
                 raise ValueError("Evaluation evidence changed during review")
         except (OSError, ValueError, KeyError, TypeError) as error:
+            executions.append(
+                {
+                    "slot_id": entry["slot_id"],
+                    "status": "source_unreadable",
+                    "reasons": [str(error)],
+                    "metrics": None,
+                    "game_control_verified": False,
+                    "observed_reference_modes": [],
+                }
+            )
             rows.append(
                 {
                     "slot_id": entry["slot_id"],
@@ -379,6 +392,18 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
                 }
             )
             continue
+        execution = review_execution(
+            entry.get("execution"),
+            ledger_dir=request.ledger_file.parent,
+            batch_dir=request.batch_dir,
+            batch=batch,
+            source_dir=source,
+            recording=result,
+            reference_mode=plan[entry["slot_id"]]["reference_mode"],
+            output=request.output_dir / f"execution-{i:04d}.html",
+        )
+        execution["slot_id"] = entry["slot_id"]
+        executions.append(execution)
         order = _protocol_order(batch, result.metadata)
         for attempt in result.summary["attempt_review"]["attempts"]:
             times = [
@@ -391,6 +416,11 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
             ]
             outcome = attempt["outcome"]
             reasons = list(attempt["reasons"])
+            if execution["status"] == "quarantined":
+                gaps.append("execution_quarantined")
+                reasons.append("execution_quarantined")
+                if outcome == "valid_complete":
+                    outcome = "pending_review"
             if order != "metadata_after_protocol":
                 gaps.append("protocol_order:" + order)
                 reasons.append("protocol_order:" + order)
@@ -405,12 +435,14 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
                 {
                     **attempt,
                     "local_outcome": attempt["outcome"],
+                    "execution_id": entry["slot_id"],
                     "local_record_eligible": attempt["record_eligible"],
                     "protocol_order": order,
                     "diagnostic_only": batch["model_diagnostic_only"]
                     or result.metadata["source_kind"] != "udp"
                     or order != "metadata_after_protocol"
-                    or "conditions_mismatch" in gaps,
+                    or "conditions_mismatch" in gaps
+                    or execution["status"] != "missing",
                     "outcome": outcome,
                     "reasons": reasons,
                     "record_eligible": attempt["record_eligible"] and outcome == "valid_complete",
@@ -436,12 +468,21 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
         "unstarted_slots": [key for key in plan if key not in seen],
         "extra_attempts": len(rows) - len(entries),
         "unresolved_recordings": sum(r["read_error"] is not None for r in rows),
+        "quarantined_executions": sum(e["status"] == "quarantined" for e in executions),
         "attempts": rows,
+        "executions": executions,
+        "execution_metrics": combine_execution_metrics(executions),
+        "execution_metrics_by_observed_reference": {
+            view: combine_execution_metrics(
+                [e for e in executions if e["observed_reference_modes"] == [view]]
+            )
+            for view in VIEWS
+        },
         "metrics": _metrics(rows),
         "by_reference": {
             view: _metrics([r for r in rows if r["reference_mode"] == view]) for view in VIEWS
         },
-        "reference_mode_basis": "frozen plan; actual actor input not yet verified",
+        "reference_mode_basis": "attempt groups use frozen plan; observed numerical execution modes reported separately",
         "metrics_scope": "local task validity; not autonomous policy performance",
         "commands_sent": False,
         "automatic_promotion_allowed": False,

@@ -52,7 +52,8 @@ def read_realtime_recording(root: Path) -> dict[str, Any]:
     return report
 
 
-def _journal(root: Path, report: dict[str, Any]) -> None:
+def read_realtime_journal(root: Path, report: dict[str, Any]) -> list[dict[str, Any]]:
+    """Verify decision/command coverage and return raw packets in receive order."""
     reference = report["journal"]
     if (
         reference["dropped"]
@@ -72,6 +73,7 @@ def _journal(root: Path, report: dict[str, Any]) -> None:
     events: dict[str, list[dict[str, Any]]] = {}
     sequences: set[int] = set()
     commands = []
+    packets = []
     with path.open("rb") as stream:
         while line := stream.readline(1024**2 + 1):
             if len(line) > 1024**2 or len(sequences) >= 1_000_000:
@@ -90,6 +92,8 @@ def _journal(root: Path, report: dict[str, Any]) -> None:
                 events.setdefault(row["decision_id"], []).append(event)
             elif event["kind"] == "command":
                 commands.append((sequence, row))
+            elif event["kind"] == "packet":
+                packets.append((sequence, row))
     if len(sequences) != reference["offered"]:
         raise ValueError("Missing journal events")
     if [r for _, r in sorted(commands)] != report["commands"]:
@@ -129,6 +133,7 @@ def _journal(root: Path, report: dict[str, Any]) -> None:
         final = records[-1]["data"]
         if any(row.get(key) != value for key, value in final.items()):
             raise ValueError("Decision outcome differs from journal")
+    return [row for _, row in sorted(packets)]
 
 
 def _valid_prediction(value: Any) -> bool:
@@ -234,7 +239,7 @@ def replay_realtime_numeric(request: RealtimeNumericReplay, actor: NumericActor)
             or not report["evidence"]["recording_complete"]
         ):
             raise ValueError("Recording is incomplete or quarantined")
-        _journal(request.recording_dir, report)
+        read_realtime_journal(request.recording_dir, report)
         contract = PixelContract.from_metadata(report["configuration"]["pixels"])
         if actor.manifest.get("numeric_contract", contract.metadata()) != contract.metadata():
             raise ValueError("Frozen replay pixel contract differs")

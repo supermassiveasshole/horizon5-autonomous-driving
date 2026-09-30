@@ -397,7 +397,11 @@ def main(argv: Sequence[str] | None = None) -> int:
                     {k: v for k, v in summary.items() if k != "attempts"}, ensure_ascii=False
                 )
             )
-            return 2 if summary.get("unresolved_recordings") else 0
+            return (
+                2
+                if summary.get("unresolved_recordings") or summary.get("quarantined_executions")
+                else 0
+            )
         if args.mode == "collection-bc-prepare":
             from fh5.collection_bc import CollectionBCPrepare
 
