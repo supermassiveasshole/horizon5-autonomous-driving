@@ -92,4 +92,29 @@ uv run --locked fh5 evaluation-review --batch runs/evaluation-001 --ledger runs/
 
 输出包含 `run-protocol.json`、`run.json`、冻结副本、各次 `ready/` 和 `execution/`、重建的完整遥测录制、`ledger.json`、`review/` 与入口 `report.html`。当前限制为 1–10 次无参考运行，每次 0.1–600 秒；它检查调用与证据流程，不模拟真实车辆动力学，也不证明自主驾驶。准备阶段和运行上限均有界，但外部 I/O 实现仍须遵守接口的及时返回约定，不能保证强杀进程等情况下的资源释放。
 
-本接口尚未为自动起跑增加局部有效性审核依据，现有任务仍声明 `manual_placement`；因此几何完成也可能待核验，不会把菜单就绪当作有效驾驶成绩。参考辅助运行、真实控制适配器/游戏响应凭据、实机起点交接、完成页重开编排与最终评估独立性登记仍需后续实现或验收。#4/#9 的实机门槛保留；不阻塞这些独立软件工作。
+本接口尚未为自动起跑增加局部有效性审核依据，现有任务仍声明 `manual_placement`；因此几何完成也可能待核验，不会把菜单就绪当作有效驾驶成绩。参考辅助运行、真实控制适配器/游戏响应凭据、实机起点交接及完成页重开编排仍需后续实现或验收。用途登记见下文，训练入口的自动登记及完整来源覆盖仍需接入。#4/#9 的实机门槛保留；不阻塞这些独立软件工作。
+
+## 最终批次预登记与已知数据复用
+
+同一项目使用一个持久登记库，例如 `runs/evidence-usage.sqlite`。`evaluation-prepare --registry ...` 将批次摘要、冻结模型摘要、用途和登记时间存入库，并把库的身份写入冻结批次；录制应在预登记后开始。复制或移动批次后仍须使用同一个登记库。创建一个新库不能证明旧历史已不存在。
+
+```powershell
+uv run --locked fh5 evidence-use --registry runs/evidence-usage.sqlite --role training --recording runs/human-001 --output runs/use-human-001
+uv run --locked fh5 evaluation-prepare --config configs/my-evaluation.json --registry runs/evidence-usage.sqlite --output runs/final-001
+uv run --locked fh5 evaluation-review --batch runs/final-001 --ledger runs/final-ledger.json --registry runs/evidence-usage.sqlite --output runs/final-review-001
+```
+
+示例中的配置和录制需先准备；`--role selection` 表示该录制用于开发／候选选择，`--recording` 可重复，`--model-sha256` 可记录所关联模型清单摘要。登记只记录声明用途和原始文件指纹，不运行训练，也不证明声明完整。后续训练和选择入口须调用这一边界，不能依赖人永久手动补账。
+
+`EvaluationPrepare`、`EvaluationReview`、`EvaluationRun` 均可传 `registry_file`；`RecordUsage` 通过同一个实验入口登记训练／选择用途。审核时自动将开发批次记为 `selection`，最终批次记为 `final`。相同批次的相同用途幂等；后来登记的其他用途会在下次审核时发现。SQLite 事务保留原历史，接口不提供删除或改写旧用途操作。
+
+审核将独立性作为单独字段保留，不改写局部驾驶结论或尝试分母：
+
+- `known_overlap`：会话或非空包流的完整 SHA-256 与已登记训练、选模或另一最终批次重叠。改目录名或只改会话注释不能洗掉相同包流的已知用途。
+- `no_known_overlap`：批次在同一库预登记、录制时间元数据在登记之后、计划记录齐全且均可辨认，没有发现已登记重叠。它只是必要条件；`independence_proven` 仍为 false，不证明整个训练谱系完整，也不允许晋升。
+- `unknown`：未预登记、身份不符、时间不明／未来时间、未开始槽位、空或不可读录制、登记库故障。原录制与尝试统计仍保留。
+- `untracked`：未传登记库，兼容旧操作，但不能把 `purpose=final` 标签当作独立性证据。
+
+完整登记快照及其摘要保存为 `usage-snapshot.json`；报告只描述该快照时刻。备份登记库及快照，不能只保存 HTML。该机制不识别任意重新编码、修改时间戳或裁剪后的数据复本，也无法发现从未登记的使用；实际时间顺序目前仍基于录制元数据，不能替代实机执行证据。单次登记上限 1000 份录制，库上限 20000 条指纹用途与 10000 个预登记批次。
+
+`evidence-use` 有无法辨认的空记录时退出 4；登记库／输入错误退出 2。最终批次审核发现重叠或未知时退出 4，输入／登记库错误退出 2；未传库的旧审核退出语义保持不变。退出 0 也不表示独立性已证实或驾驶成功。

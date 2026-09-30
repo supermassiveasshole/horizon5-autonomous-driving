@@ -19,6 +19,7 @@ from fh5.bc_learning import VIEWS
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.evaluation_execution import review_execution
 from fh5.evaluation_metrics import combine_execution_metrics
+from fh5.evidence_usage import reserve_batch, review_usage, source_keys
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_images import PixelContract
 from fh5.realtime import RealtimeConfig
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
 class EvaluationPrepare:
     config_file: Path
     output_dir: Path
+    registry_file: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -39,6 +41,7 @@ class EvaluationReview:
     batch_dir: Path
     ledger_file: Path
     output_dir: Path
+    registry_file: Path | None = None
 
 
 def _read(path: Path, limit: int = 128 * 1024**2) -> tuple[dict[str, Any], str, bytes]:
@@ -231,6 +234,8 @@ def prepare_evaluation(request: EvaluationPrepare) -> RunResult:
         "policy_contract": actor.original_contract,
     }
     path = request.output_dir / "batch.json"
+    if request.registry_file is not None:
+        reserve_batch(request.registry_file, batch)
     write_file(path, encode(batch))
     return RunResult(
         {},
@@ -351,7 +356,14 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
     write_file(request.output_dir / "ledger.json", ledger_raw)
     rows = []
     executions = []
+    usage_sources = []
     for i, entry in enumerate(entries):
+        usage_source: dict[str, Any] = {
+            "slot_id": entry["slot_id"],
+            "keys": [],
+            "origin": "unknown",
+        }
+        usage_sources.append(usage_source)
         source = request.ledger_file.parent / entry["recording"]
         try:
             _verify_source(source, entry["files"])
@@ -370,6 +382,11 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
             _verify_source(source, entry["files"])
             if evidence is not None and _read(evidence)[1] != proof["sha256"]:
                 raise ValueError("Evaluation evidence changed during review")
+            usage_source.update(
+                keys=source_keys(entry["files"]),
+                origin=entry["files"]["packets.jsonl"],
+                created_utc=result.metadata["created_utc"],
+            )
         except (OSError, ValueError, KeyError, TypeError) as error:
             executions.append(
                 {
@@ -497,6 +514,9 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
         or any(r["diagnostic_only"] for r in rows),
         "closed_loop_validated": False,
         "scope": "local validity accounting; recorded policy execution, timing and autonomous restart still require evidence",
+        "independence": review_usage(
+            request.registry_file, batch, digest, usage_sources, request.output_dir
+        ),
     }
     write_file(request.output_dir / "batch-report.json", encode(summary))
     links = ""

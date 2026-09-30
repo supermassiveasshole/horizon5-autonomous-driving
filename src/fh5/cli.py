@@ -50,12 +50,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     evaluation_prepare.add_argument("--config", type=Path, required=True)
     evaluation_prepare.add_argument("--output", type=Path, required=True)
+    evaluation_prepare.add_argument("--registry", type=Path)
     evaluation_review = commands.add_parser(
         "evaluation-review", help="Account for every recorded attempt under a frozen protocol"
     )
     evaluation_review.add_argument("--batch", type=Path, required=True)
     evaluation_review.add_argument("--ledger", type=Path, required=True)
     evaluation_review.add_argument("--output", type=Path, required=True)
+    evaluation_review.add_argument("--registry", type=Path)
+    evidence_use = commands.add_parser(
+        "evidence-use", help="Register recording use for training or selection; no devices"
+    )
+    evidence_use.add_argument("--registry", type=Path, required=True)
+    evidence_use.add_argument("--role", choices=("training", "selection"), required=True)
+    evidence_use.add_argument("--recording", type=Path, action="append", required=True)
+    evidence_use.add_argument("--model-sha256")
+    evidence_use.add_argument("--output", type=Path, required=True)
     prepare = commands.add_parser(
         "collection-prepare", help="Freeze a separate passive collector; no devices"
     )
@@ -387,9 +397,9 @@ def main(argv: Sequence[str] | None = None) -> int:
             from fh5.evaluation import EvaluationPrepare, EvaluationReview
 
             evaluation_request = (
-                EvaluationPrepare(args.config, args.output)
+                EvaluationPrepare(args.config, args.output, args.registry)
                 if args.mode == "evaluation-prepare"
-                else EvaluationReview(args.batch, args.ledger, args.output)
+                else EvaluationReview(args.batch, args.ledger, args.output, args.registry)
             )
             summary = run_experiment(evaluation_request).summary["evaluation"]
             print(
@@ -397,11 +407,29 @@ def main(argv: Sequence[str] | None = None) -> int:
                     {k: v for k, v in summary.items() if k != "attempts"}, ensure_ascii=False
                 )
             )
-            return (
-                2
-                if summary.get("unresolved_recordings") or summary.get("quarantined_executions")
-                else 0
-            )
+            independence = summary.get("independence", {})
+            if (
+                summary.get("unresolved_recordings")
+                or summary.get("quarantined_executions")
+                or independence.get("error")
+            ):
+                return 2
+            if summary["purpose"] == "final" and independence.get("status") in (
+                "known_overlap",
+                "unknown",
+            ):
+                return 4
+            return 0
+        if args.mode == "evidence-use":
+            from fh5.evidence_usage import RecordUsage
+
+            usage = run_experiment(
+                RecordUsage(
+                    args.registry, tuple(args.recording), args.role, args.output, args.model_sha256
+                )
+            ).summary["evidence_usage"]
+            print(json.dumps(usage, ensure_ascii=False))
+            return 4 if usage["unidentified_recordings"] else 0
         if args.mode == "collection-bc-prepare":
             from fh5.collection_bc import CollectionBCPrepare
 

@@ -51,6 +51,7 @@ from fh5.evaluation import (
 )
 from fh5.evaluation_run import EvaluationEnvironment, EvaluationRun, run_evaluation
 from fh5.events import EventEnvironment, EventRun, read_event, run_event
+from fh5.evidence_usage import RecordUsage, record_usage
 from fh5.learning_schedule import LearningResources, ScheduledBCTrain, run_scheduled_bc
 from fh5.numeric_images import (
     NumericActor,
@@ -233,6 +234,7 @@ def run_experiment(
     | EvaluationPrepare
     | EvaluationReview
     | EvaluationRun
+    | RecordUsage
     | RealtimeRun
     | RealtimeNumericReplay
     | CollectionRun
@@ -302,6 +304,8 @@ def run_experiment(
         return prepare_evaluation(request)
     if isinstance(request, EvaluationReview):
         return review_evaluation(request)
+    if isinstance(request, RecordUsage):
+        return record_usage(request)
     if isinstance(request, EvaluationRun):
         if evaluation_environment is None:
             raise ValueError("Repeated evaluation requires an explicit environment")

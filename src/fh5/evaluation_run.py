@@ -30,6 +30,7 @@ class EvaluationRun:
     event_config_file: Path
     output_dir: Path
     seconds: float = 15
+    registry_file: Path | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -304,7 +305,9 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
     reviewed_summary: dict[str, Any] = {}
     try:
         reviewed_summary = run_experiment(
-            EvaluationReview(root / "frozen", root / "ledger.json", root / "review")
+            EvaluationReview(
+                root / "frozen", root / "ledger.json", root / "review", request.registry_file
+            )
         ).summary
     except (OSError, ValueError, KeyError, TypeError) as error:
         summary["review_error"] = str(error)
