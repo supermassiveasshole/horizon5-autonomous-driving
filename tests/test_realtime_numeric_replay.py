@@ -208,3 +208,87 @@ def test_cli_replays_real_frozen_time_model_without_an_environment(tmp_path, cap
     assert summary["verified"] and summary["verified_predictions"] > 0
     assert max(c["prediction_max_abs_error"] for c in summary["checks"]) <= 1e-6
     assert json.loads(capsys.readouterr().out)["verified"] is True
+
+
+def test_journal_scheduling_snapshot_must_match_final_outcome_and_archived_input(tmp_path):
+    record(tmp_path)
+    root = tmp_path / "run"
+    journal = root / "realtime-events.jsonl"
+    events = [json.loads(line) for line in journal.read_bytes().splitlines()]
+    start = next(e for e in events if e["kind"] == "decision_started")
+    start["data"]["decision_ns"] += 50_000_000
+    journal.write_text("".join(json.dumps(e) + "\n" for e in events))
+    report = json.loads((root / "report.json").read_bytes())
+    report["journal"]["sha256"] = hashlib.sha256(journal.read_bytes()).hexdigest()
+    payload = json.dumps(report).encode()
+    (root / "report.json").write_bytes(payload)
+    (root / "realtime-manifest.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "report_sha256": hashlib.sha256(payload).hexdigest(),
+            }
+        )
+    )
+    result = run_experiment(
+        RealtimeNumericReplay(root, tmp_path / "review.html"),
+        numeric_actor=PixelTimeActor(),
+    ).summary["realtime_numeric_replay"]
+    assert not result["verified"]
+    assert "scheduling snapshot" in result["errors"][0]["error"]
+
+
+def test_runtime_report_above_32_mib_is_still_replayable(tmp_path):
+    class DiagnosticGame(ThreadedGame):
+        def close(self):
+            return {**super().close(), "diagnostics": "x" * (33 * 1024**2)}
+
+    run_experiment(
+        RealtimeRun(
+            tmp_path / "run", RealtimeConfig(pixels=PixelContract(size=(2, 1))), seconds=0.2
+        ),
+        realtime_environment=DiagnosticGame(),
+        numeric_actor_factory=PixelTimeActor,
+    )
+    result = run_experiment(
+        RealtimeNumericReplay(tmp_path / "run", tmp_path / "review.html"),
+        numeric_actor=PixelTimeActor(),
+    ).summary["realtime_numeric_replay"]
+    assert result["verified"]
+
+
+def test_actor_reused_buffers_cannot_rewrite_previous_features_or_predictions(tmp_path):
+    class ReusingActor(PixelTimeActor):
+        def __init__(self):
+            self.features = []
+            self.prediction = []
+
+        def input_features(self, actor, frames):
+            self.features[:] = super().input_features(actor, frames)
+            return self.features
+
+        def predict(self, actor, frames):
+            self.prediction[:] = super().predict(actor, frames)
+            return self.prediction
+
+    record(tmp_path, ReusingActor)
+    result = run_experiment(
+        RealtimeNumericReplay(tmp_path / "run", tmp_path / "review.html"),
+        numeric_actor=PixelTimeActor(),
+    ).summary["realtime_numeric_replay"]
+    assert result["verified"]
+
+
+def test_replay_preserves_runtime_isolation_between_model_hooks(tmp_path):
+    class MutatingFeatures(PixelTimeActor):
+        def input_features(self, actor, frames):
+            actor["image_age_ms"][-1] += 1
+            return super().input_features(actor, frames)
+
+    original = record(tmp_path, MutatingFeatures)
+    result = run_experiment(
+        RealtimeNumericReplay(tmp_path / "run", tmp_path / "review.html"),
+        numeric_actor=MutatingFeatures(),
+    ).summary["realtime_numeric_replay"]
+    assert result["verified"]
+    assert result["decisions"] == original["decisions"]

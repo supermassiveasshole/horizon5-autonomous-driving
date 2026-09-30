@@ -14,6 +14,9 @@ if TYPE_CHECKING:
     from fh5.experiment import Packet
 
 
+MAX_REALTIME_REPORT_BYTES = 256 * 1024**2
+
+
 @dataclass(frozen=True)
 class RealtimeConfig:
     pixels: PixelContract = field(default_factory=PixelContract)

@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from fh5.capture_metrics import percentiles
 from fh5.numeric_images import asset
-from fh5.realtime import RealtimeConfig
+from fh5.realtime import MAX_REALTIME_REPORT_BYTES, RealtimeConfig
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -76,6 +76,9 @@ def write_realtime_result(
             ]
         )
     payload = (json.dumps(result, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    if result["version"] == 2 and len(payload) > MAX_REALTIME_REPORT_BYTES:
+        result["evidence"].update(exact_replay_eligible=False, reason="replay_report_size_limit")
+        payload = (json.dumps(result, indent=2, allow_nan=False) + "\n").encode("utf-8")
     (directory / "report.json").write_bytes(payload)
     if result["version"] == 2:
         (directory / "realtime-manifest.json").write_text(

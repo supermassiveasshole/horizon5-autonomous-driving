@@ -116,7 +116,7 @@ class InferenceWorker:
                     features = numeric_features(
                         actor, deepcopy(work.actor), work.observation.frames
                     )
-                    prediction = actor.predict(deepcopy(work.actor), work.observation.frames)
+                    prediction = list(actor.predict(deepcopy(work.actor), work.observation.frames))
                 except Exception as failure:
                     error = f"{type(failure).__name__}: {failure}"
                 self.results.put_nowait(

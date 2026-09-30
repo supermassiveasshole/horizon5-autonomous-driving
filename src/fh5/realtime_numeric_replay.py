@@ -6,6 +6,7 @@ import hashlib
 import html
 import json
 import math
+from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -17,13 +18,13 @@ from fh5.numeric_images import (
     validate_decision,
 )
 from fh5.numeric_recording import numeric_features, read_numeric_frame
-from fh5.realtime import RealtimeNumericReplay
+from fh5.realtime import MAX_REALTIME_REPORT_BYTES, RealtimeNumericReplay
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
 
 
-def _read(path: Path, limit: int = 32 * 1024**2) -> bytes:
+def _read(path: Path, limit: int = MAX_REALTIME_REPORT_BYTES) -> bytes:
     with path.open("rb") as stream:
         payload = stream.read(limit + 1)
     if len(payload) > limit:
@@ -34,13 +35,16 @@ def _read(path: Path, limit: int = 32 * 1024**2) -> bytes:
 def read_realtime_recording(root: Path) -> dict[str, Any]:
     manifest = json.loads(_read(root / "realtime-manifest.json", 4096))
     payload = _read(root / "report.json")
-    if manifest.get("version") != 1 or hashlib.sha256(payload).hexdigest() != manifest.get(
-        "report_sha256"
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("version") != 1
+        or hashlib.sha256(payload).hexdigest() != manifest.get("report_sha256")
     ):
         raise ValueError("Real-time report hash mismatch or unsupported manifest")
     report: dict[str, Any] = json.loads(payload)
     if (
-        report["version"] != 2
+        not isinstance(report, dict)
+        or report["version"] != 2
         or report["commands_sent_to_game"] is not False
         or report["evidence_kind"] not in ("synthetic", "shadow")
     ):
@@ -100,9 +104,39 @@ def _journal(root: Path, report: dict[str, Any]) -> None:
         )
         if [e["kind"] for e in records] != expected:
             raise ValueError("Incomplete decision outcome journal")
+        if "actor" in row:
+            started = records[0]["data"]
+            if (
+                started.get("status") != "pending"
+                or started.get("prediction") is not None
+                or any(
+                    started[key] != row[key]
+                    for key in (
+                        "index",
+                        "decision_id",
+                        "epoch",
+                        "decision_ns",
+                        "deadline_ns",
+                        "valid_until_ns",
+                        "actor",
+                        "frames",
+                        "safety_at_decision",
+                        "telemetry_received_ns",
+                    )
+                )
+            ):
+                raise ValueError("Journal scheduling snapshot differs from outcome")
         final = records[-1]["data"]
         if any(row.get(key) != value for key, value in final.items()):
             raise ValueError("Decision outcome differs from journal")
+
+
+def _valid_prediction(value: Any) -> bool:
+    return (
+        isinstance(value, (list, tuple))
+        and len(value) == 2
+        and all(type(v) in (float, int) and math.isfinite(v) and abs(v) <= 1 for v in value)
+    )
 
 
 def _decision(
@@ -144,17 +178,13 @@ def _decision(
         raise ValueError("Invalid recorded observation: " + reason)
     if row["prediction"] is None or row.get("error"):
         raise ValueError("Inference failure has no reproducible prediction")
-    if len(row["prediction"]) != 2 or any(
-        type(v) not in (float, int) or not math.isfinite(v) or abs(v) > 1 for v in row["prediction"]
-    ):
+    if not _valid_prediction(row["prediction"]):
         raise ValueError("Invalid recorded prediction")
-    features = numeric_features(actor, decision.actor, frames)
+    features = numeric_features(actor, deepcopy(decision.actor), frames)
     if features != row.get("features"):
         raise ValueError("Numerical time/state features differ from recorded inputs")
-    prediction = actor.predict(decision.actor, frames)
-    if len(prediction) != 2 or any(
-        type(v) not in (float, int) or not math.isfinite(v) or abs(v) > 1 for v in prediction
-    ):
+    prediction = list(actor.predict(deepcopy(decision.actor), frames))
+    if not _valid_prediction(prediction):
         raise ValueError("Replay actor returned invalid prediction")
     error = max(abs(a - b) for a, b in zip(prediction, row["prediction"]))
     if error > tolerance:

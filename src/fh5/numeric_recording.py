@@ -166,7 +166,7 @@ def _prediction(actor: NumericActor, decision: NumericDecision) -> list[float]:
     result = actor.predict(json.loads(json.dumps(decision.actor)), decision.frames)
     if len(result) != 2 or any(not math.isfinite(v) or abs(v) > 1 for v in result):
         raise ValueError("Numerical actor must return two finite bounded actions")
-    return result
+    return list(result)
 
 
 def numeric_features(
@@ -183,7 +183,7 @@ def numeric_features(
         or any(type(v) not in (float, int) or not math.isfinite(v) for v in values)
     ):
         raise ValueError("Numerical input features must be a bounded finite vector")
-    return values
+    return list(values)
 
 
 def _result(
