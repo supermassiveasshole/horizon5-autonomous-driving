@@ -6,12 +6,13 @@ import hashlib
 import html
 import json
 import math
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from fh5.collection_store import atomic_json, encode, read_bounded, write_file
-from fh5.evaluation import EvaluationReview, _read
+from fh5.evaluation import EvaluationReview, _read, read_evaluation_batch
 from fh5.evaluation_handoff import ReadyHandoff
 from fh5.events import EventEnvironment, EventRun, validate_event_file
 from fh5.numeric_images import PixelContract
@@ -47,26 +48,8 @@ class EvaluationEnvironment(Protocol):
     def close(self) -> dict[str, Any]: ...
 
 
-def _batch(directory: Path, expected: str) -> dict[str, Any]:
-    batch, digest, _ = _read(directory / "batch.json", 4 * 1024**2)
-    if (
-        digest != expected
-        or batch.get("kind") != "frozen-local-evaluation-v1"
-        or batch.get("version") != 1
-    ):
-        raise ValueError("Frozen evaluation batch changed or unsupported")
-    for name, wanted in batch["files"].items():
-        path = (directory / name).resolve()
-        if (
-            not path.is_relative_to(directory.resolve())
-            or hashlib.sha256(read_bounded(path, 128 * 1024**2)).hexdigest() != wanted
-        ):
-            raise ValueError("Frozen evaluation dependency changed: " + name)
-    return batch
-
-
 def _freeze(request: EvaluationRun) -> tuple[dict[str, Any], Path]:
-    batch = _batch(request.batch_dir, request.batch_sha256)
+    batch, _, _ = read_evaluation_batch(request.batch_dir, request.batch_sha256)
     plan = batch["config"]["plan"]
     if not 1 <= len(plan) <= 10 or any(p["reference_mode"] != "no_reference" for p in plan):
         raise ValueError("Current repeated runner supports 1..10 no-reference runs")
@@ -91,7 +74,7 @@ def _freeze(request: EvaluationRun) -> tuple[dict[str, Any], Path]:
         dest = root / "frozen" / name
         dest.parent.mkdir(parents=True, exist_ok=True)
         write_file(dest, read_bounded(request.batch_dir / name, 128 * 1024**2))
-    _batch(root / "frozen", request.batch_sha256)
+    read_evaluation_batch(root / "frozen", request.batch_sha256)
     assets = root / "event-assets"
     assets.mkdir()
     references = [
@@ -167,6 +150,7 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
         if environment.source_kind != "synthetic":
             raise ValueError("Repeated evaluation currently requires synthetic external I/O")
         batch, event_file = _freeze(request)
+        model_sha = batch["files"]["model/model.json"]
         protocol_sha = _read(root / "run-protocol.json")[1]
         settings = dict(batch["config"]["runtime"])
         settings["pixels"] = PixelContract.from_metadata(settings["pixels"])
@@ -184,7 +168,7 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
             ),
         )
         for i, slot in enumerate(batch["config"]["plan"]):
-            _batch(root / "frozen", request.batch_sha256)
+            read_evaluation_batch(root / "frozen", request.batch_sha256)
             _verify_event_protocol(root, protocol_sha)
             directory = root / f"attempt-{i:04d}"
             directory.mkdir()
@@ -204,7 +188,7 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
             ):
                 summary["stop_reason"] = "ready_unconfirmed"
                 break
-            _batch(root / "frozen", request.batch_sha256)
+            read_evaluation_batch(root / "frozen", request.batch_sha256)
             _verify_event_protocol(root, protocol_sha)
             summary["started_slots"].append(slot["id"])
             attempt = {
@@ -224,7 +208,7 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
                 root / "ledger.json",
                 {"version": 1, "batch_sha256": request.batch_sha256, "entries": entries},
             )
-            drive = environment.driving(slot["id"], preparation["ready_state"])
+            drive = environment.driving(slot["id"], deepcopy(preparation["ready_state"]))
             if drive.source_kind != "synthetic":
                 drive.close()
                 raise ValueError("Driving environment must be synthetic")
@@ -234,7 +218,7 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
                     drive, preparation["ready_state"], _read(event_file)[0]["event_run"], config
                 ),
                 numeric_actor_factory=lambda: FrozenNumericActor(
-                    root / "frozen/model", config.pixels
+                    root / "frozen/model", config.pixels, expected_manifest_sha256=model_sha
                 ),
             ).summary["realtime"]
             attempt.update(

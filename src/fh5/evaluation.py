@@ -50,6 +50,26 @@ def _read(path: Path, limit: int = 128 * 1024**2) -> tuple[dict[str, Any], str, 
     return value, hashlib.sha256(raw).hexdigest(), raw
 
 
+def read_evaluation_batch(
+    directory: Path, expected_sha256: str
+) -> tuple[dict[str, Any], str, bytes]:
+    batch, digest, raw = _read(directory / "batch.json", 4 * 1024**2)
+    if (
+        digest != expected_sha256
+        or batch.get("kind") != "frozen-local-evaluation-v1"
+        or batch.get("version") != 1
+    ):
+        raise ValueError("Frozen evaluation batch changed or unsupported")
+    for name, expected in batch["files"].items():
+        target = (directory / name).resolve()
+        if (
+            not target.is_relative_to(directory.resolve())
+            or hashlib.sha256(read_bounded(target, 128 * 1024**2)).hexdigest() != expected
+        ):
+            raise ValueError("Frozen evaluation dependency changed: " + name)
+    return batch, digest, raw
+
+
 def _config(path: Path) -> dict[str, Any]:
     from fh5.experiment import _validate_config
 
@@ -296,23 +316,10 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
 
     if request.output_dir.exists():
         raise FileExistsError(request.output_dir)
-    batch, digest, raw = _read(request.batch_dir / "batch.json", 4 * 1024**2)
     ledger, _, ledger_raw = _read(request.ledger_file, 4 * 1024**2)
-    if (
-        batch.get("kind") != "frozen-local-evaluation-v1"
-        or batch.get("version") != 1
-        or set(ledger) != {"version", "batch_sha256", "entries"}
-        or ledger["version"] != 1
-        or ledger["batch_sha256"] != digest
-    ):
+    if set(ledger) != {"version", "batch_sha256", "entries"} or ledger["version"] != 1:
         raise ValueError("Evaluation ledger belongs to a different frozen batch")
-    for name, expected in batch["files"].items():
-        target = (request.batch_dir / name).resolve()
-        if (
-            not target.is_relative_to(request.batch_dir.resolve())
-            or hashlib.sha256(read_bounded(target, 128 * 1024**2)).hexdigest() != expected
-        ):
-            raise ValueError("Frozen evaluation dependency changed: " + name)
+    batch, digest, raw = read_evaluation_batch(request.batch_dir, ledger["batch_sha256"])
     plan = {row["id"]: row for row in batch["config"]["plan"]}
     entries = ledger["entries"]
     if not isinstance(entries, list) or len(entries) > len(plan):

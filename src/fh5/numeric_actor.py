@@ -32,8 +32,15 @@ class FrozenNumericActor:
         device: str = "cpu",
         *,
         legacy_diagnostic: bool = False,
+        expected_manifest_sha256: str | None = None,
     ) -> None:
-        original = json.loads((model_dir / "model.json").read_text(encoding="utf-8"))
+        manifest_bytes = (model_dir / "model.json").read_bytes()
+        if (
+            expected_manifest_sha256 is not None
+            and hashlib.sha256(manifest_bytes).hexdigest() != expected_manifest_sha256
+        ):
+            raise ValueError("Frozen numerical actor manifest changed from its bound batch")
+        original = json.loads(manifest_bytes)
         temporal = original.get("version") == 2
         if not temporal and not legacy_diagnostic:
             raise ValueError("Old BC weights require explicit legacy_diagnostic=True")

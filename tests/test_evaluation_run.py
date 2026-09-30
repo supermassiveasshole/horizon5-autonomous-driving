@@ -263,3 +263,65 @@ def test_second_driver_open_failure_remains_an_interface_attempt_in_the_batch(tm
     assert summary["attempts"][1]["stop_reason"] == "interface_error"
     assert result.summary["evaluation"]["metrics"]["all_attempts"] == 2
     assert result.summary["evaluation"]["unresolved_recordings"] == 1
+
+
+def test_valid_model_replacement_during_driver_open_is_rejected_before_commands(tmp_path, policy):
+    import torch
+
+    from fh5.numeric_actor import FrozenNumericActor
+    from fh5.numeric_images import PixelContract
+
+    operation = request(tmp_path, policy)
+
+    class SwappingBatch(Batch):
+        def driving(self, slot_id, ready_state):
+            model = operation.output_dir / "frozen/model"
+            saved = torch.load(model / "actor.pt", weights_only=True)
+            next(iter(saved["actor"].values())).add_(0.01)
+            torch.save(saved, model / "actor.pt")
+            manifest = json.loads((model / "model.json").read_bytes())
+            manifest["weights_sha256"] = sha(model / "actor.pt")
+            (model / "model.json").write_text(json.dumps(manifest))
+            # A valid alternative model must still be rejected by this frozen batch.
+            FrozenNumericActor(model, PixelContract(size=(64, 36)))
+            return super().driving(slot_id, ready_state)
+
+    game = SwappingBatch()
+    result = run_experiment(operation, evaluation_environment=game)
+    assert len(game.drives) == 1
+    assert not any(c.throttle_u8 or c.brake_u8 or c.steer_i16 for _, c in game.drives[0].sent)
+    assert result.summary["evaluation_run"]["unstarted_slots"] == ["run-1"]
+    assert game.closed and game.drives[0].closed
+
+
+def test_driver_cannot_rewrite_ready_clock_to_accept_a_backward_handoff(tmp_path, policy):
+    class BackwardClock(PacketGame):
+        def read(self, period_s):
+            value = super().read(period_s)
+            stamp = (self.start_clock - 100 + len(self.packets)) % 2**32
+            raw = bytearray(value.raw_packets[0].payload)
+            struct.pack_into("<I", raw, 4, stamp)
+            return replace(
+                value,
+                safety=replace(value.safety, game_timestamp_ms=stamp),
+                raw_packets=(replace(value.raw_packets[0], payload=bytes(raw)),),
+            )
+
+    class RewritingBatch(Batch):
+        def driving(self, slot_id, ready_state):
+            drive = BackwardClock()
+            drive.start_clock = ready_state["game_timestamp_ms"]
+            ready_state["game_timestamp_ms"] = (drive.start_clock - 1000) % 2**32
+            self.drives.append(drive)
+            return drive
+
+    operation = request(tmp_path, policy)
+    game = RewritingBatch()
+    result = run_experiment(operation, evaluation_environment=game)
+    assert not any(c.throttle_u8 or c.brake_u8 or c.steer_i16 for _, c in game.drives[0].sent)
+    summary = result.summary["evaluation_run"]
+    assert (
+        summary["preparations"][0]["ready_state"]["game_timestamp_ms"] == game.drives[0].start_clock
+    )
+    assert summary["unstarted_slots"] == ["run-1"]
+    assert result.summary["evaluation"]["metrics"]["all_attempts"] == 1
