@@ -78,7 +78,7 @@ uv run --locked fh5 evaluation-review --batch runs/evaluation-001 --ledger runs/
 - `valid_fraction_all_attempts` 以所有已解析尝试及异常占位为分母；存在 `unresolved_recordings` 时无法声称掌握完整真实尝试数。另列排除待核验/接口异常后的 `valid_fraction_classified_driving`，两者不能混用。
 - 用时只汇总符合冻结条件的有效连续局部片段，列出数量、最短、中位和最长；接触计数独立保留。快照不符记为本批 `invalid`；事后绑定或时间不明的局部成功记为本批 `pending_review`，两者均不贡献有效比例/用时，原独立判定另存 `local_outcome` / `local_record_eligible`。已有驾驶失败、违规和接口异常不会被时间缺口抹去。未完赛片段不混入用时分布，恢复后的片段不拼成完整成绩。
 - 有参考/无参考尝试分组来自冻结计划；可选执行证据另核对已记录的数值 actor 输入。实际游戏控制与响应、完整视觉来源和自动重开仍有缺口。`valid_complete` 仍是局部有效性结果，不能解释为冻结策略自主成功。
-- 所有报告均禁止自动晋升；合成数据或诊断模型另有 `diagnostic_only` 标记。阈值被固定但尚未用于版本筛选。
+- 所有报告均禁止自动晋升；合成数据或诊断模型另有 `diagnostic_only` 标记。冻结阈值由[候选比较入口](candidate-selection.md)用于局部记录筛选，建议与实际默认版本激活分别处理。
 
 ## 合成环境中的重复执行
 
