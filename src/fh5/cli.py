@@ -66,6 +66,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     bc_replay.add_argument("--dataset", type=Path, required=True)
     bc_replay.add_argument("--report", type=Path, required=True)
     bc_replay.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    numeric_prepare = commands.add_parser(
+        "numeric-prepare", help="Decode legacy BC images once into a numerical offline source"
+    )
+    numeric_prepare.add_argument("--model", type=Path, required=True)
+    numeric_prepare.add_argument("--dataset", type=Path, required=True)
+    numeric_prepare.add_argument("--output", type=Path, required=True)
+    numeric_prepare.add_argument("--max-decisions", type=int, default=200)
+    numeric_prepare.add_argument(
+        "--view", choices=("no_reference", "reference_assisted"), default="no_reference"
+    )
+    for name, description in (
+        ("numeric-infer", "Run numerical prepared inputs through a frozen actor; no game input"),
+        ("numeric-replay", "Verify exact numerical inputs and replay predictions; no game input"),
+    ):
+        numeric = commands.add_parser(name, help=description)
+        numeric.add_argument("recording", type=Path)
+        numeric.add_argument("--model", type=Path, required=True)
+        numeric.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+        numeric.add_argument("--legacy-diagnostic", action="store_true", required=True)
+        if name == "numeric-infer":
+            numeric.add_argument("--output", type=Path, required=True)
+            numeric.add_argument("--max-decisions", type=int, default=1000)
+            numeric.add_argument("--archive-capacity", type=int, default=8)
+            numeric.add_argument("--archive-mib", type=int, default=32)
+        else:
+            numeric.add_argument("--report", type=Path, required=True)
+            numeric.add_argument("--tolerance", type=float, default=1e-6)
     record = commands.add_parser("record", help="Receive UDP; stop on Ctrl+C or the time limit")
     record.add_argument("--config", type=Path, required=True)
     record.add_argument("--output", type=Path, required=True)
@@ -166,6 +193,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     perception_replay.add_argument("--labels", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.mode in ("numeric-prepare", "numeric-infer", "numeric-replay"):
+            return _numeric_command(args)
         if args.mode == "input-devices":
             from fh5.live_demonstration import input_devices
 
@@ -606,3 +635,78 @@ def main(argv: Sequence[str] | None = None) -> int:
     if result.summary["valid_packets"] == 0:
         return 3
     return 0
+
+
+def _numeric_command(args: argparse.Namespace) -> int:
+    from fh5.numeric_actor import FrozenNumericActor
+    from fh5.numeric_images import NumericInfer, NumericReplay, PixelContract
+    from fh5.numeric_import import LegacyNumericImport, PreparedNumericSource
+
+    if args.mode == "numeric-prepare":
+        result = run_experiment(
+            LegacyNumericImport(
+                args.model,
+                args.dataset,
+                args.output,
+                args.max_decisions,
+                args.view,
+            )
+        )
+        summary = result.summary["numeric_import"]
+    elif args.mode == "numeric-infer":
+        source = PreparedNumericSource(args.recording)
+        actor = FrozenNumericActor(
+            args.model, source.contract, args.device, legacy_diagnostic=args.legacy_diagnostic
+        )
+        result = run_experiment(
+            NumericInfer(
+                args.output,
+                source.contract,
+                args.max_decisions,
+                args.archive_capacity,
+                args.archive_mib * 1024**2,
+            ),
+            numeric_inputs=source,
+            numeric_actor=actor,
+        )
+        summary = result.summary["numeric"]
+    else:
+        manifest = json.loads((args.recording / "numeric-run.json").read_text(encoding="utf-8"))
+        contract = PixelContract.from_metadata(manifest["contract"])
+        actor = FrozenNumericActor(
+            args.model, contract, args.device, legacy_diagnostic=args.legacy_diagnostic
+        )
+        result = run_experiment(
+            NumericReplay(args.recording, args.report, args.tolerance), numeric_actor=actor
+        )
+        summary = result.summary["numeric"]
+    decisions = summary["decisions"]
+    print(
+        json.dumps(
+            {
+                "commands_sent": False,
+                "decisions": len(decisions),
+                "predicted": sum(d.get("status") == "predicted" for d in decisions),
+                "exact_replay_available": sum(
+                    d.get("exact_replay_available", False) for d in decisions
+                ),
+                "execution_error": summary.get("execution_error"),
+                "replay_errors": summary.get("replay_errors", []),
+                "report": str(result.report_path),
+            }
+        )
+    )
+    return (
+        4
+        if (
+            summary.get("execution_error")
+            or summary.get("replay_errors")
+            or summary.get("archive", {}).get("error")
+            or not summary.get("source_released", True)
+            or (
+                args.mode != "numeric-prepare"
+                and not any(d.get("status") == "predicted" for d in decisions)
+            )
+        )
+        else 0
+    )

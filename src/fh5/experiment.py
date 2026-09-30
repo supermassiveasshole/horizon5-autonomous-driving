@@ -23,6 +23,14 @@ from fh5.demonstrations import (
     replay_demonstration,
 )
 from fh5.events import EventEnvironment, EventRun, read_event, run_event
+from fh5.numeric_images import (
+    NumericActor,
+    NumericDecision,
+    NumericInfer,
+    NumericReplay,
+    run_numeric,
+)
+from fh5.numeric_import import LegacyNumericImport, prepare_legacy
 from fh5.observations import ObservationReplay, build_observations, read_settings
 from fh5.perception import (
     Perception,
@@ -182,7 +190,10 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 
 def run_experiment(
-    request: PolicyDrive
+    request: LegacyNumericImport
+    | NumericInfer
+    | NumericReplay
+    | PolicyDrive
     | AttemptReplay
     | BCTrain
     | BCReplay
@@ -207,8 +218,16 @@ def run_experiment(
     road_model: RoadModel | None = None,
     policy_environment: PolicyEnvironment | None = None,
     policy_actor: PolicyActor | None = None,
+    numeric_inputs: Iterable[NumericDecision] | None = None,
+    numeric_actor: NumericActor | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, LegacyNumericImport):
+        return prepare_legacy(request)
+    if isinstance(request, (NumericInfer, NumericReplay)):
+        if numeric_actor is None:
+            raise ValueError("Numerical inference requires an explicit frozen actor")
+        return run_numeric(request, numeric_actor, numeric_inputs)
     if isinstance(request, PolicyDrive):
         if policy_environment is None:
             raise ValueError("Policy execution requires an explicit game environment")
