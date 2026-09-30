@@ -325,3 +325,59 @@ def test_driver_cannot_rewrite_ready_clock_to_accept_a_backward_handoff(tmp_path
     )
     assert summary["unstarted_slots"] == ["run-1"]
     assert result.summary["evaluation"]["metrics"]["all_attempts"] == 1
+
+
+def test_driver_cannot_move_frozen_start_position_to_accept_a_different_location(tmp_path, policy):
+    operation = request(tmp_path, policy)
+
+    class DifferentLocation(PacketGame):
+        def read(self, period_s):
+            value = super().read(period_s)
+            raw = bytearray(value.raw_packets[0].payload)
+            struct.pack_into("<f", raw, 244, 100)
+            return replace(value, raw_packets=(replace(value.raw_packets[0], payload=bytes(raw)),))
+
+    class ChangingStart(Batch):
+        def driving(self, slot_id, ready_state):
+            path = operation.output_dir / "event.json"
+            config = json.loads(path.read_bytes())
+            config["event_run"]["start_position_m"] = [100, 2, 0.2]
+            path.write_text(json.dumps(config))
+            drive = DifferentLocation()
+            self.drives.append(drive)
+            return drive
+
+    game = ChangingStart()
+    result = run_experiment(operation, evaluation_environment=game)
+    assert not any(c.throttle_u8 or c.brake_u8 or c.steer_i16 for _, c in game.drives[0].sent)
+    assert len(game.drives) == 1
+    assert result.summary["evaluation_run"]["unstarted_slots"] == ["run-1"]
+
+
+def test_menu_open_cannot_change_the_frozen_button_recipe(tmp_path, policy):
+    operation = request(tmp_path, policy)
+
+    class AcceptingMenu(Menu):
+        def pulse(self, button):
+            if button == "B":
+                self.pulses.append(button)
+                self.screen = "driving"
+            else:
+                super().pulse(button)
+
+    class ChangingRecipe(Batch):
+        def event(self, slot_id):
+            path = operation.output_dir / "event.json"
+            config = json.loads(path.read_bytes())
+            config["event_run"]["start_steps"][0]["button"] = "B"
+            path.write_text(json.dumps(config))
+            menu = AcceptingMenu(False)
+            self.menus.append(menu)
+            return menu
+
+    game = ChangingRecipe()
+    result = run_experiment(operation, evaluation_environment=game)
+    assert game.menus[0].pulses == []
+    assert game.menus[0].closed and not game.drives
+    assert result.summary["evaluation_run"]["started_slots"] == []
+    assert result.summary["evaluation_run"]["unstarted_slots"] == ["run-0", "run-1"]

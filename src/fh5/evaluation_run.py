@@ -48,7 +48,7 @@ class EvaluationEnvironment(Protocol):
     def close(self) -> dict[str, Any]: ...
 
 
-def _freeze(request: EvaluationRun) -> tuple[dict[str, Any], Path]:
+def _freeze(request: EvaluationRun) -> tuple[dict[str, Any], Path, dict[str, Any]]:
     batch, _, _ = read_evaluation_batch(request.batch_dir, request.batch_sha256)
     plan = batch["config"]["plan"]
     if not 1 <= len(plan) <= 10 or any(p["reference_mode"] != "no_reference" for p in plan):
@@ -113,7 +113,7 @@ def _freeze(request: EvaluationRun) -> tuple[dict[str, Any], Path]:
             }
         ),
     )
-    return batch, event_file
+    return batch, event_file, menu["event_run"]
 
 
 def _verify_event_protocol(root: Path, expected: str) -> None:
@@ -149,7 +149,7 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
     try:
         if environment.source_kind != "synthetic":
             raise ValueError("Repeated evaluation currently requires synthetic external I/O")
-        batch, event_file = _freeze(request)
+        batch, event_file, event_parameters = _freeze(request)
         model_sha = batch["files"]["model/model.json"]
         protocol_sha = _read(root / "run-protocol.json")[1]
         settings = dict(batch["config"]["runtime"])
@@ -172,13 +172,22 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
             _verify_event_protocol(root, protocol_sha)
             directory = root / f"attempt-{i:04d}"
             directory.mkdir()
+            menu_environment = environment.event(slot["id"])
+            try:
+                _verify_event_protocol(root, protocol_sha)
+            except (Exception, KeyboardInterrupt):
+                try:
+                    menu_environment.release()
+                finally:
+                    menu_environment.close()
+                raise
             preparation = run_experiment(
                 EventRun(
                     event_file,
                     directory / "ready",
                     operation="start_ready" if i == 0 else "restart_ready",
                 ),
-                event_environment=environment.event(slot["id"]),
+                event_environment=menu_environment,
             ).summary["event_run"]
             summary["preparations"].append({"slot_id": slot["id"], **preparation})
             if (
@@ -209,13 +218,17 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
                 {"version": 1, "batch_sha256": request.batch_sha256, "entries": entries},
             )
             drive = environment.driving(slot["id"], deepcopy(preparation["ready_state"]))
-            if drive.source_kind != "synthetic":
+            try:
+                if drive.source_kind != "synthetic":
+                    raise ValueError("Driving environment must be synthetic")
+                _verify_event_protocol(root, protocol_sha)
+            except (Exception, KeyboardInterrupt):
                 drive.close()
-                raise ValueError("Driving environment must be synthetic")
+                raise
             executed = run_experiment(
                 RealtimeRun(directory / "execution", config, seconds=request.seconds),
                 realtime_environment=ReadyHandoff(
-                    drive, preparation["ready_state"], _read(event_file)[0]["event_run"], config
+                    drive, preparation["ready_state"], event_parameters, config
                 ),
                 numeric_actor_factory=lambda: FrozenNumericActor(
                     root / "frozen/model", config.pixels, expected_manifest_sha256=model_sha
