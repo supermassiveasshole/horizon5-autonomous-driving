@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "seed": 7,
+  "sources": [
+    {
+      "recording": "../runs/collector-train/recording",
+      "review": "../runs/reviews/train.json"
+    },
+    {
+      "recording": "../runs/collector-development/recording",
+      "review": "../runs/reviews/development.json"
+    }
+  ],
+  "rules": {
+    "max_samples_per_attempt": 1000,
+    "speed_range_mps": [0, 120],
+    "steering_limit": 1.0,
+    "longitudinal_limit": 1.0,
+    "max_label_delay_ms": 50
+  }
+}

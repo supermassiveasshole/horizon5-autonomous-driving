@@ -1,0 +1,27 @@
+{
+  "version": 1,
+  "session_sha256": "replace-with-recording-session-json-sha256",
+  "conditions_verified": false,
+  "evidence": ["Replace with actual condition and driving review evidence."],
+  "independence_evidence": [],
+  "attempts": [
+    {
+      "id": "attempt-001",
+      "group": "session-001",
+      "split": "train",
+      "start_sequence": 0,
+      "end_sequence": 1000,
+      "related_attempts": [],
+      "intervals": [
+        {
+          "start_sequence": 0,
+          "end_sequence": 1000,
+          "quality": "unknown",
+          "reasons": ["pending-review"],
+          "evidence": ["Replace with actual review evidence; do not mark trusted by default."],
+          "road_kind": "unknown"
+        }
+      ]
+    }
+  ]
+}

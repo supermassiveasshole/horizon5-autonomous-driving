@@ -60,6 +60,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     start = commands.add_parser("collection-start", help="Start the frozen independent collector")
     start.add_argument("bundle", type=Path)
     start.add_argument("--live", action="store_true")
+    dataset = commands.add_parser(
+        "collection-dataset", help="Freeze reviewed sealed-source selections"
+    )
+    dataset.add_argument("--config", type=Path, required=True)
+    dataset.add_argument("--output", type=Path, required=True)
+    dataset_review = commands.add_parser(
+        "collection-dataset-review", help="Revalidate a fixed source selection"
+    )
+    dataset_review.add_argument("dataset", type=Path)
+    dataset_review.add_argument("--report", type=Path, required=True)
     for name in ("collection-status", "collection-stop", "collection-review"):
         collection = commands.add_parser(
             name, help="Inspect, stop or verify a passive collection session"
@@ -336,6 +346,16 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             started = run_experiment(CollectionStart(args.bundle, live=args.live))
             print(json.dumps(started.summary["collection"]))
+            return 0
+        if args.mode in ("collection-dataset", "collection-dataset-review"):
+            from fh5.collection_dataset import CollectionDataset, CollectionDatasetReview
+
+            selected = run_experiment(
+                CollectionDataset(args.config, args.output)
+                if args.mode == "collection-dataset"
+                else CollectionDatasetReview(args.dataset, args.report)
+            )
+            print(json.dumps(selected.summary["collection_dataset"], ensure_ascii=False))
             return 0
         if args.mode.startswith("collection-"):
             from fh5.collection import CollectionControl, CollectionReview

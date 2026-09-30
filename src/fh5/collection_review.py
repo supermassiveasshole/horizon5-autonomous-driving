@@ -18,7 +18,9 @@ if TYPE_CHECKING:
     from fh5.experiment import RunResult
 
 
-def collection_result(path: Path, result: dict[str, Any]) -> RunResult:
+def collection_result(
+    path: Path, result: dict[str, Any], *, title: str = "持续采集状态"
+) -> RunResult:
     from fh5.experiment import RunResult
 
     if path.exists():
@@ -26,9 +28,13 @@ def collection_result(path: Path, result: dict[str, Any]) -> RunResult:
     path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False)
     path.write_text(
-        '<!doctype html><html lang="zh"><meta charset="utf-8"><title>持续采集状态</title>'
+        '<!doctype html><html lang="zh"><meta charset="utf-8"><title>'
+        + html.escape(title)
+        + "</title>"
         "<style>body{font:16px system-ui;margin:32px;max-width:1000px}pre{white-space:pre-wrap}</style>"
-        "<h1>持续采集状态</h1><p>完整封存不等于优质示范；碰撞、离路、导航和尝试边界仍需核验。</p><pre>"
+        "<h1>"
+        + html.escape(title)
+        + "</h1><p>完整封存不等于优质示范；碰撞、离路、导航和尝试边界仍需核验。</p><pre>"
         + html.escape(data)
         + "</pre></html>",
         encoding="utf-8",
