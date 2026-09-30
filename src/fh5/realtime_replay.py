@@ -28,7 +28,9 @@ def replay_realtime(request: RealtimeReplay) -> RunResult:
         point = points.pop(now, None)
         if point:
             state.update(point.safety)
-            if point.observation:
+            if point.capture_epoch is not None:
+                state.capture_epoch = point.capture_epoch
+            elif point.observation:
                 state.capture_epoch = point.observation.epoch
         state.supervise(now)
         if pending and pending[0] == now:

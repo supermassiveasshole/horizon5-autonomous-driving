@@ -48,6 +48,7 @@ class LiveCapture:
         self.source_kind = "uninitialized"
         self.release_failed = False
         self.capture_started_ns: int | None = None
+        self.not_before_ns = 0
         self.metrics: dict[str, deque[float]] = {
             name: deque(maxlen=72_000)
             for name in (
@@ -66,6 +67,10 @@ class LiveCapture:
 
     def _offer(self, event: CaptureEvent) -> None:
         with self.condition:
+            raw = event.frame
+            if raw and raw.mapping.convert(raw.present_ticks) < self.not_before_ns:
+                self.state.counts["before_session_boundary"] += 1
+                return
             self.state.offer(event)
             for name, value in event.stage_ms.items():
                 if name not in self.metrics and len(self.metrics) >= 16:
@@ -167,6 +172,13 @@ class LiveCapture:
     def snapshot(self) -> tuple[dict[str, Any], tuple[NumericFrame, ...]]:
         with self.condition:
             return self.state.select(time.perf_counter_ns())
+
+    def invalidate(self, reason: str, now_ns: int) -> None:
+        """Forget pre-boundary inputs, including late capture and preprocessing work."""
+        with self.condition:
+            self.not_before_ns = max(self.not_before_ns, now_ns)
+            self.state.boundary(reason, now_ns)
+            self.condition.notify_all()
 
     def close(self) -> dict[str, Any]:
         self.done.set()

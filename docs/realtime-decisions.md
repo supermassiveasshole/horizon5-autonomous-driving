@@ -1,12 +1,35 @@
 # 容错数值决策（T34 / #36）
 
-状态：首个软件切片。已有共享期限状态机、真实常驻推理线程、独立动作监督、有界旁路与故障时间线；**尚未接入 FH5 只读影子适配器或真实执行器**。#36 保持开放，后续组合 DXGI、UDP、独立任务范围核验及冻结 Δt 模型，完成 10/20 Hz 实机影子对照。#9 负责游戏中的实际发送和车辆响应。
+状态：软件接入阶段。已有共享期限状态机、真实常驻推理线程、独立动作监督、有界旁路，以及 DXGI/UDP/独立任务几何与冻结 Δt 模型的只读影子适配器。**尚未获得 FH5 影子运行的实机证据，也未接入真实执行器**。#36 保持开放；#9 负责游戏中的实际发送和车辆响应。
 
 ## 实验接口
 
 `run_experiment(RealtimeReplay(...))` 输入带绝对时间的安全状态、数值历史和模拟推理服务返回时间，生成确定性期限/动作回放。推理挂起用 `InferenceReply(delay_ms=None)` 表示；它不加载模型、不采集屏幕、不连接手柄。
 
 `run_experiment(RealtimeRun(...), realtime_environment=..., numeric_actor_factory=...)` 启动真实线程。环境边界提供 `read`、独立 `signals`、模拟 `send` 和 `close`；生产游戏控制适配器不属于本切片。`source_kind` 只接受 `synthetic` 或 `shadow`。影子环境的 `send` 必须为空操作，候选动作不充当实际动作历史，缺少已验证真实输入时保持 action mask 为 false。
+
+`ShadowEnvironment` 组合独立 DXGI 采集/预处理、单个回环 UDP 接收器和任务几何核验。每个包都检查，不能用同批末尾的正常包覆盖中间故障。准备前的菜单、时钟异常、失焦或遥测间断会清空历史；恢复后只接受边界之后的新帧。准备完成后硬故障锁存，不自动重试接管。采集 epoch 即使暂无完整历史也会传播，使旧推理及时失效。
+
+任务路线须通过既有局部几何核验并绑定 SHA-256；只用于准备位置、朝向、范围和结束判定，不进入 actor 的航点输入。UDP 每批最多 64 包；发现仍有积压则报告故障。包时间为主机实际读取时刻，不是内核到达时刻或物理状态的精确时间，不能借此宣称没有网络丢包。
+
+## 只读命令
+
+仓库示例引用本地忽略的既有模型与局部路线，其他机器需要替换为自己的已核验资产。默认 **4K 游戏客户区 → 480×270 数值 RGB**，保持原车、调校与追尾远档；游戏实际渲染、HUD 等条件仍按配置注明待核验。
+
+```powershell
+uv run --locked fh5 realtime-shadow --config configs/realtime-shadow.example.json --output runs/shadow-001 --allow-legacy-source-diagnostic
+```
+
+此命令只校验配置、模型声明和路线，不打开采集、UDP、CUDA 或手柄。权重文件与内嵌元数据由启动后的冻结模型 worker 再验证。示例旧模型来自 `legacy_offline`；缺少显式诊断参数会拒绝来源差异，尺寸、预处理和历史契约不匹配即使有参数也会拒绝。报告分别保留训练与当前像素契约，不能修改旧模型元数据冒充新来源训练。
+
+游戏可配合时，在已核验局部起点停稳，然后分别运行：
+
+```powershell
+uv run --locked fh5 realtime-shadow --config configs/realtime-shadow.example.json --output runs/shadow-10hz --hz 10 --seconds 30 --allow-legacy-source-diagnostic --live
+uv run --locked fh5 realtime-shadow --config configs/realtime-shadow.example.json --output runs/shadow-20hz --hz 20 --seconds 30 --allow-legacy-source-diagnostic --live
+```
+
+`--live` 仅启动只读采集与预测，不连接虚拟手柄、不发送任何游戏输入；F8/失焦及原有 15 km/h 等停止条件保持。总运行时间从模型预热后计算，等待合格起点与图像历史也计入。没有接受决策或资源未释放时命令返回非零，不把空跑算通过。示例的实际起点在拱门后的局部区域，并非蓝图起跑网格。资源采样另在线程运行，报告的 GPU 显存是全设备数据，不能归因于截图。
 
 模型加载和一次预热在常驻推理线程完成，随后才启动决策调度。最多一个任务在途；忙时跳 tick。原生推理不能强行取消，挂起时停止会话并报告未释放线程，不再建线程替代。
 
@@ -30,4 +53,4 @@
 
 `uv run --locked pytest tests/test_realtime.py` 覆盖 5%/10% 源帧丢失、100 ms 缺图恢复、300 ms 断图锁止、重复旧帧、源槽复用、采集边界、迟到/挂起推理、部分发送失败，以及真实线程下 400 ms 推理暂停、1 秒写盘暂停。
 
-尚待完成：DXGI/UDP/任务几何影子组合、冻结 Δt 模型接入与来源绑定、真实负载 10/20 Hz 的阶段/资源尾延迟、独立数值重放与页面交互验收。需要游戏运行的证据待用户方便时收集，不阻塞这些软件接入工作。
+尚待完成：新实时记录的独立精确数值重放、真实负载 10/20 Hz 的阶段/资源尾延迟与页面交互验收。影子适配器已通过合成原始像素和回环 UDP 组合测试，不能据此声明 Windows DXGI 的实际游戏性能已达标。需要游戏运行的证据待用户方便时收集，不阻塞独立软件工作。

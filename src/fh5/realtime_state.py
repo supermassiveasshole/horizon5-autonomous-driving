@@ -57,7 +57,7 @@ class DecisionState:
             self.clock_advanced_ns = safety.received_ns
         if old and (self.last_accepted_ns is not None or self.pending is not None):
             if old.epoch != safety.epoch:
-                self.safety_fault = "session_boundary"
+                self.safety_fault = self.safety_fault or safety.fault or "session_boundary"
             elif safety.received_ns < old.received_ns:
                 self.safety_fault = "telemetry_clock_discontinuity"
             elif safety.game_timestamp_ms < old.game_timestamp_ms:

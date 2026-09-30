@@ -45,6 +45,17 @@ def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Record and replay FH5 Data Out experiments")
     commands = parser.add_subparsers(dest="mode", required=True)
+    shadow = commands.add_parser(
+        "realtime-shadow", help="Validate numerical shadow; --live is read-only"
+    )
+    shadow.add_argument("--config", type=Path, required=True)
+    shadow.add_argument("--output", type=Path, required=True)
+    shadow.add_argument("--seconds", type=float, default=30)
+    shadow.add_argument("--hz", type=int, choices=(10, 20))
+    shadow.add_argument("--allow-legacy-source-diagnostic", action="store_true")
+    shadow.add_argument(
+        "--live", action="store_true", help="Read FH5 and predict; never send game input"
+    )
     trace = commands.add_parser("capture-frame-times", help="Attach independent PresentMon QPC CSV")
     trace.add_argument("recording", type=Path)
     trace.add_argument("--csv", type=Path, required=True)
@@ -252,6 +263,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     perception_replay.add_argument("--labels", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.mode == "realtime-shadow":
+            from fh5.realtime_cli import shadow_command
+
+            return shadow_command(args)
         if args.mode == "capture-frame-times":
             from fh5.capture_trace import CaptureTraceReview
 

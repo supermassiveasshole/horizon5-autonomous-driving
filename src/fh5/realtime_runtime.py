@@ -58,8 +58,15 @@ def run_realtime(
                     journal.submit("packet", packet)
                 with lock:
                     state.update(value.safety)
+                    if value.safety.fault:
+                        state.stop(
+                            time.perf_counter_ns(),
+                            "user_stop" if value.safety.stop_requested else value.safety.fault,
+                        )
                     latest = value.observation
-                    if latest:
+                    if value.capture_epoch is not None:
+                        state.capture_epoch = value.capture_epoch
+                    elif latest:
                         state.capture_epoch = latest.epoch
         except Exception as error:
             with lock:

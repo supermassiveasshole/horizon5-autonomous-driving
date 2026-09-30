@@ -85,6 +85,8 @@ class SafetyState:
     speed_kmh: float
     task_fault: str | None
     fault: str | None = None
+    task_location: dict[str, Any] | None = None
+    telemetry_packet_index: int | None = None
 
 
 @dataclass(frozen=True)
@@ -101,6 +103,7 @@ class TimelineInput:
     safety: SafetyState
     observation: RealtimeObservation | None
     raw_packets: tuple[Packet, ...] = ()
+    capture_epoch: str | None = None
 
 
 @dataclass(frozen=True)
@@ -163,7 +166,8 @@ class RealtimeRun:
 class RealtimeEnvironment(Protocol):
     """External I/O seam. Shadow send is a no-op; actual game control belongs to #9."""
 
-    source_kind: Literal["synthetic", "shadow"]
+    @property
+    def source_kind(self) -> Literal["synthetic", "shadow"]: ...
 
     def read(self, period_s: float) -> TimelineInput: ...
     def signals(self) -> tuple[bool, bool]: ...

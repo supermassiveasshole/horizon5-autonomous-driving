@@ -120,4 +120,4 @@ uv run --locked ruff format --check .
 
 #34 已有 [DXGI 数值采集基础入口](docs/dxgi-capture.md)，`fh5 capture-dxgi` 默认只校验配置。独立采集/预处理、最新待处理槽和带 QPC 时间的历史支持软件验证；原生动态采集、性能对照与页面交互仍待验收，不构成实时驾驶通过。
 
-#36 已有[容错数值决策软件切片](docs/realtime-decisions.md)：常驻推理、缺帧跳过、绝对动作租期和独立监督通过故障回放及真实线程测试。入口为 `run_experiment(RealtimeReplay(...))` / `RealtimeRun(...)`，目前仅模拟执行器，真实 DXGI 影子组合仍在接入；不会连接虚拟手柄。
+#36 已有[容错数值决策软件切片](docs/realtime-decisions.md)：常驻推理、缺帧跳过、绝对动作租期和独立监督通过故障回放及真实线程测试。`fh5 realtime-shadow` 默认只校验，显式 `--live` 才组合 DXGI、UDP、独立任务几何和冻结 Δt 模型做只读预测；不会连接虚拟手柄。组合通过合成像素与回环 UDP 验证，实际 FH5 的 10/20 Hz 性能和页面交互仍待验收。
