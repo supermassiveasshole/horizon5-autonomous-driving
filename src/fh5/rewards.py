@@ -13,6 +13,8 @@ from fh5.report import write_report
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
 
+DRIVING_FAILURES = frozenset({"driving_failure", "wall_riding", "reset_boost", "grass_shortcut"})
+
 
 @dataclass(frozen=True)
 class RewardReplay:
@@ -23,8 +25,7 @@ class RewardReplay:
     evidence_file: Path | None = None
 
 
-def _config(path: Path, horizon: Any) -> tuple[dict[str, Any], dict[str, float]]:
-    config = json.loads(path.read_text(encoding="utf-8-sig"))
+def _config(config: Any, horizon: Any) -> tuple[dict[str, Any], dict[str, float]]:
     names = {
         "progress_budget",
         "time_budget",
@@ -86,7 +87,7 @@ def _failure(
             if e["packet_index"] == sample["packet_index"]
             and e["source"] == "independent_review"
             and e["status"] == "confirmed"
-            and e["kind"] in {"driving_failure", "wall_riding", "reset_boost", "grass_shortcut"}
+            and e["kind"] in DRIVING_FAILURES
         ),
         None,
     )
@@ -133,7 +134,7 @@ def _settle(
         and e["source"] == "independent_review"
         and e["status"] == "confirmed"
         and e["packet_index"] <= fragment["packet_range"][0]
-        for e in attempt["events"]
+        for e in events
     ):
         quarantine.append("task_phase_changed")
         local = []
@@ -187,6 +188,8 @@ def _settle(
     last_progress_s = 0.0
     last_progress_m = start
     interruption = None
+    unsettled_failure_index = None
+    terminal_timing = None
     coalesced = []
     pending_tick = False
     previous = local[0] if local else {}
@@ -224,6 +227,8 @@ def _settle(
             pending_tick = current["position_m"] != previous["position_m"]
             if failure:
                 quarantine.append("failure_without_physics_interval")
+                unsettled_failure_index = current["packet_index"]
+                terminal_timing = "same_game_tick_without_transition"
                 break
             continue
         pending_tick = False
@@ -283,22 +288,36 @@ def _settle(
     if pending_tick:
         quarantine.append("unsettled_same_tick_tail")
     success = bool(steps and steps[-1]["terminal_reward"] > 0)
-    if not success and not failure and local and not quarantine:
-        stop = any(
-            e["kind"] == "stop"
-            and e["source"] == "independent_review"
-            and e["status"] == "confirmed"
-            and e["packet_index"] == fragment["packet_range"][1] + 1
-            for e in attempt["events"]
+    terminal_adjustment = None
+    if not success and not failure and local:
+        boundary_failure = next(
+            (
+                e
+                for e in events
+                if e["kind"] in DRIVING_FAILURES | {"stop"}
+                and e["source"] == "independent_review"
+                and e["status"] == "confirmed"
+                and e["packet_index"] == fragment["packet_range"][1] + 1
+            ),
+            None,
         )
-        if stop:
-            failure = "reviewed_abandonment"
-            total -= math.exp(-decay * elapsed) * config["failure_cost"]
-            if steps:
-                steps[-1]["terminal_reward"] -= config["failure_cost"]
-                steps[-1]["reward"] -= steps[-1]["discount"] * config["failure_cost"]
-            else:
-                initial_reward -= config["failure_cost"]
+        if boundary_failure:
+            failure = (
+                "reviewed_abandonment"
+                if boundary_failure["kind"] == "stop"
+                else boundary_failure["kind"]
+            )
+            unsettled_failure_index = boundary_failure["packet_index"]
+            terminal_timing = "last_valid_state_before_excluded_boundary"
+    if unsettled_failure_index is not None:
+        total -= math.exp(-decay * elapsed) * config["failure_cost"]
+        terminal_adjustment = {
+            "event_packet_index": unsettled_failure_index,
+            "reason": failure,
+            "reward": -config["failure_cost"],
+            "credited_at_physics_s": elapsed,
+            "timing": terminal_timing,
+        }
     final = {"packet_index": last["packet_index"]} if last else None
     terminated = bool(success or failure)
     boundary = next(
@@ -331,6 +350,7 @@ def _settle(
         "physical_duration_s": elapsed,
         "coalesced_same_tick_packets": coalesced,
         "initial_reward": initial_reward,
+        "terminal_adjustment": terminal_adjustment,
         "discounted_return": total,
         "steps": steps,
         "final_observation": final,
@@ -342,7 +362,13 @@ def settle_rewards(request: RewardReplay) -> "RunResult":
     from fh5.experiment import RunResult, run_experiment
 
     task = json.loads(request.task_file.read_text(encoding="utf-8-sig"))
-    config, calibration = _config(request.reward_file, task.get("max_duration_s"))
+    if not isinstance(task, dict):
+        raise ValueError("Reward requires a local task object")
+    reward_bytes = request.reward_file.read_bytes()
+    config, calibration = _config(
+        json.loads(reward_bytes.decode("utf-8-sig")), task.get("max_duration_s")
+    )
+    request.output_dir.mkdir(parents=True, exist_ok=False)
     base = run_experiment(
         AttemptReplay(
             request.recording_dir,
@@ -355,7 +381,7 @@ def settle_rewards(request: RewardReplay) -> "RunResult":
     rewards = {
         "version": 1,
         "rules_version": "local-physical-reward-v1",
-        "reward_sha256": hashlib.sha256(request.reward_file.read_bytes()).hexdigest(),
+        "reward_sha256": hashlib.sha256(reward_bytes).hexdigest(),
         "config": config,
         "calibration": calibration,
         "source_hashes": review["source_hashes"],
@@ -378,7 +404,7 @@ def settle_rewards(request: RewardReplay) -> "RunResult":
             for fragment in attempt["forward_segments"]
         ],
     }
-    (request.output_dir / "reward-config.json").write_bytes(request.reward_file.read_bytes())
+    (request.output_dir / "reward-config.json").write_bytes(reward_bytes)
     (request.output_dir / "rewards.json").write_text(
         json.dumps(rewards, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8"
     )

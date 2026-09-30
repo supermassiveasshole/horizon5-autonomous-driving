@@ -376,6 +376,26 @@ def test_navigation_distance_or_line_changes_do_not_create_progress_or_arrival(t
         assert segments[0]["discounted_return"] == pytest.approx(0.32)
 
 
+def test_reward_replay_preserves_existing_output_artifacts(tmp_path):
+    bundle = route(tmp_path)
+    source = record(tmp_path, "drive", [(0, 0.2), (1, 0.2)])
+    output = tmp_path / "rewarded"
+    output.mkdir()
+    sentinel = output / "rewards.json"
+    sentinel.write_text("existing reward evidence")
+    with pytest.raises(FileExistsError):
+        run_experiment(
+            RewardReplay(
+                source,
+                output,
+                protocol(tmp_path, bundle),
+                reward_config(tmp_path),
+                evidence(tmp_path, source),
+            )
+        )
+    assert sentinel.read_text() == "existing reward evidence"
+
+
 @pytest.mark.parametrize(
     "change",
     [
@@ -516,3 +536,90 @@ def test_unknown_clock_reset_cannot_create_a_new_reward_eligible_attempt(
     else:
         assert all(not s["reward_usable"] for s in segments)
         assert all(s["bootstrap_observation"] is None for s in segments)
+
+
+@pytest.mark.parametrize("recovery", ["rewind", "pause"])
+def test_failure_on_excluded_recovery_entry_still_has_terminal_feedback(tmp_path, recovery):
+    bundle = route(tmp_path)
+    source = record(
+        tmp_path, "drive", [(0, 0.2), (1, 0.2), (0, 0.2), (0, 0.2), (1, 0.2), (2, 0.2), (3, 0.2)]
+    )
+    events = [
+        {"packet_index": 2, "kind": "driving_failure", "status": "confirmed"},
+        {"packet_index": 2, "kind": recovery, "status": "confirmed", "resume_packet_index": 3},
+    ]
+    result = run_experiment(
+        RewardReplay(
+            source,
+            tmp_path / "rewarded",
+            protocol(tmp_path, bundle),
+            reward_config(tmp_path),
+            evidence(tmp_path, source, events),
+        )
+    )
+    segment = result.summary["rewards"]["segments"][0]
+    assert segment["outcome"] == "failure" and segment["terminated"] is True
+    assert segment["bootstrap_observation"] is None
+    assert segment["discounted_return"] == pytest.approx(-2.67)
+    assert segment["terminal_adjustment"]["reward"] == -3
+    assert segment["terminal_adjustment"]["event_packet_index"] == 2
+    assert segment["final_observation"]["packet_index"] == 1
+    assert all(step["to_packet_index"] < 2 for step in segment["steps"])
+
+
+def test_same_tick_failure_keeps_negative_feedback_without_inventing_a_transition(tmp_path):
+    bundle = route(tmp_path)
+    source = record(tmp_path, "drive", [(0, 0.2), (1, 0.2), (1.02, 0.2)])
+    path = source / "packets.jsonl"
+    rows = [json.loads(line) for line in path.read_text().splitlines()]
+    raw = bytearray.fromhex(rows[2]["payload_hex"])
+    struct.pack_into("<I", raw, 4, 1100)
+    rows[2]["payload_hex"] = raw.hex()
+    path.write_text("\n".join(json.dumps(row) for row in rows) + "\n")
+    result = run_experiment(
+        RewardReplay(
+            source,
+            tmp_path / "rewarded",
+            protocol(tmp_path, bundle),
+            reward_config(tmp_path),
+            evidence(
+                tmp_path,
+                source,
+                [{"packet_index": 2, "kind": "driving_failure", "status": "confirmed"}],
+            ),
+        )
+    )
+    segment = result.summary["rewards"]["segments"][0]
+    assert segment["terminated"] is True
+    assert segment["discounted_return"] == pytest.approx(-2.67)
+    assert segment["terminal_adjustment"]["reward"] == -3
+    assert segment["terminal_adjustment"]["event_packet_index"] == 2
+    assert segment["physical_duration_s"] == 0.1
+    assert segment["reward_usable"] is False
+    assert segment["bootstrap_observation"] is None
+    assert len(segment["steps"]) == 1
+
+
+def test_restart_does_not_reauthorize_old_task_after_destination_change(tmp_path):
+    bundle = route(tmp_path)
+    source = record(
+        tmp_path, "drive", [(0, 0.2), (1, 0.2), (0, 0.2), (0, 0.2), (1, 0.2), (2, 0.2), (3, 0.2)]
+    )
+    events = [
+        {"packet_index": 2, "kind": "destination_changed", "status": "confirmed"},
+        {"packet_index": 3, "kind": "restart", "status": "confirmed"},
+    ]
+    result = run_experiment(
+        RewardReplay(
+            source,
+            tmp_path / "rewarded",
+            protocol(tmp_path, bundle),
+            reward_config(tmp_path),
+            evidence(tmp_path, source, events),
+        )
+    )
+    segments = result.summary["rewards"]["segments"]
+    assert segments[0]["truncation_reason"] == "destination_changed"
+    assert all(not s["reward_usable"] for s in segments[1:])
+    assert all("task_phase_changed" in s["quarantine_reasons"] for s in segments[1:])
+    assert all(s["outcome"] != "success" for s in segments)
