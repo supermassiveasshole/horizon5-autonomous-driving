@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any
 
 from fh5.bc_learning import _numeric
 from fh5.numeric_images import (
+    ActorMetadata,
     NumericActor,
     NumericDecision,
     NumericFrame,
@@ -170,7 +171,7 @@ def _prediction(actor: NumericActor, decision: NumericDecision) -> list[float]:
 
 
 def numeric_features(
-    actor: NumericActor, inputs: dict[str, Any], frames: tuple[NumericFrame, ...]
+    actor: ActorMetadata, inputs: dict[str, Any], frames: tuple[NumericFrame, ...]
 ) -> list[float]:
     provider = getattr(actor, "input_features", None)
     if provider is None:

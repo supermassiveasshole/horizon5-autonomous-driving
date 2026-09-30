@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fh5.numeric_images import (
-    NumericActor,
+    DecisionActor,
     NumericDecision,
     PixelContract,
     asset,
@@ -153,7 +153,7 @@ def _valid_prediction(value: Any) -> bool:
 
 
 def _decision(
-    root: Path, row: dict[str, Any], contract: PixelContract, actor: NumericActor, tolerance: float
+    root: Path, row: dict[str, Any], contract: PixelContract, actor: DecisionActor, tolerance: float
 ) -> dict[str, Any]:
     reference = row["archive"]
     if not reference or row["archive_reason"] is not None:
@@ -213,7 +213,7 @@ def _decision(
     }
 
 
-def replay_realtime_numeric(request: RealtimeNumericReplay, actor: NumericActor) -> RunResult:
+def replay_realtime_numeric(request: RealtimeNumericReplay, actor: DecisionActor) -> RunResult:
     from fh5.experiment import RunResult
 
     path = request.report_path

@@ -36,9 +36,6 @@ class SACEvaluationActor:
     ) -> list[float]:
         return self.frozen.bc.input_features(actor, frames)
 
-    def predict(self, actor: dict[str, Any], frames: tuple[NumericFrame, ...]) -> list[float]:
-        raise ValueError("SAC evaluation requires an explicit decision and command context")
-
     def predict_decision(
         self, decision: NumericDecision, command_context: dict[str, Any]
     ) -> list[float]:

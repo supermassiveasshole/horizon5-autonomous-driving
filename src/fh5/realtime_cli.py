@@ -9,7 +9,7 @@ from dataclasses import asdict
 from typing import Any
 
 from fh5.capture_config import parse_capture_config
-from fh5.numeric_images import NumericActor, PixelContract
+from fh5.numeric_images import DecisionActor, PixelContract
 from fh5.realtime import RealtimeConfig, RealtimeNumericReplay, RealtimeRun
 from fh5.realtime_model import ShadowNumericActor, shadow_model_contract
 from fh5.realtime_numeric_replay import read_realtime_recording
@@ -22,7 +22,7 @@ def replay_command(args: argparse.Namespace) -> int:
     from fh5.sac_evaluation_actor import SACEvaluationActor
 
     recording = read_realtime_recording(args.recording)
-    actor: NumericActor
+    actor: DecisionActor
     pixels = PixelContract.from_metadata(recording["configuration"]["pixels"])
     if recording["actor_kind"] == SACEvaluationActor.kind:
         if args.device != "cpu" or args.allow_legacy_source_diagnostic:

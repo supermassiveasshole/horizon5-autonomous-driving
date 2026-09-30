@@ -54,7 +54,8 @@ from fh5.events import EventEnvironment, EventRun, read_event, run_event
 from fh5.evidence_usage import RecordUsage, record_usage
 from fh5.learning_schedule import LearningResources, ScheduledBCTrain, run_scheduled_bc
 from fh5.numeric_images import (
-    NumericActor,
+    ContextualNumericActor,
+    DecisionActor,
     NumericDecision,
     NumericInfer,
     NumericReplay,
@@ -303,12 +304,12 @@ def run_experiment(
     policy_environment: PolicyEnvironment | None = None,
     policy_actor: PolicyActor | None = None,
     numeric_inputs: Iterable[NumericDecision] | None = None,
-    numeric_actor: NumericActor | None = None,
+    numeric_actor: DecisionActor | None = None,
     capture_source_factory: Callable[[], CaptureSource] | None = None,
     capture_activity: Callable[[], dict[str, Any] | None] | None = None,
     capture_resources: Callable[[], dict[str, Any]] | None = None,
     realtime_environment: RealtimeEnvironment | None = None,
-    numeric_actor_factory: Callable[[], NumericActor] | None = None,
+    numeric_actor_factory: Callable[[], DecisionActor] | None = None,
     realtime_journal_sink: Callable[[bytes], None] | None = None,
     collection_environment: CollectionEnvironment | None = None,
     learning_resources: LearningResources | None = None,
@@ -380,6 +381,8 @@ def run_experiment(
     if isinstance(request, (NumericInfer, NumericReplay)):
         if numeric_actor is None:
             raise ValueError("Numerical inference requires an explicit frozen actor")
+        if isinstance(numeric_actor, ContextualNumericActor):
+            raise ValueError("Contextual actors require the real-time decision interface")
         return run_numeric(request, numeric_actor, numeric_inputs)
     if isinstance(request, PolicyDrive):
         if policy_environment is None:

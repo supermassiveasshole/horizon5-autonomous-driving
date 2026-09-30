@@ -9,7 +9,7 @@ from typing import Any
 
 from fh5.collection_store import read_bounded
 from fh5.numeric_actor import FrozenNumericActor
-from fh5.numeric_images import NumericActor, PixelContract
+from fh5.numeric_images import DecisionActor, PixelContract
 from fh5.sac_actor import FrozenSAC
 
 
@@ -57,7 +57,7 @@ def validate_model(
 
 def evaluation_actor(
     directory: Path, binding: dict[str, Any], runtime: dict[str, Any]
-) -> NumericActor:
+) -> DecisionActor:
     pixels = PixelContract.from_metadata(runtime["pixels"])
     if binding.get("kind") == "sac":
         from fh5.sac_evaluation_actor import SACEvaluationActor

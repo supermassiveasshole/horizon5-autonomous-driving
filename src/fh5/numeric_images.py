@@ -148,22 +148,27 @@ class NumericDecision:
         )
 
 
-class NumericActor(Protocol):
+class ActorMetadata(Protocol):
     kind: str
     manifest: dict[str, Any]
 
+
+class NumericActor(ActorMetadata, Protocol):
     def predict(self, actor: dict[str, Any], frames: tuple[NumericFrame, ...]) -> list[float]: ...
 
 
 @runtime_checkable
-class ContextualNumericActor(Protocol):
+class ContextualNumericActor(ActorMetadata, Protocol):
     def predict_decision(
         self, decision: NumericDecision, command_context: dict[str, Any]
     ) -> list[float]: ...
 
 
+type DecisionActor = NumericActor | ContextualNumericActor
+
+
 def decision_prediction(
-    actor: NumericActor, decision: NumericDecision, command_context: dict[str, Any] | None = None
+    actor: DecisionActor, decision: NumericDecision, command_context: dict[str, Any] | None = None
 ) -> list[float]:
     if isinstance(actor, ContextualNumericActor):
         if command_context is None:

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import Any
 
-from fh5.numeric_images import NumericActor, NumericDecision, NumericFrame, decision_prediction
+from fh5.numeric_images import DecisionActor, NumericDecision, NumericFrame, decision_prediction
 from fh5.numeric_recording import numeric_features
 from fh5.realtime import RealtimeConfig, RealtimeObservation, SafetyState
 from fh5.realtime_state import DecisionState, Work
@@ -27,7 +27,7 @@ class WorkerResult:
 
 
 class InferenceWorker:
-    def __init__(self, factory: Callable[[], NumericActor], config: RealtimeConfig) -> None:
+    def __init__(self, factory: Callable[[], DecisionActor], config: RealtimeConfig) -> None:
         self.factory, self.config = factory, config
         self.requests: Queue[Work] = Queue(1)
         self.results: Queue[WorkerResult] = Queue(1)
@@ -41,7 +41,7 @@ class InferenceWorker:
         )
         self.worker.start()
 
-    def _warmup(self, actor: NumericActor) -> None:
+    def _warmup(self, actor: DecisionActor) -> None:
         cfg = self.config
         now = (max(cfg.pixels.history_offsets_ms) + 10) * 1_000_000
         frames = tuple(

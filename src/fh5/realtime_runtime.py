@@ -9,7 +9,7 @@ from dataclasses import replace
 from queue import Empty
 from typing import TYPE_CHECKING, Any
 
-from fh5.numeric_images import NumericActor
+from fh5.numeric_images import DecisionActor
 from fh5.numeric_recording import NumericArchive
 from fh5.realtime import RealtimeEnvironment, RealtimeObservation, RealtimeRun
 from fh5.realtime_journal import RealtimeJournal
@@ -24,7 +24,7 @@ if TYPE_CHECKING:
 def run_realtime(
     request: RealtimeRun,
     environment: RealtimeEnvironment,
-    factory: Callable[[], NumericActor],
+    factory: Callable[[], DecisionActor],
     journal_sink: Callable[[bytes], None] | None = None,
 ) -> RunResult:
     if environment.source_kind not in ("synthetic", "shadow"):

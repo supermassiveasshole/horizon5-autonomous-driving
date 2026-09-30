@@ -13,7 +13,7 @@ from fh5.collection_store import read_bounded
 from fh5.evaluation_metrics import execution_metrics
 from fh5.evaluation_model import evaluation_actor
 from fh5.learning_runtime import preserve_torch_state
-from fh5.numeric_images import NumericActor, PixelContract
+from fh5.numeric_images import DecisionActor, PixelContract
 from fh5.realtime import RealtimeNumericReplay
 from fh5.realtime_numeric_replay import read_realtime_journal, read_realtime_recording
 
@@ -231,7 +231,7 @@ def review_execution(
         result["linked_packets"] = _bind_telemetry(root, report, source_dir, recording)
         contract = PixelContract.from_metadata(batch["config"]["runtime"]["pixels"])
         with preserve_torch_state(importlib.import_module("torch")):
-            actor: NumericActor
+            actor: DecisionActor
             if report["actor_kind"] == ShadowNumericActor.kind:
                 model = json.loads(read_bounded(batch_dir / "model/model.json", 128 * 1024**2))
                 actor = ShadowNumericActor(batch_dir / "model", contract, model["weights_sha256"])
