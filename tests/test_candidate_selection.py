@@ -328,6 +328,43 @@ def test_incomplete_recording_inventory_keeps_interface_failure_and_comparison_r
     assert (tmp_path / "decision/selection.json").is_file()
 
 
+@pytest.mark.parametrize("check", ["predates_protocol", "quarantined_execution"])
+def test_batch_quarantine_on_a_failed_attempt_blocks_candidate_recommendations(
+    tmp_path, policies, check
+):
+    from fh5.candidate_selection import CandidateCompare
+
+    config = comparison(
+        tmp_path, policies, incumbent=("valid", "valid"), candidate=("valid", "failed")
+    )
+    path = tmp_path / "candidate/ledger.json"
+    ledger = json.loads(path.read_bytes())
+    if check == "predates_protocol":
+        session = tmp_path / "candidate/source-1/drive/session.json"
+        metadata = json.loads(session.read_bytes())
+        metadata.update(
+            created_utc="2000-01-01T00:00:00+00:00", ended_utc="2000-01-01T00:01:00+00:00"
+        )
+        session.write_text(json.dumps(metadata))
+        ledger["entries"][1]["files"]["session.json"] = sha(session)
+    else:
+        ledger["entries"][1]["execution"] = {
+            "directory": "missing-execution",
+            "manifest_sha256": "0" * 64,
+        }
+    path.write_text(json.dumps(ledger))
+    binding = json.loads(config.read_bytes())
+    binding["candidate"]["ledger_sha256"] = sha(path)
+    config.write_text(json.dumps(binding))
+    result = run_experiment(CandidateCompare(config, tmp_path / "decision")).summary[
+        "candidate_selection"
+    ]
+    assert result["reviews"]["candidate"]["metrics"]["outcomes"]["driving_failed"] == 1
+    assert result["local_recommendation"] == "retain_incumbent"
+    assert result["aggressive_by_reference"] == {}
+    assert "candidate:unresolved_validity" in result["reasons"]
+
+
 @pytest.mark.parametrize(
     "outcome,reason",
     [("unknown", "candidate:pending_review_attempts"), ("unstarted", "candidate:incomplete_plan")],

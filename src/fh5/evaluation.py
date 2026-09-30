@@ -441,14 +441,17 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
             ]
             outcome = attempt["outcome"]
             reasons = list(attempt["reasons"])
+            pending = list(attempt["pending_checks"])
             if execution["status"] == "quarantined":
                 gaps.append("execution_quarantined")
                 reasons.append("execution_quarantined")
+                pending.append("execution_quarantined")
                 if outcome == "valid_complete":
                     outcome = "pending_review"
             if order != "metadata_after_protocol":
                 gaps.append("protocol_order:" + order)
                 reasons.append("protocol_order:" + order)
+                pending.append("protocol_order:" + order)
                 if outcome == "valid_complete":
                     outcome = "pending_review"
             if result.metadata["snapshot"] != batch["config"]["conditions"]["snapshot"]:
@@ -470,6 +473,7 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
                     or execution["status"] != "missing",
                     "outcome": outcome,
                     "reasons": reasons,
+                    "pending_checks": pending,
                     "record_eligible": attempt["record_eligible"] and outcome == "valid_complete",
                     "slot_id": entry["slot_id"],
                     "reference_mode": plan[entry["slot_id"]]["reference_mode"],
