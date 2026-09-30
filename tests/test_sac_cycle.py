@@ -394,3 +394,116 @@ def test_failed_resource_release_does_not_report_a_successful_cycle(tmp_path):
     ).summary["sac_cycle"]
     assert result["stop_reason"] == "release_fault"
     assert result["resources_released"] is False
+
+
+def test_reformatting_independent_evidence_cannot_credit_the_same_recording_again(tmp_path):
+    from fh5.sac_replay import SACReplayPrepare
+
+    checkpoint = initial(tmp_path)
+    review = tmp_path / "evidence.json"
+    review.write_text(json.dumps(json.loads(review.read_bytes()), indent=2))
+    prepared_dir = tmp_path / "reprepared"
+    prepared = run_experiment(
+        SACReplayPrepare(
+            tmp_path / "recording",
+            tmp_path / "trace.json",
+            tmp_path / "task.json",
+            tmp_path / "reward.json",
+            prepared_dir,
+            review,
+        )
+    ).summary["sac_replay"]
+    assert prepared["eligible_transitions"] == 2
+    with pytest.raises(ValueError, match="Duplicate"):
+        run_experiment(
+            SACResume(
+                checkpoint,
+                tmp_path / "double-credit",
+                steps=2,
+                additions=((prepared_dir / "replay.json", prepared["replay_sha256"]),),
+            )
+        )
+    assert not (tmp_path / "double-credit").exists()
+
+
+def test_frame_archive_failure_keeps_sent_commands_and_raw_telemetry(tmp_path):
+    checkpoint = initial(tmp_path)
+
+    class BrokenArchive(ResponsiveEnvironment):
+        def step(self, command):
+            response = super().step(command)
+            path = self.root / "cycle/attempt-000/frames"
+            if not path.exists():
+                path.write_text("synthetic filesystem failure")
+            return response
+
+    environment = BrokenArchive(tmp_path)
+    result = run_experiment(
+        cycle_request(tmp_path, checkpoint), sac_environment=environment
+    ).summary["sac_cycle"]
+    assert result["stop_reason"] == "sampling_fault"
+    (attempt,) = result["attempts"]
+    assert len(attempt["decisions"]) == len(environment.commands) == 3
+    assert attempt["archive_error"]
+    recorded = (tmp_path / "cycle/attempt-000/recording/packets.jsonl").read_bytes().splitlines()
+    assert len(recorded) == 4
+    assert (tmp_path / "cycle/attempt-000/sampling.json").exists()
+    assert "latest_candidate" not in result
+
+
+@pytest.mark.parametrize("fault", ["epoch", "clock"])
+def test_invalid_response_is_archived_but_never_becomes_a_learning_transition(tmp_path, fault):
+    checkpoint = initial(tmp_path)
+
+    class BadResponse(ResponsiveEnvironment):
+        def step(self, command):
+            sample = super().step(command)
+            return replace(
+                sample,
+                decision=replace(
+                    sample.decision,
+                    **(
+                        {"epoch": "bad-epoch"}
+                        if fault == "epoch"
+                        else {"decision_ns": 1_000_000_000}
+                    ),
+                ),
+            )
+
+    environment = BadResponse(tmp_path)
+    result = run_experiment(
+        cycle_request(tmp_path, checkpoint), sac_environment=environment
+    ).summary["sac_cycle"]
+    assert result["stop_reason"] == "sampling_fault"
+    (attempt,) = result["attempts"]
+    assert len(attempt["decisions"]) == 1
+    assert attempt["decisions"][0]["status"] == "sent"
+    recorded = (tmp_path / "cycle/attempt-000/recording/packets.jsonl").read_bytes().splitlines()
+    assert len(recorded) == 2
+    assert json.loads(recorded[-1])["received_monotonic_ns"] == 1_100_000_000
+    assert "latest_candidate" not in result
+
+
+def test_cycle_binds_learner_parent_to_the_snapshot_used_for_sampling(tmp_path):
+    checkpoint = initial(tmp_path)
+    replacement = tmp_path / "replacement"
+    run_experiment(SACResume(checkpoint, replacement, steps=7))
+
+    class SwappedParent(ResponsiveEnvironment):
+        def finish(self, recording):
+            saved = tmp_path / "preserved-parent"
+            for path in (checkpoint, saved, replacement):
+                assert path.resolve().is_relative_to(tmp_path.resolve())
+            checkpoint.rename(saved)
+            replacement.rename(checkpoint)
+            return super().finish(recording)
+
+    result = run_experiment(
+        replace(cycle_request(tmp_path, checkpoint), cycles=1),
+        sac_environment=SwappedParent(tmp_path),
+    ).summary["sac_cycle"]
+    assert result["stop_reason"] == "interface_error"
+    assert "expected parent" in result["error"]
+    assert len(result["attempts"]) == 1
+    assert "latest_candidate" not in result
+    assert not (tmp_path / "cycle/candidate-000").exists()

@@ -59,7 +59,8 @@ def expand_experience(
             else {f"sources/{sha}.json": data.raw}
         )
         for entry in entries:
-            identity = hashlib.sha256(encode(entry["source_hashes"])).hexdigest()
+            # Re-reviewing or reformatting metadata does not create another interaction.
+            identity = entry["source_hashes"]["packets"]
             if entry["replay_sha256"] in hashes or identity in source_ids:
                 raise ValueError("Duplicate SAC experience cannot earn new update credit")
             hashes.add(entry["replay_sha256"])

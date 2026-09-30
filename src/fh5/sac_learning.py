@@ -23,6 +23,7 @@ from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import PixelContract
 from fh5.sac import _q_heads, _values
 from fh5.sac_actions import ActionBounds
+from fh5.sac_actor import FrozenSAC
 from fh5.sac_checkpoint import (
     continuation_history,
     read_checkpoint,
@@ -71,6 +72,7 @@ class SACResume:
     output_dir: Path
     steps: int = 100
     additions: tuple[tuple[Path, str], ...] = ()
+    expected_checkpoint_sha256: str | None = None
 
 
 def _difference(torch: Any, before: dict[str, Any], module: Any) -> float:
@@ -132,6 +134,11 @@ def _train(
     history_blobs: dict[str, bytes] = {}
     if isinstance(operation, SACResume):
         manifest, restored, parent_bytes = read_checkpoint(torch, operation.checkpoint_dir)
+        if (
+            operation.expected_checkpoint_sha256 is not None
+            and hashlib.sha256(parent_bytes).hexdigest() != operation.expected_checkpoint_sha256
+        ):
+            raise ValueError("SAC continuation differs from its expected parent checkpoint")
         if manifest["version"] != 2:
             raise ValueError("SAC continuation requires a sealed version 2 checkpoint")
         history, history_blobs = continuation_history(
@@ -502,38 +509,16 @@ def run_sac_policy_replay(request: SACPolicyReplay) -> RunResult:
     torch = importlib.import_module("torch")
     with preserve_torch_state(torch):
         torch.set_num_threads(2)
-        manifest, saved, _ = read_checkpoint(torch, request.checkpoint_dir)
-        model_dir = request.checkpoint_dir / "bc"
-        bc_manifest = json.loads(read_bounded(model_dir / "model.json", 1024**2))
-        pixels = PixelContract.from_metadata(bc_manifest["numeric_contract"])
-        bc = FrozenNumericActor(
-            model_dir, pixels, expected_manifest_sha256=manifest["bc_manifest_sha256"]
-        )
+        frozen = FrozenSAC(torch, request.checkpoint_dir, allow_legacy=True)
+        manifest = frozen.manifest
         data = LearningReplay(
-            torch,
-            request.replay_file,
-            manifest["replay_sha256"],
-            bc,
-            ActionBounds(**manifest["bounds"]),
+            torch, request.replay_file, manifest["replay_sha256"], frozen.bc, frozen.bounds
         )
-        encoder = torch.nn.ModuleDict(
-            {"images": deepcopy(bc.model.encoder), "state": deepcopy(bc.model.state)}
-        )
-        policy = make_policy(
-            torch,
-            bc.model.fusion,
-            64 * (bc.original_contract["image_count"] + 1),
-            manifest["configuration"]["initial_log_std"],
-        )
-        encoder.load_state_dict(saved["encoder"], strict=True)
-        policy.load_state_dict(saved["policy"], strict=True)
-        if any(not torch.isfinite(p).all() for m in (encoder, policy) for p in m.parameters()):
-            raise ValueError("Non-finite SAC checkpoint")
         summary = {
             "predictions": policy_predictions(
                 torch,
-                encoder,
-                policy,
+                frozen.encoder,
+                frozen.policy,
                 data,
                 manifest["configuration"]["normalized_target_entropy"],
                 request.noise,

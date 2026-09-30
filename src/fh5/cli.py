@@ -44,6 +44,7 @@ def _sac(args: argparse.Namespace) -> int:
                 args.output,
                 steps=args.steps,
                 additions=tuple((Path(path), sha) for path, sha in args.add_replay),
+                expected_checkpoint_sha256=args.checkpoint_sha256,
             )
         )
         print(json.dumps(resumed.summary["sac_learning"], ensure_ascii=False))
@@ -146,6 +147,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     sac_resume.add_argument("--checkpoint", type=Path, required=True)
     sac_resume.add_argument("--output", type=Path, required=True)
     sac_resume.add_argument("--steps", type=int, default=100)
+    sac_resume.add_argument("--checkpoint-sha256", help="Require this exact parent manifest digest")
     sac_resume.add_argument(
         "--add-replay",
         nargs=2,

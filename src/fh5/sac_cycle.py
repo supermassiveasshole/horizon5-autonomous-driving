@@ -12,10 +12,10 @@ from typing import TYPE_CHECKING, Any
 
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.learning_runtime import preserve_torch_state
+from fh5.sac_actor import FrozenSAC
 from fh5.sac_learning import SACResume
 from fh5.sac_replay import SACReplayPrepare
 from fh5.sac_sampler import (
-    FrozenSAC,
     SACEnvironment,
     SACSample,
     SACStart,
@@ -72,6 +72,7 @@ def run_sac_cycle(request: SACCycle, environment: SACEnvironment) -> RunResult:
         if environment.source_kind != "synthetic":
             raise ValueError("SAC cycle currently requires synthetic external I/O")
         checkpoint = request.checkpoint_dir
+        expected_sampling_sha: str | None = None
         files = (request.recording_config_file, request.task_file, request.reward_file)
         protocol_bytes = [read_bounded(p, 1024**2) for p in files]
         if json.loads(protocol_bytes[0])["control_source"] != "policy":
@@ -106,6 +107,8 @@ def run_sac_cycle(request: SACCycle, environment: SACEnvironment) -> RunResult:
                 if any(read_bounded(p, 1024**2) != raw for p, raw in zip(files, protocol_bytes)):
                     raise ValueError("Frozen cycle protocol changed")
                 actor = FrozenSAC(torch, checkpoint)
+                if expected_sampling_sha is not None and actor.sha != expected_sampling_sha:
+                    raise ValueError("Sampling candidate changed after its verified handoff")
                 if (request.steps_per_attempt + 1) * len(
                     actor.pixels.history_offsets_ms
                 ) * actor.pixels.size[0] * actor.pixels.size[1] * 3 > 512 * 1024**2:
@@ -151,6 +154,7 @@ def run_sac_cycle(request: SACCycle, environment: SACEnvironment) -> RunResult:
                         candidate,
                         steps=count,
                         additions=((replay, prepared["replay_sha256"]),),
+                        expected_checkpoint_sha256=actor.sha,
                     ),
                     sac_stop_requested=lambda _: (root / "stop.request").exists(),
                 ).summary["sac_learning"]
@@ -175,6 +179,7 @@ def run_sac_cycle(request: SACCycle, environment: SACEnvironment) -> RunResult:
                     raise ValueError("Candidate reload differs from the complete learner snapshot")
                 result["inference_reload_max_error"] = 0
                 checkpoint = candidate
+                expected_sampling_sha = restored.sha
                 summary["latest_candidate"] = candidate.relative_to(root).as_posix()
                 write_file(attempt_dir / "cycle-result.json", encode(result))
                 if learned["stop_reason"] == "stop_requested":
