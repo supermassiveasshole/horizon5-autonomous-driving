@@ -92,7 +92,29 @@ uv run --locked fh5 evaluation-review --batch runs/evaluation-001 --ledger runs/
 
 输出包含 `run-protocol.json`、`run.json`、冻结副本、各次 `ready/` 和 `execution/`、重建的完整遥测录制、`ledger.json`、`review/` 与入口 `report.html`。当前限制为 1–10 次无参考运行，每次 0.1–600 秒；它检查调用与证据流程，不模拟真实车辆动力学，也不证明自主驾驶。准备阶段和运行上限均有界，但外部 I/O 实现仍须遵守接口的及时返回约定，不能保证强杀进程等情况下的资源释放。
 
-本接口尚未为自动起跑增加局部有效性审核依据，现有任务仍声明 `manual_placement`；因此几何完成也可能待核验，不会把菜单就绪当作有效驾驶成绩。参考辅助运行、真实控制适配器/游戏响应凭据、实机起点交接及完成页重开编排仍需后续实现或验收。用途登记见下文，训练入口的自动登记及完整来源覆盖仍需接入。#4/#9 的实机门槛保留；不阻塞这些独立软件工作。
+显式自动起跑任务现在可绑定并独立重算准备证据，见下文；旧 `manual_placement` 任务仍保留原语义。参考辅助运行、真实控制适配器/游戏响应凭据、实机起点交接及完成页重开编排仍需后续实现或验收。用途登记见下文，训练入口的自动登记及完整来源覆盖仍需接入。#4/#9 的实机门槛保留；不阻塞这些独立软件工作。
+
+## 自动局部起跑的证据
+
+任务文件可使用 `version: 2`、`control_owner: "policy"`、`start_mode: "automatic_event_ready"`，并增加以下字段；其他路线、车辆和期限字段不变。任务版本与 BC/SAC 批次版本独立。
+
+```json
+"automatic_start": {
+  "event_file": "event.json",
+  "event_sha256": "<赛事配置文件的 SHA-256>",
+  "handoff_timeout_s": 5
+}
+```
+
+交接期限必须大于零、不超过 30 秒，示例 5 秒不是实机验收值。`evaluation-prepare` 校验赛事条件与任务一致，并把菜单模板、条件依据和规范化赛事配置一并冻结至 `start/`。之后修改原配置不能改变此批次。执行入口额外要求传入赛事配置与冻结内容相同。
+
+`EvaluationRun` 为每次准备保存原始遥测、PGM 画面、采集时间、菜单动作发出/返回时间和解除输入记录。输入释放后写入 `ready/start-manifest.json`，绑定批次、槽位、该次完整驾驶包流和数值执行清单；`ledger.json` 的 `preparation` 保存目录与清单摘要。不能用上一轮就绪记录顶替下一轮。
+
+独立 `evaluation-review` 从实际像素重新匹配菜单配方，核对每步操作前两张不同的新鲜画面、最后菜单动作之后的两张驾驶画面与停车遥测，再核对首个驾驶包和首个成功策略命令的时间顺序、原车、位置、中立输入及交接期限。画面和准备遥测的年龄上限为 500 ms；这是有界菜单确认的规则，与实时 actor 图像契约分别处理。运行时首次读取已超过交接期限则禁止非零命令；审核还会隔离首个策略命令超过期限的记录。
+
+报告 `starts` 和 `verified_starts` 区分 `not_required`、`verified`、`quarantined`。通过仅移除对应首次尝试的 `automatic_start_unverified` 缺口；墙壁、捷径、接管、条件和几何证据仍各自检查。缺失、改写、错槽或超时的准备记录不能得到有效自动起跑，尝试不从分母消失。单独 `attempt-review` 没有完整批次/执行绑定，自动起跑仍待核验。
+
+自动起跑使用 `local-validity-v3`，人工置位继续使用 v2；旧结果不追认。`valid_complete` 和 `record_eligible` 仍只表示局部审核结果，`unattended`、`closed_loop_validated`、自动晋升及全程完赛能力不由此放行。当前运行适配器仅为合成来源，实际验证与局限见[自动起跑记录](validation/t09-automatic-start.md)。
 
 ## 最终批次预登记与已知数据复用
 
@@ -151,4 +173,4 @@ SAC 的动作区间依赖成功命令及其经过时间。首次就绪先发送�
 uv run --locked fh5 realtime-replay runs/evaluation/attempt-0000/execution --model runs/evaluation/frozen/model --report runs/sac-execution-replayed.html
 ```
 
-SAC 回放当前使用 CPU 和原数值来源契约，不接受旧来源诊断放行参数。此命令没有环境适配器，不重新发送动作。真实控制与响应、自动起跑有效性、参考辅助执行和完整赛程评估仍须后续实现或验收。
+SAC 回放当前使用 CPU 和原数值来源契约，不接受旧来源诊断放行参数。此命令没有环境适配器，不重新发送动作。真实控制与响应、实机自动起跑、参考辅助执行和完整赛程评估仍须后续实现或验收。

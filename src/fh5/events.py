@@ -393,6 +393,7 @@ def _run_event(request: EventRun, environment: EventEnvironment, root: dict[str,
                         path=filename,
                         sha256=hashlib.sha256(data).hexdigest(),
                         screen=screen,
+                        captured_ns=frame.received_monotonic_ns,
                     )
                     frame_index += 1
                 stable = stable + 1 if screen == previous_screen else 1
@@ -439,6 +440,7 @@ def _run_event(request: EventRun, environment: EventEnvironment, root: dict[str,
                     if step < len(steps):
                         action = steps[step]
                         if screen == action["screen"] and stable >= 2:
+                            issued_ns = environment.now_ns()
                             try:
                                 environment.pulse(action["button"])
                             except Exception as error:
@@ -450,8 +452,15 @@ def _run_event(request: EventRun, environment: EventEnvironment, root: dict[str,
                                 )
                                 raise
                             else:
-                                log("menu_action", button=action["button"], status="sent")
-                            ready_after_ns = environment.now_ns()
+                                returned_ns = environment.now_ns()
+                                log(
+                                    "menu_action",
+                                    button=action["button"],
+                                    status="sent",
+                                    issued_ns=issued_ns,
+                                    returned_ns=returned_ns,
+                                )
+                            ready_after_ns = returned_ns
                             step += 1
                             stable = 0
                         continue

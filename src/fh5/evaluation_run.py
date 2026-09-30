@@ -15,6 +15,7 @@ from fh5.collection_store import atomic_json, encode, read_bounded, write_file
 from fh5.evaluation import EvaluationReview, _read, read_evaluation_batch
 from fh5.evaluation_handoff import ReadyHandoff
 from fh5.evaluation_model import asset_limit, evaluation_actor
+from fh5.evaluation_start import event_payloads, seal_start
 from fh5.events import EventEnvironment, EventRun, validate_event_file
 from fh5.numeric_images import PixelContract
 from fh5.realtime import RealtimeConfig, RealtimeEnvironment, RealtimeRun
@@ -98,6 +99,16 @@ def _freeze(request: EvaluationRun) -> tuple[dict[str, Any], Path, dict[str, Any
     event_file = root / "event.json"
     write_file(event_file, encode(menu))
     validate_event_file(event_file)
+    task = _read(root / "frozen/task.json")[0]
+    if task["version"] == 2:
+        canonical = event_payloads(request.event_config_file)
+        frozen = {
+            name: read_bounded(root / "frozen" / name, 16 * 1024**2)
+            for name in batch["files"]
+            if name.startswith("start/")
+        }
+        if canonical != frozen:
+            raise ValueError("Requested event differs from the frozen automatic start protocol")
     write_file(
         root / "run-protocol.json",
         encode(
@@ -156,6 +167,7 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
         settings["pixels"] = PixelContract.from_metadata(settings["pixels"])
         settings["action_offsets_ms"] = tuple(settings["action_offsets_ms"])
         config = RealtimeConfig(**settings)
+        task = _read(root / "frozen/task.json")[0]
         record_config = root / "record.json"
         write_file(
             record_config,
@@ -228,7 +240,16 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
             executed = run_experiment(
                 RealtimeRun(directory / "execution", config, seconds=request.seconds),
                 realtime_environment=ReadyHandoff(
-                    drive, preparation["ready_state"], event_parameters, config
+                    drive,
+                    preparation["ready_state"],
+                    event_parameters,
+                    config,
+                    deadline_ns=round(
+                        preparation["ready_observed_ns"]
+                        + task["automatic_start"]["handoff_timeout_s"] * 1e9
+                    )
+                    if task["version"] == 2
+                    else None,
                 ),
                 numeric_actor_factory=lambda: evaluation_actor(
                     root / "frozen/model", batch["config"]["model"], batch["config"]["runtime"]
@@ -263,6 +284,17 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
                     ).hexdigest(),
                 },
             )
+            if _read(root / "frozen/task.json")[0]["version"] == 2:
+                entry["preparation"] = {
+                    "directory": f"attempt-{i:04d}/ready",
+                    "manifest_sha256": seal_start(
+                        directory / "ready",
+                        request.batch_sha256,
+                        slot["id"],
+                        entry["files"]["packets.jsonl"],
+                        entry["execution"]["manifest_sha256"],
+                    ),
+                }
             atomic_json(
                 root / "ledger.json",
                 {"version": 1, "batch_sha256": request.batch_sha256, "entries": entries},

@@ -30,7 +30,9 @@ uv run --locked fh5 attempt-review runs/my-recording --task runs/my-task.json --
 }
 ```
 
-当前支持 `human` / `calibration` 控制归属及人工置位；后续策略控制接口需显式扩展。`geometry_source_sha256` 必须列出额外的走廊建模记录哈希；参考轨迹来源由路线包自动读取。来源复用会隔离结果。该清单仍依赖审核者如实申报，哈希不证明标注本身正确。未来实测前冻结任务；事后诊断不得冒充预先冻结的最终评测。
+当前支持 `human` / `calibration` / `policy` 控制归属；v1 任务仍为人工置位。v2 任务显式使用策略控制和 `automatic_event_ready`，冻结赛事配置及交接期限，详见[自动起跑](evaluation.md#自动局部起跑的证据)。此时采用 `local-validity-v3`，本入口留下 `automatic_start_unverified`，只有绑定准备与执行证据的批次审核才能消除该项；其他证据条件不变。
+
+`geometry_source_sha256` 必须列出额外的走廊建模记录哈希；参考轨迹来源由路线包自动读取。来源复用会隔离结果。该清单仍依赖审核者如实申报，哈希不证明标注本身正确。未来实测前冻结任务；事后诊断不得冒充预先冻结的最终评测。
 
 证据 JSON 必含 `version: 1`、整份 `packets.jsonl` 的 `recording_sha256`、`items`、`coverage`、`events`：
 

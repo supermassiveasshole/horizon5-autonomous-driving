@@ -143,15 +143,32 @@ def _task(path: Path) -> dict[str, Any]:
     if (
         not isinstance(task, dict)
         or type(task.get("version")) is not int
-        or task["version"] != 1
+        or task["version"] not in (1, 2)
         or task.get("scope") != "local"
     ):
-        raise ValueError("Attempt review requires a version 1 local task")
+        raise ValueError("Attempt review requires a supported local task")
     for name in ("task_id", "route_file", "route_sha256"):
         if not isinstance(task.get(name), str) or not task[name].strip():
             raise ValueError(f"Task requires {name}")
-    if task.get("start_mode") != "manual_placement":
+    if task["version"] == 1 and task.get("start_mode") != "manual_placement":
         raise ValueError("Only reviewed manual placement is supported in local validity v1")
+    if task["version"] == 2:
+        start = task.get("automatic_start")
+        if (
+            task.get("start_mode") != "automatic_event_ready"
+            or task.get("control_owner") != "policy"
+            or not isinstance(start, dict)
+            or set(start) != {"event_file", "event_sha256", "handoff_timeout_s"}
+            or not isinstance(start["event_file"], str)
+            or not start["event_file"].strip()
+            or not isinstance(start["event_sha256"], str)
+            or len(start["event_sha256"]) != 64
+            or any(c not in "0123456789abcdef" for c in start["event_sha256"])
+            or type(start["handoff_timeout_s"]) not in (int, float)
+            or not math.isfinite(start["handoff_timeout_s"])
+            or not 0 < start["handoff_timeout_s"] <= 30
+        ):
+            raise ValueError("Automatic local task requires a frozen event and bounded handoff")
     if task.get("control_owner") not in ("human", "calibration", "policy"):
         raise ValueError("Task requires a known control owner")
     for name in ("expected_car_ordinal", "expected_pi"):
@@ -330,6 +347,8 @@ def _attempt(
     )
     if missing:
         pending.append("independent_review_missing")
+    if task["version"] == 2:
+        pending.append("automatic_start_unverified")
     if any(e["kind"] == "destination_changed" and _confirmed(e) for e in events):
         pending.append("task_phase_changed")
     if any(e["kind"] == "pause" and _confirmed(e) for e in events):
@@ -539,7 +558,7 @@ def review_attempts(request: AttemptReplay) -> RunResult:
     events = [*base.events, *({**e, "kind": "reviewed_" + e["kind"]} for e in evidence["events"])]
     review = {
         "version": 1,
-        "rules_version": "local-validity-v2",
+        "rules_version": "local-validity-v3" if task["version"] == 2 else "local-validity-v2",
         "task": task,
         "recording_packet_count": base.summary["packet_count"],
         "source_kind": base.metadata["source_kind"],

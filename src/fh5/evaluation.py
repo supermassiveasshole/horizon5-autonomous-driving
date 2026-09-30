@@ -20,6 +20,7 @@ from fh5.collection_store import encode, read_bounded, write_file
 from fh5.evaluation_execution import review_execution
 from fh5.evaluation_metrics import combine_execution_metrics
 from fh5.evaluation_model import asset_limit, model_payloads, validate_model
+from fh5.evaluation_start import event_payloads, review_start
 from fh5.evidence_usage import bind_evaluation_slots, reserve_batch, review_usage, source_keys
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_images import PixelContract
@@ -197,6 +198,28 @@ def prepare_evaluation(request: EvaluationPrepare) -> RunResult:
         raise ValueError("Evaluation route changed")
     load_route(route_path)
     task["route_file"] = "route/route.json"
+    if task["version"] == 2:
+        start = task["automatic_start"]
+        event_file = task_path.parent / start["event_file"]
+        if hashlib.sha256(read_bounded(event_file, 1024**2)).hexdigest() != start["event_sha256"]:
+            raise ValueError("Automatic start event changed")
+        event_files = event_payloads(event_file)
+        event_config = json.loads(event_files["start/event.json"])
+        if (
+            not event_config["event_run"]["conditions_verified"]
+            or event_config["event_run"]["purpose"] != "event"
+            or event_config["snapshot"] != config["conditions"]["snapshot"]
+            or any(
+                event_config["event_run"][k] != task[k]
+                for k in ("expected_car_ordinal", "expected_pi")
+            )
+        ):
+            raise ValueError("Automatic start event conditions disagree with the task")
+        payloads.update(event_files)
+        start.update(
+            event_file="start/event.json",
+            event_sha256=hashlib.sha256(event_files["start/event.json"]).hexdigest(),
+        )
     payloads.update(
         {
             "task.json": encode(task),
@@ -333,7 +356,7 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
     sources = set()
     for row in entries:
         if (
-            set(row) - {"execution"} != {"slot_id", "recording", "files", "evidence"}
+            set(row) - {"execution", "preparation"} != {"slot_id", "recording", "files", "evidence"}
             or row["slot_id"] not in plan
             or row["slot_id"] in seen
         ):
@@ -357,6 +380,7 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
     write_file(request.output_dir / "ledger.json", ledger_raw)
     rows = []
     executions = []
+    starts = []
     usage_sources = []
     for i, entry in enumerate(entries):
         usage_source: dict[str, Any] = {
@@ -389,6 +413,14 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
                 created_utc=result.metadata["created_utc"],
             )
         except (OSError, ValueError, KeyError, TypeError) as error:
+            starts.append(
+                {
+                    "slot_id": entry["slot_id"],
+                    "status": "quarantined",
+                    "reasons": ["recording_or_evidence_unreadable"],
+                    "scope": "automatic local start only; not whole-task validity",
+                }
+            )
             executions.append(
                 {
                     "slot_id": entry["slot_id"],
@@ -429,6 +461,18 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
         )
         execution["slot_id"] = entry["slot_id"]
         executions.append(execution)
+        start = review_start(
+            entry.get("preparation"),
+            ledger_dir=request.ledger_file.parent,
+            batch_dir=request.batch_dir,
+            batch=batch,
+            slot=entry["slot_id"],
+            execution=execution,
+            execution_binding=entry.get("execution"),
+            recording=result,
+            output=request.output_dir / f"start-{i:04d}.html",
+        )
+        starts.append(start)
         order = _protocol_order(batch, result.metadata)
         for attempt in result.summary["attempt_review"]["attempts"]:
             times = [
@@ -442,6 +486,13 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
             outcome = attempt["outcome"]
             reasons = list(attempt["reasons"])
             pending = list(attempt["pending_checks"])
+            start_verified = start["status"] == "verified" and attempt["packet_range"][0] == 0
+            if start_verified:
+                pending = [p for p in pending if p != "automatic_start_unverified"]
+                reasons = [r for r in reasons if r != "automatic_start_unverified"]
+                gaps.remove("automatic_restart_not_verified")
+                if outcome == "pending_review" and not pending:
+                    outcome = "valid_complete" if attempt["task_completed"] else "driving_failed"
             if execution["status"] == "quarantined":
                 gaps.append("execution_quarantined")
                 reasons.append("execution_quarantined")
@@ -474,7 +525,8 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
                     "outcome": outcome,
                     "reasons": reasons,
                     "pending_checks": pending,
-                    "record_eligible": attempt["record_eligible"] and outcome == "valid_complete",
+                    "record_eligible": outcome == "valid_complete",
+                    "automatic_start_verified": start_verified,
                     "slot_id": entry["slot_id"],
                     "reference_mode": plan[entry["slot_id"]]["reference_mode"],
                     "source_hashes": result.summary["attempt_review"]["source_hashes"],
@@ -500,6 +552,8 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
         "quarantined_executions": sum(e["status"] == "quarantined" for e in executions),
         "attempts": rows,
         "executions": executions,
+        "starts": starts,
+        "verified_starts": sum(s["status"] == "verified" for s in starts),
         "execution_metrics": combine_execution_metrics(executions),
         "execution_metrics_by_observed_reference": {
             view: combine_execution_metrics(

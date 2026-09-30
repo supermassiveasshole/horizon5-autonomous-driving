@@ -19,9 +19,11 @@ class ReadyHandoff:
         ready: dict[str, Any],
         event: dict[str, Any],
         config: RealtimeConfig,
+        deadline_ns: int | None = None,
     ) -> None:
         self.environment, self.ready, self.event, self.config = environment, ready, event, config
         self.confirmed = False
+        self.deadline_ns = deadline_ns
         self.error: str | None = None
 
     def read(self, period_s: float) -> TimelineInput:
@@ -29,7 +31,9 @@ class ReadyHandoff:
 
         value = self.environment.read(period_s)
         if not self.confirmed and self.error is None:
-            if not value.raw_packets:
+            if self.deadline_ns is not None and value.at_ns > self.deadline_ns:
+                self.error = "handoff_expired"
+            elif not value.raw_packets:
                 self.error = "handoff_missing_telemetry"
             else:
                 sample = _decode(value.raw_packets[-1])
