@@ -59,13 +59,24 @@ def _registry(path: Path, *, create: bool = False) -> Iterator[sqlite3.Connectio
                 "CREATE TABLE reservations (batch TEXT PRIMARY KEY, model TEXT NOT NULL, "
                 "purpose TEXT NOT NULL, reserved_utc TEXT NOT NULL)"
             )
-            db.execute(
-                "CREATE TABLE slots (batch TEXT NOT NULL, slot TEXT NOT NULL, binding TEXT NOT NULL, "
-                "PRIMARY KEY(batch, slot))"
-            )
-            db.execute("PRAGMA user_version=1")
-        elif version != 1:
+            version = 1
+        elif version not in (1, 2):
             raise ValueError("Unsupported evidence usage registry")
+        if version == 1:
+            had_slots = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='slots'"
+            ).fetchone()
+            db.execute(
+                "CREATE TABLE IF NOT EXISTS slots (batch TEXT NOT NULL, slot TEXT NOT NULL, "
+                "binding TEXT NOT NULL, PRIMARY KEY(batch, slot))"
+            )
+            db.execute("CREATE TABLE legacy_reviews (batch TEXT PRIMARY KEY)")
+            if not had_slots:
+                # Uses identify prior reviews, but cannot recover their original slot membership.
+                db.execute(
+                    "INSERT INTO legacy_reviews SELECT DISTINCT batch FROM uses WHERE batch<>''"
+                )
+            db.execute("PRAGMA user_version=2")
         if db.execute("SELECT count(*) FROM uses").fetchone()[0] > 20_000:
             raise ValueError("Evidence usage registry exceeds 20000-key bound")
         if db.execute("SELECT count(*) FROM slots").fetchone()[0] > 20_000:
@@ -94,7 +105,7 @@ def source_keys(files: dict[str, str]) -> list[str]:
 
 def _snapshot(db: sqlite3.Connection) -> dict[str, Any]:
     return {
-        "version": 1,
+        "version": 2,
         "registry_id": db.execute("SELECT value FROM identity").fetchone()[0],
         "uses": [
             dict(row)
@@ -106,6 +117,9 @@ def _snapshot(db: sqlite3.Connection) -> dict[str, Any]:
             dict(row) for row in db.execute("SELECT * FROM reservations ORDER BY batch")
         ],
         "slots": [dict(row) for row in db.execute("SELECT * FROM slots ORDER BY batch, slot")],
+        "legacy_reviews": [
+            row[0] for row in db.execute("SELECT batch FROM legacy_reviews ORDER BY batch")
+        ],
     }
 
 
@@ -276,6 +290,8 @@ def _review_usage(
             and reservation["purpose"] == batch["config"]["purpose"]
         )
         unknown = []
+        if batch_sha256 in before["legacy_reviews"]:
+            unknown.append("legacy_slot_history_unavailable")
         if not reserved:
             unknown.append("batch_not_reserved_in_this_registry")
         if len(sources) != len(batch["config"]["plan"]):

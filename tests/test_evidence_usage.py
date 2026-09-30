@@ -320,3 +320,46 @@ def test_unstarted_slot_can_be_added_without_changing_previously_reviewed_attemp
     assert complete.summary["evaluation"]["metrics"]["all_attempts"] == 2
     assert complete.summary["evaluation"]["unstarted_slots"] == []
     assert complete.summary["evaluation"]["independence"]["status"] == "no_known_overlap"
+
+
+def test_legacy_registry_preserves_history_and_marks_missing_old_slot_bindings_unknown(
+    tmp_path, policy
+):
+    import sqlite3
+
+    from fh5.evidence_usage import RecordUsage
+
+    _, config = prepare(tmp_path, policy, purpose="final")
+    registry = tmp_path / "usage.sqlite"
+    batch = tmp_path / "reserved"
+    run_experiment(EvaluationPrepare(config, batch, registry))
+    source = record(tmp_path, "drive", [(0, 0.2), (1, 0.2)])
+    path = ledger(tmp_path, [entry("run-0", source)])
+    data = json.loads(path.read_bytes())
+    data["batch_sha256"] = sha(batch / "batch.json")
+    path.write_text(json.dumps(data))
+    run_experiment(EvaluationReview(batch, path, tmp_path / "original", registry))
+    before = json.loads((tmp_path / "original/usage-snapshot.json").read_bytes())
+    # Fixture: the first registry format had no per-slot bindings or migration marker.
+    with sqlite3.connect(registry) as db:
+        db.execute("DROP TABLE slots")
+        db.execute("DROP TABLE IF EXISTS legacy_reviews")
+        db.execute("PRAGMA user_version=1")
+
+    migrated = run_experiment(EvaluationReview(batch, path, tmp_path / "migrated", registry))
+    usage = migrated.summary["evaluation"]["independence"]
+    assert usage["status"] == "unknown"
+    assert "legacy_slot_history_unavailable" in usage["unknown_reasons"]
+    assert usage["reservation_verified"] is True
+    after = json.loads((tmp_path / "migrated/usage-snapshot.json").read_bytes())
+    for field in ("registry_id", "uses", "reservations"):
+        assert after[field] == before[field]
+
+    # The original database remains usable, and later uses still expose overlap.
+    run_experiment(RecordUsage(registry, (source,), "training", tmp_path / "training"))
+    reviewed = run_experiment(EvaluationReview(batch, path, tmp_path / "reviewed", registry))
+    assert reviewed.summary["evaluation"]["independence"]["status"] == "known_overlap"
+    assert "training" in {
+        c["prior_role"] for c in reviewed.summary["evaluation"]["independence"]["conflicts"]
+    }
+    run_experiment(EvaluationPrepare(config, tmp_path / "next-batch", registry))
