@@ -209,6 +209,9 @@ def prepare_sac_replay(request: SACReplayPrepare) -> RunResult:
     transitions, excluded = [], []
     previous_action: list[float] | None = command_action(trace["initial_command"])
     previous_issued = trace["initial_issued_ns"]
+    previous_epoch = trace["actions"][0]["epoch"]
+    first_segment = steps.get(trace["actions"][0]["from_packet_index"])
+    previous_segment_id = first_segment[1]["segment_id"] if first_segment else None
     last_end = -1
     for number, action in enumerate(trace["actions"]):
         start, end = action["from_packet_index"], action["to_packet_index"]
@@ -216,6 +219,11 @@ def prepare_sac_replay(request: SACReplayPrepare) -> RunResult:
             raise ValueError("Unordered, overlapping or unknown SAC action interval")
         last_end = end
         now, until = (samples[i]["received_monotonic_ns"] for i in (start, end))
+        first_step = steps.get(start)
+        current_segment_id = first_step[1]["segment_id"] if first_step else None
+        if action["epoch"] != previous_epoch or current_segment_id != previous_segment_id:
+            previous_action = None
+        previous_epoch, previous_segment_id = action["epoch"], current_segment_id
         if action["status"] != "sent":
             excluded.append({"action_index": number, "reason": "not_executed_policy_action"})
             previous_action = None
@@ -270,6 +278,9 @@ def prepare_sac_replay(request: SACReplayPrepare) -> RunResult:
             for step, _ in interval:
                 reward += discount * step["reward"]
                 discount *= step["discount"]
+            adjustment = segment["terminal_adjustment"] if terminal and segment else None
+            if adjustment is not None:
+                reward += discount * adjustment["reward"]
             transitions.append(
                 {
                     "id": f"transition-{number}",
@@ -294,6 +305,7 @@ def prepare_sac_replay(request: SACReplayPrepare) -> RunResult:
                     ),
                     "packet_range": [start, end],
                     "reward_steps": [step for step, _ in interval],
+                    "terminal_adjustment": adjustment,
                     "reward_segment_id": segment["segment_id"] if segment else None,
                     "action_time_basis": "synthetic_synchronous_application; not a native send-return proxy",
                 }

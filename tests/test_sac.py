@@ -156,11 +156,53 @@ def test_task_state_at_current_observation_never_uses_next_step_progress_or_time
     assert replay["task_state_role"] == "critic_only; frozen BC inputs unchanged"
 
 
+def test_failure_at_excluded_pause_entry_retains_settled_terminal_adjustment(tmp_path):
+    request = experience(tmp_path, terminal=False)
+    evidence(
+        tmp_path,
+        request.recording_dir,
+        [
+            {"packet_index": 2, "kind": "driving_failure", "status": "confirmed"},
+            {"packet_index": 2, "kind": "pause", "status": "confirmed"},
+        ],
+    )
+    run_experiment(request)
+    rows = json.loads((request.output_dir / "replay.json").read_bytes())["transitions"]
+    assert len(rows) == 1
+    assert rows[0]["terminated"] and not rows[0]["bootstrap"]
+    assert rows[0]["reward"] == pytest.approx(-2.67)
+    assert rows[0]["terminal_adjustment"]["event_packet_index"] == 2
+
+
+def test_new_epoch_does_not_inherit_previous_sent_command_for_critic_support(tmp_path):
+    request = experience(tmp_path)
+    trace = json.loads(request.trace_file.read_bytes())
+    trace["actions"][1]["epoch"] = "after-reset"
+    for row in trace["observations"][1:]:
+        row["epoch"] = "after-reset"
+        for frame in row["frames"]:
+            frame["epoch"] = "after-reset"
+    trace["observations"][1]["actor"].update(
+        actions=[None, None, None], action_mask=[False] * 3, action_age_ms=[None] * 3
+    )
+    trace["observations"][2]["actor"].update(
+        actions=[None, [0.0, 0.2], [0.0, 0.2]],
+        action_mask=[False, True, True],
+        action_age_ms=[None, 200.0, 200.0],
+    )
+    request.trace_file.write_text(json.dumps(trace))
+    result = run_experiment(request).summary["sac_replay"]
+    assert not result["observation_errors"]
+    assert result["eligible_transitions"] == 0
+    assert result["excluded"][-1] == {"action_index": 1, "reason": "unknown_previous_command"}
+
+
 def test_critic_warmup_updates_values_without_changing_bc_and_reloads_exactly(tmp_path):
     pytest.importorskip("torch")
     from test_temporal_bc import temporal_fixture
 
     from fh5.sac import SACCriticReplay, SACCriticWarmup
+    from fh5.sac_actions import ActionBounds
     from fh5.temporal_bc import TemporalBCTrain
 
     request = experience(tmp_path)
@@ -177,6 +219,7 @@ def test_critic_warmup_updates_values_without_changing_bc_and_reloads_exactly(tm
             prepared.summary["sac_replay"]["replay_sha256"],
             tmp_path / "warm",
             steps=3,
+            bounds=ActionBounds(max_steer=0.01),
         )
     ).summary["sac"]
     assert warm["steps_completed"] == 3
@@ -186,6 +229,8 @@ def test_critic_warmup_updates_values_without_changing_bc_and_reloads_exactly(tm
     assert warm["actor_optimizer_steps"] == 0
     assert warm["real_driving_validated"] is False
     assert warm["predictions"][0]["critic_task_features"] == [0, 0, 1, 1, 1]
+    # BC exceeds .01 here; the live adapter sends round(.01 * 32767), i.e. 328.
+    assert warm["target_actions"][0][0] * 32767 == pytest.approx(328)
     for command in warm["target_actions"]:
         assert command[0] * 32767 == pytest.approx(round(command[0] * 32767))
         assert command[1] * 255 == pytest.approx(round(command[1] * 255))
@@ -406,6 +451,48 @@ def test_warmup_rejects_out_of_support_actions_instead_of_clipping_them(tmp_path
             )
         )
     assert not (tmp_path / "warm").exists()
+
+
+def test_actual_bc_rounded_boundary_command_remains_in_replay_support(tmp_path):
+    pytest.importorskip("torch")
+    from test_temporal_bc import temporal_fixture
+
+    from fh5.sac import SACCriticWarmup
+    from fh5.temporal_bc import TemporalBCTrain
+
+    request = experience(tmp_path)
+    trace = json.loads(request.trace_file.read_bytes())
+    trace["initial_command"]["steer_i16"] = 16384
+    for action in trace["actions"]:
+        action["sent"]["steer_i16"] = 16384
+    for observation in trace["observations"]:
+        for action in observation["actor"]["actions"]:
+            if action is not None:
+                action[0] = 16384 / 32767
+    request.trace_file.write_text(json.dumps(trace))
+    packets_path = request.recording_dir / "packets.jsonl"
+    packets = [json.loads(line) for line in packets_path.read_text().splitlines()]
+    for packet in packets:
+        payload = bytearray.fromhex(packet["payload_hex"])
+        payload[320] = 64
+        packet["payload_hex"] = payload.hex()
+    packets_path.write_text("\n".join(json.dumps(p) for p in packets) + "\n")
+    evidence(tmp_path, request.recording_dir)
+    prepared = run_experiment(request)
+    bc_root = tmp_path / "bc"
+    bc_root.mkdir()
+    config, _ = temporal_fixture(bc_root)
+    run_experiment(TemporalBCTrain(config, bc_root / "model"))
+    result = run_experiment(
+        SACCriticWarmup(
+            bc_root / "model",
+            request.output_dir / "replay.json",
+            prepared.summary["sac_replay"]["replay_sha256"],
+            tmp_path / "warm",
+            steps=1,
+        )
+    ).summary["sac"]
+    assert result["steps_completed"] == 1 and result["transitions"] == 2
 
 
 @pytest.mark.parametrize("fault", ["response", "epoch", "confirmed_failure"])

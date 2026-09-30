@@ -155,25 +155,8 @@ def _run(request: SACCriticWarmup | SACCriticReplay, torch: Any) -> RunResult:
                     frame_cache[key] = frame
                 frames.append(frame_cache[key])
             sequence = tuple(frames)
-            prediction = actor.predict(row["actor"], sequence)
-            values = actor.input_features(row["actor"], sequence)
-            width, height = pixels.size
-            rgb = (
-                torch.stack(
-                    [
-                        torch.frombuffer(bytearray(f.pixels), dtype=torch.uint8)
-                        .reshape(height, width, 3)
-                        .permute(2, 0, 1)
-                        for f in sequence
-                    ]
-                ).float()
-                / 255
-            )
-            with torch.no_grad():
-                image = actor.model.encoder(rgb).reshape(1, -1)
-                state = actor.model.state(torch.tensor([values], dtype=torch.float32))
-                encoded[identity] = (torch.cat([image, state], dim=1)[0], prediction)
-                reload_inputs[identity] = (row["actor"], sequence, prediction)
+            encoded[identity] = actor.predict_with_features(row["actor"], sequence)
+            reload_inputs[identity] = (row["actor"], sequence, encoded[identity][1])
         return encoded[identity]
 
     current, following, actions, next_actions, rewards, discounts, predictions = (
@@ -335,10 +318,15 @@ def _run(request: SACCriticWarmup | SACCriticReplay, torch: Any) -> RunResult:
         if reloaded.manifest != actor.manifest or reload_error > 1e-6:
             raise ValueError("Frozen BC changed during checkpoint publication")
         summary["reload_max_abs_error"] = reload_error
+        # Training diagnostics grow with steps/transitions. Keep them outside
+        # the small checkpoint manifest consumed by reload and later resume.
+        diagnostic_payload = encode(summary)
+        write_file(output / "training-report.json", diagnostic_payload)
         manifest = {
             "version": 1,
             "stage": "critic_warmup",
             "bounds": asdict(bounds),
+            "command_quantization": "clamp-then-round-nearest-even-v1",
             "replay_sha256": expected,
             "actor_manifest_sha256": model_digest,
             "configuration": {
@@ -350,7 +338,8 @@ def _run(request: SACCriticWarmup | SACCriticReplay, torch: Any) -> RunResult:
                 "device": "cpu",
             },
             "weights_sha256": hashlib.sha256((output / "critic.pt").read_bytes()).hexdigest(),
-            "summary": summary,
+            "report_file": "training-report.json",
+            "report_sha256": hashlib.sha256(diagnostic_payload).hexdigest(),
         }
         write_file(output / "critic.json", encode(manifest))
         report = output / "report.html"

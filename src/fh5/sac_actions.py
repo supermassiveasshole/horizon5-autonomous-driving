@@ -1,6 +1,5 @@
 """Command-coordinate support shared by critic targets and subsequent SAC sampling."""
 
-import math
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -29,6 +28,13 @@ class ActionBounds:
             highs[i] = min(highs[i], previous[i] + rate * elapsed_s)
         if any(hi - lo <= 1e-8 for lo, hi in zip(lows, highs)):
             raise ValueError("Degenerate SAC support requires a supervisor boundary")
+        # Match the sender's clamp-then-round convention. Configuration bounds
+        # are before quantization; their actual command endpoints may differ
+        # by half a grid unit, e.g. .5 -> 16384 / 32767 for steering.
+        lows = [round(v * scale) / scale for v, scale in zip(lows, (32767, 255))]
+        highs = [round(v * scale) / scale for v, scale in zip(highs, (32767, 255))]
+        if any(hi - lo <= 1e-8 for lo, hi in zip(lows, highs)):
+            raise ValueError("Degenerate quantized SAC support requires a supervisor boundary")
         return lows, highs
 
     def context(self, previous: list[float], elapsed_s: float) -> list[float]:
@@ -41,7 +47,7 @@ class ActionBounds:
         lo, hi = self.interval(previous, elapsed_s)
         command = []
         for a, b, value, scale in zip(lo, hi, prediction, (32767, 255)):
-            lower, upper = math.ceil(a * scale), math.floor(b * scale)
+            lower, upper = round(a * scale), round(b * scale)
             if lower > upper:
                 raise ValueError("SAC support contains no executable command")
             command.append(max(lower, min(upper, round(float(value) * scale))) / scale)

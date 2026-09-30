@@ -125,6 +125,12 @@ class FrozenNumericActor:
         return temporal_features(actor, frames, self.temporal)
 
     def predict(self, actor: dict[str, Any], frames: tuple[NumericFrame, ...]) -> list[float]:
+        return self.predict_with_features(actor, frames)[1]
+
+    def predict_with_features(
+        self, actor: dict[str, Any], frames: tuple[NumericFrame, ...]
+    ) -> tuple[Any, list[float]]:
+        """Return frozen features and their prediction from one numerical encoding."""
         if (
             set(actor) != set(self.original_contract["actor_fields"])
             or len(frames) != self.original_contract["image_count"]
@@ -150,8 +156,9 @@ class FrozenNumericActor:
         with self.torch.inference_mode():
             pixels = self.torch.stack(tensors).unsqueeze(0).to(self.device).float() / 255
             state = self.torch.tensor([values], dtype=self.torch.float32, device=self.device)
-            prediction: list[float] = self.model(pixels, state)[0].cpu().tolist()
-        return prediction
+            features = self.model.features(pixels, state)
+            prediction: list[float] = self.model.fusion(features)[0].cpu().tolist()
+        return features[0], prediction
 
     def clear_input_cache(self) -> None:
         self.cache.clear()

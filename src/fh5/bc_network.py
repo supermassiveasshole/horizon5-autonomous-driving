@@ -40,9 +40,12 @@ def make_actor(contract: dict[str, Any]) -> Any:
                 nn.Tanh(),
             )
 
-        def forward(self, rgb: Any, state: Any) -> Any:
+        def features(self, rgb: Any, state: Any) -> Any:
             batch, history = rgb.shape[:2]
             features = self.encoder(rgb.flatten(0, 1)).reshape(batch, history * 64)
-            return self.fusion(torch.cat([features, self.state(state)], dim=1))
+            return torch.cat([features, self.state(state)], dim=1)
+
+        def forward(self, rgb: Any, state: Any) -> Any:
+            return self.fusion(self.features(rgb, state))
 
     return Actor()
