@@ -6,11 +6,11 @@ import hashlib
 import json
 import math
 from collections.abc import Generator
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
-from fh5.control import Command, ControlEnvironment
+from fh5.control import Command, ControlEnvironment, record_command
 from fh5.routes import load_route, locate_route
 
 if TYPE_CHECKING:
@@ -261,25 +261,7 @@ class _Session:
             > self.config["telemetry_timeout_s"] * 1e9
         ):
             raise _StopTracking("decision_stale")
-        row: dict[str, Any] = {
-            "issued_ns": self.env.now_ns(),
-            "owner": owner,
-            "requested": requested,
-            "target": asdict(command),
-            "sent": None,
-            "status": "failed",
-        }
-        try:
-            self.env.send(command)
-            row.update(sent=asdict(command), status="sent")
-        except Exception as error:
-            row["error"] = str(error)
-            raise
-        finally:
-            row["returned_ns"] = self.env.now_ns()
-            self.result["commands"].append(row)
-            journal.write(json.dumps(row, allow_nan=False) + "\n")
-            journal.flush()
+        row = record_command(self.env, journal, self.result["commands"], command, requested, owner)
         if command != NEUTRAL and row["returned_ns"] - row["issued_ns"] >= 250_000_000:
             raise _StopTracking("send_stalled")
 
@@ -375,6 +357,11 @@ class _Session:
                             )
                     if self.braking is not None:
                         if sample["speed_kmh"] <= 0.5:
+                            if self.result["stop_reason"] == "local_end" and (
+                                sample["route"]["status"] != "matched"
+                                or sample["route"]["confirmed_progress_m"] < end - 0.25
+                            ):
+                                self.result["stop_reason"] = "unconfirmed_target"
                             break
                         if now - self.braking >= self.config["braking_s"] * 1e9:
                             self.result["stop_reason"] = "not_stopped"
@@ -427,6 +414,7 @@ class _Session:
                     self.close_attempted = True
                     self.env.close()
                 except Exception as error:
+                    self.result.setdefault("prior_stop_reason", self.result["stop_reason"])
                     self.result.update(stop_reason="interface_error", close_error=str(error))
                 path = directory / "control-final.tmp"
                 path.write_text(

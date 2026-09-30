@@ -7,7 +7,7 @@ import math
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TextIO
 
 if TYPE_CHECKING:
     from fh5.experiment import Packet, RunResult
@@ -42,6 +42,37 @@ class ControlEnvironment(Protocol):
     def read(self, period_s: float) -> ControlInput: ...
     def send(self, command: Command) -> None: ...
     def close(self) -> None: ...
+
+
+def record_command(
+    environment: ControlEnvironment,
+    journal: TextIO,
+    commands: list[dict[str, Any]],
+    command: Command,
+    requested: dict[str, Any] | None,
+    owner: str,
+) -> dict[str, Any]:
+    """Record the driver call outcome, including failed or partially applied calls."""
+    row: dict[str, Any] = {
+        "requested": requested or {},
+        "target": asdict(command),
+        "sent": None,
+        "owner": owner,
+        "issued_ns": environment.now_ns(),
+        "status": "failed",
+    }
+    try:
+        environment.send(command)
+        row.update(sent=asdict(command), status="sent")
+    except Exception as error:
+        row["error"] = str(error)
+        raise
+    finally:
+        row["returned_ns"] = environment.now_ns()
+        commands.append(row)
+        journal.write(json.dumps(row, allow_nan=False) + "\n")
+        journal.flush()
+    return row
 
 
 def validate_control_file(path: Path) -> dict[str, Any]:
@@ -216,26 +247,7 @@ def _run_control(
         with (request.output_dir / "commands.jsonl").open("x", encoding="utf-8") as journal:
 
             def send(command: Command, requested: dict[str, Any] | None, owner: str) -> None:
-                before = environment.now_ns()
-                row: dict[str, Any] = {
-                    "requested": requested or {},
-                    "target": asdict(command),
-                    "sent": None,
-                    "owner": owner,
-                    "issued_ns": before,
-                    "status": "failed",
-                }
-                try:
-                    environment.send(command)
-                    row.update(sent=asdict(command), status="sent")
-                except Exception as error:
-                    row["error"] = str(error)
-                    raise
-                finally:
-                    row["returned_ns"] = environment.now_ns()
-                    result["commands"].append(row)
-                    journal.write(json.dumps(row) + "\n")
-                    journal.flush()
+                record_command(environment, journal, result["commands"], command, requested, owner)
 
             started: int | None = None
             waiting_since = environment.now_ns()

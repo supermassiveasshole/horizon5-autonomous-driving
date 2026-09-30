@@ -408,3 +408,62 @@ def test_timing_and_interface_failures_leave_auditable_outcomes(tmp_path, fault,
     assert vehicle.closed
     if fault in ("send_error", "release_error"):
         assert any(c["status"] == "failed" and c["sent"] is None for c in control["commands"])
+
+
+def test_close_failure_retains_original_loss_of_control(tmp_path):
+    class LostFocusVehicle(Vehicle):
+        def read(self, period_s):
+            frame = super().read(period_s)
+            return replace(frame, focused=False) if self.z >= 1 else frame
+
+        def close(self):
+            super().close()
+            raise OSError("test controller detach error")
+
+    result = run_experiment(
+        TrackingDrive(tracking_config(tmp_path), tmp_path / "close-failure"),
+        environment=LostFocusVehicle(),
+    )
+    control = result.summary["control"]
+    assert control["stop_reason"] == "interface_error"
+    assert control["prior_stop_reason"] == "focus_lost"
+    assert control["close_error"] == "test controller detach error"
+
+
+def test_stopping_before_diagonal_gate_is_not_confirmed_completion(tmp_path):
+    config_file = tracking_config(tmp_path)
+    notes_file = tmp_path / "notes.json"
+    notes = json.loads(notes_file.read_text())
+    notes["checkpoints"] = [
+        {
+            "id": "last",
+            "s_m": 27,
+            "left_xz": [-1, 25],
+            "right_xz": [1, 29],
+            "y_min_m": 1,
+            "y_max_m": 3,
+            "status": "verified",
+            "evidence": ["survey.txt"],
+        }
+    ]
+    notes_file.write_text(json.dumps(notes))
+    run_experiment(BuildRoute(tmp_path / "source", tmp_path / "gated", 0, 30, 0.5, notes_file))
+    config = json.loads(config_file.read_text())
+    config["tracking"].update(
+        route_file="gated/route.json",
+        route_sha256=hashlib.sha256((tmp_path / "gated/route.json").read_bytes()).hexdigest(),
+    )
+    config_file.write_text(json.dumps(config))
+
+    class DriftingVehicle(Vehicle):
+        def read(self, period_s):
+            if self.z > 24:
+                self.x, self.yaw, self.wheel = 0.7, 0.0, 0.0
+            return super().read(period_s)
+
+    result = run_experiment(
+        TrackingDrive(config_file, tmp_path / "drive"), environment=DriftingVehicle()
+    )
+    assert result.samples[-1]["route"]["next_checkpoint"] == "last"
+    assert result.summary["control"]["stop_reason"] == "unconfirmed_target"
+    assert result.summary["control"]["release_sent"]
