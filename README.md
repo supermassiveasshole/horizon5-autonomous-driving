@@ -79,7 +79,7 @@ uv run --locked fh5 observe runs/vision-001 --config configs/observations-naviga
 
 #37 新增[持续被动采集](docs/continuous-collection.md)：冻结代码/依赖后独立后台运行，支持状态、停止与已封存数据恢复。原生 DXGI/UDP/XInput 组合使用数值像素；后台生命周期已用合成输入验证，真实多次驾驶与 4K 性能仍待验收。
 
-#38 的[数据快照](docs/collection-datasets.md)已接入封存来源筛选、关联尝试分组及覆盖报告；采集继续追加时固定选择不变。数值 Δt BC 训练适配与真实新数据验证仍在实施。
+#38 的[数据快照](docs/collection-datasets.md)已接入封存来源筛选、关联尝试分组、数值 Δt BC 训练与冻结留出评估；采集继续追加时固定选择不变。[采集优先的学习调度](docs/learning-schedule.md)已完成合成进程验证；真实新数据、4K 游戏负载与驾驶效果仍待验收。
 
 T26 / #27 从实体 XInput 手柄读取原始动作，与 RGB 和遥测同步记录；双踏板、手刹、争用及失焦等片段保留并排除。`fh5 input-devices` 查看设备，`fh5 demonstrate` 被动采集，`fh5 demonstration-dataset` 按独立回合导出无参考/参考辅助视图及未来轨迹监督。校准、质量审阅和命令见[同步示范说明](docs/demonstrations.md)，真实短段及失败排除见[验收记录](docs/validation/t26-demonstrations.md)。这一切片不训练或执行驾驶策略。
 
