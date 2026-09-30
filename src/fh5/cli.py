@@ -31,6 +31,44 @@ from fh5.tracking import TrackingDrive, validate_tracking_file
 from fh5.vision import VisionRecord
 
 
+def _sac(args: argparse.Namespace) -> int:
+    from fh5.sac import SACCriticReplay, SACCriticWarmup
+    from fh5.sac_actions import ActionBounds
+    from fh5.sac_replay import SACReplayPrepare
+
+    if args.mode == "sac-prepare":
+        summary = run_experiment(
+            SACReplayPrepare(
+                args.recording, args.trace, args.task, args.reward, args.output, args.evidence
+            )
+        ).summary["sac_replay"]
+        print(json.dumps(summary, ensure_ascii=False))
+        return 0 if summary["eligible_transitions"] else 4
+    if args.mode == "sac-warmup":
+        bounds = (
+            ActionBounds(**json.loads(args.bounds.read_text(encoding="utf-8-sig")))
+            if args.bounds
+            else ActionBounds()
+        )
+        result = run_experiment(
+            SACCriticWarmup(
+                args.model,
+                args.replay,
+                args.replay_sha256,
+                args.output,
+                args.steps,
+                args.batch_size,
+                args.learning_rate,
+                args.seed,
+                bounds,
+            )
+        )
+    else:
+        result = run_experiment(SACCriticReplay(args.checkpoint, args.replay, args.report))
+    print(json.dumps(result.summary["sac"], ensure_ascii=False))
+    return 0
+
+
 def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
     deadline = time.monotonic() + seconds
     while (remaining := deadline - time.monotonic()) > 0:
@@ -66,6 +104,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     evidence_use.add_argument("--recording", type=Path, action="append", required=True)
     evidence_use.add_argument("--model-sha256")
     evidence_use.add_argument("--output", type=Path, required=True)
+    sac_prepare = commands.add_parser(
+        "sac-prepare", help="Prepare synthetic numerical learning transitions; no devices"
+    )
+    for name in ("recording", "trace", "task", "reward", "output"):
+        sac_prepare.add_argument("--" + name, type=Path, required=True)
+    sac_prepare.add_argument("--evidence", type=Path)
+    sac_warmup = commands.add_parser(
+        "sac-warmup", help="Warm two value heads with the entire BC frozen; no devices"
+    )
+    for name in ("model", "replay", "output"):
+        sac_warmup.add_argument("--" + name, type=Path, required=True)
+    sac_warmup.add_argument("--replay-sha256", required=True)
+    sac_warmup.add_argument("--steps", type=int, default=100)
+    sac_warmup.add_argument("--batch-size", type=int, default=32)
+    sac_warmup.add_argument("--learning-rate", type=float, default=0.0001)
+    sac_warmup.add_argument("--seed", type=int, default=7)
+    sac_warmup.add_argument("--bounds", type=Path)
+    sac_replay = commands.add_parser(
+        "sac-critic-replay", help="Reload frozen BC and warmed critics without updating"
+    )
+    for name in ("checkpoint", "replay", "report"):
+        sac_replay.add_argument("--" + name, type=Path, required=True)
     prepare = commands.add_parser(
         "collection-prepare", help="Freeze a separate passive collector; no devices"
     )
@@ -420,6 +480,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             ):
                 return 4
             return 0
+        if args.mode in ("sac-prepare", "sac-warmup", "sac-critic-replay"):
+            return _sac(args)
         if args.mode == "evidence-use":
             from fh5.evidence_usage import RecordUsage
 

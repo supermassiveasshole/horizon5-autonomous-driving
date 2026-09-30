@@ -86,6 +86,8 @@ from fh5.routes import (
     load_route,
     locate_route,
 )
+from fh5.sac import SACCriticReplay, SACCriticWarmup, run_critic
+from fh5.sac_replay import SACReplayPrepare, prepare_sac_replay
 from fh5.temporal_bc import TemporalBCReplay, TemporalBCTrain, run_temporal_bc
 from fh5.temporal_import import TemporalBCPrepare, prepare_temporal
 from fh5.tracking import TrackingDrive, read_tracking_route, run_tracking
@@ -259,6 +261,9 @@ def run_experiment(
     | PolicyDrive
     | AttemptReplay
     | RewardReplay
+    | SACReplayPrepare
+    | SACCriticWarmup
+    | SACCriticReplay
     | RewardAudit
     | RecoveryReplay
     | TrackingDrive
@@ -370,6 +375,10 @@ def run_experiment(
         return review_attempts(request)
     if isinstance(request, RewardReplay):
         return settle_rewards(request)
+    if isinstance(request, SACReplayPrepare):
+        return prepare_sac_replay(request)
+    if isinstance(request, (SACCriticWarmup, SACCriticReplay)):
+        return run_critic(request)
     if isinstance(request, RewardAudit):
         return audit_rewards(request)
     if isinstance(request, RecoveryReplay):
