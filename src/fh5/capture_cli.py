@@ -6,11 +6,13 @@ import argparse
 import json
 import socket
 import time
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
 from fh5.capture import CaptureConfig, CaptureRun
+from fh5.capture_runtime import CaptureSource
 from fh5.dxgi_capture import DXGISettings
 from fh5.numeric_images import PixelContract
 
@@ -59,17 +61,55 @@ def capture_command(args: argparse.Namespace) -> int:
     config = CaptureConfig(
         pixels=PixelContract.from_metadata(document["pixels"]), **document["pipeline"]
     )
+    if args.diagnostic_mss == "jpeg":
+        if args.raw_samples:
+            raise ValueError("Legacy JPEG comparison cannot supply high-resolution raw samples")
+        config = replace(
+            config,
+            pixels=replace(
+                config.pixels,
+                origin="legacy_offline",
+                resize="legacy-jpeg-roundtrip-then-bilinear-diagnostic-v1",
+            ),
+        )
     target_doc = dict(document["target"])
     target_doc["expected_client_size"] = tuple(target_doc["expected_client_size"])
     target = DXGISettings(**target_doc)
     conditions = document["input_conditions"]
     if conditions.get("version") != 1 or conditions.get("id") != target.condition_id:
         raise ValueError("Capture input condition identity must match target")
-    request = CaptureRun(args.output, config, args.seconds, input_conditions=conditions)
+    request = CaptureRun(
+        args.output,
+        config,
+        args.seconds,
+        input_conditions=conditions,
+        raw_sample_limit=args.raw_samples,
+    )
     if not args.live:
-        print(json.dumps({"validated": document, "capture_started": False}, ensure_ascii=False))
+        print(
+            json.dumps(
+                {
+                    "validated": document,
+                    "capture_started": False,
+                    "diagnostic_mss": args.diagnostic_mss,
+                },
+                ensure_ascii=False,
+            )
+        )
         return 0
+    from fh5.capture_resources import WindowsResources
     from fh5.dxgi_windows import WindowsDXGIFrames
+
+    def factory() -> CaptureSource:
+        if args.diagnostic_mss == "numeric":
+            from fh5.mss_probe import WindowsMSSFrames
+
+            return WindowsMSSFrames(target)
+        if args.diagnostic_mss == "jpeg":
+            from fh5.mss_probe import WindowsLegacyJPEGFrames
+
+            return WindowsLegacyJPEGFrames(target, args.output)
+        return WindowsDXGIFrames(target)
 
     if not 1024 <= args.port <= 65535:
         raise ValueError("Invalid passive telemetry port")
@@ -77,8 +117,9 @@ def capture_command(args: argparse.Namespace) -> int:
         receiver.bind(("127.0.0.1", args.port))
         result = run_experiment(
             request,
-            capture_source_factory=lambda: WindowsDXGIFrames(target),
+            capture_source_factory=factory,
             capture_activity=PassiveActivity(receiver),
+            capture_resources=WindowsResources(),
         )
     summary = result.summary["capture"]
     print(

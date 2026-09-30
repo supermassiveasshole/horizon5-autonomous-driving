@@ -11,6 +11,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fh5.capture_metrics import SourceCadence, game_frame_time_unavailable
 from fh5.numeric_images import NumericFrame, PixelContract
 from fh5.numeric_report import preview_png, write_numeric_report
 
@@ -42,10 +43,16 @@ class RawCapture:
     bgra: bytes
     layout: dict[str, Any]
     time_quality: str = "synthetic_qpc"
+    accumulated_frames: int | None = None
 
     def __post_init__(self) -> None:
         if type(self.present_ticks) is not int or self.present_ticks < 0:
             raise ValueError("Invalid source ticks")
+        if self.accumulated_frames is not None and (
+            type(self.accumulated_frames) is not int
+            or not 0 <= self.accumulated_frames <= 2**32 - 1
+        ):
+            raise ValueError("Invalid native accumulated frame count")
         if (
             len(self.size) != 2
             or any(type(v) is not int or v <= 0 for v in self.size)
@@ -64,10 +71,17 @@ class CaptureEvent:
     boundary: str | None = None
     processing_ns: int = 0
     reason: str | None = None
+    stage_ms: dict[str, float] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         if any(type(v) is not int or v < 0 for v in (self.received_ns, self.processing_ns)):
             raise ValueError("Invalid capture event time")
+        if len(self.stage_ms) > 12 or any(
+            not isinstance(name, str) or not math.isfinite(value) or value < 0
+            for name, value in self.stage_ms.items()
+        ):
+            raise ValueError("Invalid capture stage diagnostic")
+        object.__setattr__(self, "stage_ms", dict(self.stage_ms))
 
 
 @dataclass(frozen=True)
@@ -93,7 +107,10 @@ class CaptureConfig:
         ):
             if type(value) is not int or not low <= value <= high:
                 raise ValueError("Invalid bounded capture configuration")
-        if self.pixels.resize != "full-frame-pillow-bilinear-v1":
+        if self.pixels.resize not in (
+            "full-frame-pillow-bilinear-v1",
+            "legacy-jpeg-roundtrip-then-bilinear-diagnostic-v1",
+        ):
             raise ValueError("Capture implements only the declared Pillow bilinear transform")
 
 
@@ -123,12 +140,24 @@ class CaptureRun:
     seconds: float = 30
     archive_limit_bytes: int = 512 * 1024**2
     input_conditions: dict[str, Any] = field(default_factory=dict)
+    raw_sample_limit: int = 0
+    raw_sample_interval_s: float = 5
+    raw_sample_bytes: int = 128 * 1024**2
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.seconds) or not 0.1 <= self.seconds <= 600:
             raise ValueError("Capture probe must last between 0.1 and 600 seconds")
         if not 1024 <= self.archive_limit_bytes <= 2 * 1024**3:
             raise ValueError("Invalid capture archive budget")
+        if (
+            type(self.raw_sample_limit) is not int
+            or not 0 <= self.raw_sample_limit <= 8
+            or type(self.raw_sample_bytes) is not int
+            or not 1 <= self.raw_sample_bytes <= 256 * 1024**2
+            or not math.isfinite(self.raw_sample_interval_s)
+            or not 0 <= self.raw_sample_interval_s <= 600
+        ):
+            raise ValueError("Invalid bounded original-sample budget")
         object.__setattr__(
             self, "input_conditions", json.loads(json.dumps(self.input_conditions, allow_nan=False))
         )
@@ -159,7 +188,9 @@ def preprocess(work: Work, config: CaptureConfig, ready_ns: int) -> NumericFrame
         capture_received_ns=work.event.received_ns,
         preprocess_ready_ns=ready_ns,
         time_quality=raw.time_quality,
-        uncertainty_ns=raw.mapping.uncertainty_ns,
+        uncertainty_ns=(
+            raw.mapping.uncertainty_ns if raw.time_quality != "capture_start_proxy" else None
+        ),
         size=config.pixels.size,
         pixels=memoryview(resized.tobytes()),
         source_layout={
@@ -167,8 +198,12 @@ def preprocess(work: Work, config: CaptureConfig, ready_ns: int) -> NumericFrame
             "size": list(raw.size),
             "format": "BGRA",
             "stride_bytes": raw.size[0] * 4,
-            "qpc": asdict(raw.mapping),
-            "present_ticks": raw.present_ticks,
+            "accumulated_frames": raw.accumulated_frames,
+            **(
+                {"qpc": asdict(raw.mapping), "present_ticks": raw.present_ticks}
+                if raw.time_quality != "capture_start_proxy"
+                else {"capture_started_ns": raw.present_ticks}
+            ),
         },
         preprocess_version=config.pixels.resize,
     )
@@ -187,6 +222,7 @@ class CaptureState:
         self.last_source_ns: int | None = None
         self.layout: dict[str, Any] | None = None
         self.events: deque[dict[str, Any]] = deque(maxlen=512)
+        self.cadence = SourceCadence(config.capture_hz)
 
     def boundary(self, reason: str, now_ns: int) -> None:
         self.epoch += 1
@@ -194,6 +230,7 @@ class CaptureState:
         self.history.clear()
         self.layout = None
         self.last_source_ns = None
+        self.cadence.previous = None
         self.counts["epoch_changes"] += 1
         self.events.append({"reason": reason, "observed_ns": now_ns, "epoch": str(self.epoch)})
 
@@ -219,8 +256,11 @@ class CaptureState:
             self.counts["nonforward_present"] += 1
             return
         self.last_source_ns = source_ns
+        self.cadence.observe(raw.time_quality, source_ns)
         self.serial += 1
         self.counts["new_frames"] += 1
+        if raw.accumulated_frames is not None:
+            self.counts["desktop_presentations_coalesced"] += max(0, raw.accumulated_frames - 1)
         if self.pending is not None:
             self.counts["pending_overwritten"] += 1
         self.pending = Work(self.epoch, f"f{self.serial}", event)
@@ -250,6 +290,8 @@ class CaptureState:
         if not history:
             return row, ()
         anchor = history[-1].source_time_ns
+        row["latest_source_ns"] = anchor
+        row["latest_age_ms"] = (now_ns - anchor) / 1e6
         if now_ns - anchor > self.config.max_age_ms * 1_000_000:
             row["reason"] = "stale_latest_image"
             return row, ()
@@ -342,12 +384,16 @@ def replay_capture(request: CaptureReplay) -> RunResult:
         "contract": request.config.pixels.metadata(),
         "model": None,
         "timing_kind": "simulated",
+        "started_ns": actions[0][0] if actions else 0,
+        "ended_ns": actions[-1][0] if actions else 0,
         "commands_sent": False,
         "decisions": rows,
         **state.counts,
         "pending_capacity": 1,
         "history_capacity": request.config.history_capacity,
         "events": list(state.events),
+        "cadence": state.cadence.report(),
+        "game_frame_time": game_frame_time_unavailable(),
     }
     state.pending = work = None
     state.history.clear()

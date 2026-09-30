@@ -1,5 +1,7 @@
 """Capture and history behavior through the agreed experiment-run interface."""
 
+import hashlib
+import threading
 import time
 from dataclasses import replace
 
@@ -328,3 +330,232 @@ def test_replay_honors_preprocess_rate_and_preserves_latest_pending(tmp_path):
     assert capture["preprocessed"] == 4
     assert capture["pending_overwritten"] == 3
     assert [f["frame_id"] for f in capture["decisions"][0]["frames"]] == ["f3", "f5", "f7"]
+
+
+def test_frame_rate_excludes_duplicates_and_epoch_gaps_and_reports_stale_age(tmp_path):
+    events = [frame(0), frame(1)]
+    events.append(replace(frame(1), received_ns=1_120_000_000))
+    events.append(CaptureEvent(1_400_000_000, boundary="focus_lost"))
+    events.extend([frame(5), frame(6), frame(9)])
+    events[-1] = replace(events[-1], frame=replace(events[-1].frame, accumulated_frames=3))
+    result = run_experiment(
+        CaptureReplay(tmp_path / "cadence", config(capture_hz=10), tuple(events), (2_200_000_000,))
+    )
+    capture = result.summary["capture"]
+    cadence = capture["cadence"]["synthetic_qpc"]
+    assert cadence["accepted_frames"] == 5
+    assert cadence["interval_ms"]["count"] == 3
+    assert cadence["interval_ms"]["p50"] == 100
+    assert cadence["interval_ms"]["max"] == 300
+    assert cadence["within_epoch_rate_hz"] == 6
+    assert cadence["long_gap_count"] == 1
+    assert capture["decisions"][0]["latest_age_ms"] == 300
+    assert capture["decisions"][0]["reason"] == "stale_latest_image"
+    assert capture["game_frame_time"]["status"] == "unavailable"
+    assert capture["desktop_presentations_coalesced"] == 2
+
+
+def test_slow_resource_probe_cannot_stall_capture_and_is_reported_unreleased(tmp_path):
+    release = threading.Event()
+
+    class Source:
+        source_kind = "synthetic"
+
+        def capture(self):
+            now = time.perf_counter_ns()
+            return replace(
+                frame(0),
+                received_ns=now,
+                frame=RawCapture(
+                    now - 1_000_000,
+                    QpcMapping(0, 0, 1_000_000_000, 0),
+                    (2, 1),
+                    bytes([0, 0, 0, 255] * 2),
+                    {},
+                ),
+            )
+
+        def close(self):
+            pass
+
+    def blocked_os_call():
+        release.wait(10)
+        return {"process_working_set_bytes": 1234}
+
+    try:
+        result = run_experiment(
+            CaptureRun(tmp_path / "resources", config(), seconds=0.35),
+            capture_source_factory=Source,
+            capture_resources=blocked_os_call,
+        )
+        capture = result.summary["capture"]
+        assert capture["pipeline"]["new_frames"] > 3
+        assert capture["pipeline"]["resources_released"] is True
+        assert capture["resource_monitor"]["resources_released"] is False
+        assert capture["resources_released"] is False
+    finally:
+        release.set()
+
+
+def test_high_resolution_samples_keep_exact_source_and_stop_at_byte_budget(tmp_path):
+    class Source:
+        source_kind = "synthetic"
+
+        def capture(self):
+            now = time.perf_counter_ns()
+            return CaptureEvent(
+                now,
+                frame=RawCapture(
+                    now - 1_000_000,
+                    QpcMapping(0, 0, 1_000_000_000, 0),
+                    (2, 1),
+                    bytes([30, 20, 10, 255] * 2),
+                    {},
+                ),
+            )
+
+        def close(self):
+            pass
+
+    result = run_experiment(
+        CaptureRun(
+            tmp_path / "source-samples",
+            config(),
+            seconds=0.35,
+            raw_sample_limit=3,
+            raw_sample_interval_s=0,
+            raw_sample_bytes=16,
+        ),
+        capture_source_factory=Source,
+    )
+    capture = result.summary["capture"]
+    samples = capture["raw_samples"]
+    assert samples["accepted"] == 2
+    assert len(samples["records"]) == 2
+    assert samples["accepted_bytes"] == 16
+    assert samples["resources_released"] is True
+    for sample in samples["records"]:
+        raw = (result.report_path.parent / sample["path"]).read_bytes()
+        assert raw == bytes([30, 20, 10, 255] * 2)
+        assert hashlib.sha256(raw).hexdigest() == sample["sha256"]
+        assert sample["size"] == [2, 1]
+    assert capture["pipeline"]["new_frames"] > 3
+
+
+def test_mss_numerical_comparison_uses_same_crop_but_marks_proxy_clock(tmp_path):
+    from types import SimpleNamespace
+
+    from fh5.dxgi_capture import ClientArea, DXGISettings
+    from fh5.mss_probe import MSSFrames
+
+    class MSS:
+        closed = False
+
+        def grab(self, region):
+            assert region == {"left": 100, "top": 50, "width": 2, "height": 1}
+            return SimpleNamespace(size=(2, 1), bgra=bytes([30, 20, 10, 255] * 2))
+
+        def close(self):
+            self.closed = True
+
+    backend = MSS()
+    result = run_experiment(
+        CaptureRun(tmp_path / "mss", config(), seconds=0.35),
+        capture_source_factory=lambda: MSSFrames(
+            DXGISettings(expected_client_size=(2, 1)),
+            target=lambda: ClientArea(1, 2, (100, 50, 102, 51), 144),
+            grabber_factory=lambda: backend,
+        ),
+    )
+    capture = result.summary["capture"]
+    row = next(row for row in capture["decisions"] if row["status"] == "ready")
+    assert row["frames"][-1]["time_quality"] == "capture_start_proxy"
+    assert row["frames"][-1]["uncertainty_ns"] is None
+    assert (
+        "not native new-frame FPS"
+        in capture["pipeline"]["cadence"]["capture_start_proxy"]["meaning"]
+    )
+    assert backend.closed
+    assert capture["pipeline"]["source_kind"] == "mss_numeric_diagnostic"
+
+
+def test_legacy_comparison_roundtrips_jpeg_with_explicit_lossy_provenance(tmp_path):
+    from io import BytesIO
+
+    from PIL import Image
+
+    from fh5.dxgi_capture import ClientArea, DXGISettings
+    from fh5.mss_probe import LegacyJPEGFrames
+    from fh5.vision import ColorFrame
+
+    buffer = BytesIO()
+    Image.new("RGB", (2, 1), (10, 20, 30)).save(buffer, format="JPEG", quality=90)
+    encoded = buffer.getvalue()
+
+    class Source:
+        def capture(self):
+            stamp = time.perf_counter_ns()
+            return ColorFrame(stamp, stamp, stamp, encoded, "jpeg", (2, 1), (4, 2))
+
+        def close(self):
+            pass
+
+    output = tmp_path / "legacy"
+    result = run_experiment(
+        CaptureRun(
+            output,
+            CaptureConfig(
+                pixels=PixelContract(
+                    size=(2, 1),
+                    origin="legacy_offline",
+                    resize="legacy-jpeg-roundtrip-then-bilinear-diagnostic-v1",
+                )
+            ),
+            seconds=0.35,
+        ),
+        capture_source_factory=lambda: LegacyJPEGFrames(
+            DXGISettings(expected_client_size=(4, 2)),
+            output,
+            target=lambda: ClientArea(1, 2, (0, 0, 4, 2), 96),
+            source_factory=Source,
+        ),
+    )
+    capture = result.summary["capture"]
+    assert (output / "diagnostic-latest.jpg").read_bytes() == encoded
+    row = next(row for row in capture["decisions"] if row["status"] == "ready")
+    assert row["frames"][-1]["source_layout"]["physical_client_size"] == [4, 2]
+    assert row["frames"][-1]["source_layout"]["lossy_jpeg"] is True
+    assert capture["pipeline"]["metrics"]["legacy_disk_write_read_ms"]["count"] > 0
+    assert capture["pipeline"]["metrics"]["legacy_decode_ms"]["count"] > 0
+
+
+def test_game_frame_trace_is_filtered_by_process_chain_and_capture_time(tmp_path):
+    from fh5.capture_trace import CaptureTraceReview
+
+    events = tuple(
+        replace(frame(i), frame=replace(frame(i).frame, time_quality="dxgi_qpc")) for i in range(3)
+    )
+    run = run_experiment(
+        CaptureReplay(tmp_path / "trace-run", config(), events, (1_210_000_000, 1_400_000_000))
+    )
+    trace = tmp_path / "presentmon.csv"
+    trace.write_text(
+        "Application,ProcessID,SwapChainAddress,CPUStartQPC,MsBetweenPresents,DisplayedTime\n"
+        f"ForzaHorizon5.exe,42,0xA,{ANCHOR + 500_000},10,10\n"
+        f"ForzaHorizon5.exe,42,0xA,{ANCHOR + 1_500_000},20,NA\n"
+        f"ForzaHorizon5.exe,42,0xA,{ANCHOR + 2_500_000},30,30\n"
+        f"ForzaHorizon5.exe,42,0xB,{ANCHOR + 1_500_000},100,100\n"
+        f"ForzaHorizon5.exe,99,0xA,{ANCHOR + 1_500_000},100,100\n"
+        f"other.exe,42,0xA,{ANCHOR + 1_500_000},100,100\n"
+        f"ForzaHorizon5.exe,42,0xA,{ANCHOR + 8_000_000},100,100\n",
+        encoding="utf-8",
+    )
+    result = run_experiment(
+        CaptureTraceReview(run.report_path.parent, trace, tmp_path / "trace-report.html", 42, "0xA")
+    )
+    timing = result.summary["capture"]["game_frame_time"]
+    assert timing["frame_count"] == 3
+    assert timing["ms_between_presents"]["p50"] == 20
+    assert timing["displayed_time_ms"]["count"] == 2
+    assert timing["trace_sha256"] == hashlib.sha256(trace.read_bytes()).hexdigest()
+    assert result.summary["capture"]["dynamic_game_validation"] is False

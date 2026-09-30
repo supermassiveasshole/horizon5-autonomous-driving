@@ -17,6 +17,9 @@ from fh5.capture import (
     next_preprocess_time,
     preprocess,
 )
+from fh5.capture_metrics import game_frame_time_unavailable, percentiles
+from fh5.capture_resources import ResourceMonitor
+from fh5.capture_samples import RawSamples
 from fh5.numeric_images import NumericFrame
 from fh5.numeric_recording import NumericArchive
 from fh5.numeric_report import write_numeric_report
@@ -33,8 +36,11 @@ class CaptureSource(Protocol):
 
 
 class LiveCapture:
-    def __init__(self, config: CaptureConfig, factory: Callable[[], CaptureSource]) -> None:
+    def __init__(
+        self, config: CaptureConfig, factory: Callable[[], CaptureSource], samples: RawSamples
+    ) -> None:
         self.config, self.factory = config, factory
+        self.samples = samples
         self.state = CaptureState(config)
         self.condition = threading.Condition()
         self.done = threading.Event()
@@ -61,6 +67,10 @@ class LiveCapture:
     def _offer(self, event: CaptureEvent) -> None:
         with self.condition:
             self.state.offer(event)
+            for name, value in event.stage_ms.items():
+                if name not in self.metrics and len(self.metrics) >= 16:
+                    continue
+                self.metrics.setdefault(name, deque(maxlen=72_000)).append(value)
             self.condition.notify_all()
 
     def _capture(self) -> None:
@@ -146,6 +156,7 @@ class LiveCapture:
                     self.metrics["pending_wait_ms"].append((start - work.event.received_ns) / 1e6)
                     self.metrics["preprocess_ms"].append((ready - start) / 1e6)
                     self.metrics["source_to_ready_ms"].append((ready - frame.source_time_ns) / 1e6)
+                self.samples.submit(work, frame)
                 next_tick = next_preprocess_time(start, ready, self.config)
                 self.done.wait(max(0, (next_tick - time.perf_counter_ns()) / 1e9))
                 del work, frame
@@ -167,6 +178,7 @@ class LiveCapture:
             counts = dict(self.state.counts)
             events = list(self.state.events)
             metrics = {name: percentiles(list(values)) for name, values in self.metrics.items()}
+            cadence = self.state.cadence.report()
             self.state.pending = None
             self.state.history.clear()
         released = not self.release_failed and all(not w.is_alive() for w in self.workers)
@@ -179,33 +191,15 @@ class LiveCapture:
             "fault": self.fault,
             "pending_capacity": 1,
             "history_capacity": self.config.history_capacity,
+            "cadence": cadence,
         }
-
-
-def percentiles(values: list[float]) -> dict[str, float | int | None]:
-    ordered = sorted(values)
-
-    def percentile(p: float) -> float | None:
-        if not ordered:
-            return None
-        index = (len(ordered) - 1) * p
-        low = int(index)
-        high = min(low + 1, len(ordered) - 1)
-        return ordered[low] + (ordered[high] - ordered[low]) * (index - low)
-
-    return {
-        "count": len(values),
-        "p50": percentile(0.5),
-        "p95": percentile(0.95),
-        "p99": percentile(0.99),
-        "max": max(values) if values else None,
-    }
 
 
 def run_capture(
     request: CaptureRun,
     factory: Callable[[], CaptureSource],
     activity: Callable[[], dict[str, Any] | None] | None = None,
+    resources: Callable[[], dict[str, Any]] | None = None,
 ) -> RunResult:
     from fh5.experiment import RunResult, _write_json
 
@@ -214,7 +208,9 @@ def run_capture(
     for name in ("pixels", "previews", "inputs"):
         (directory / name).mkdir()
     archive = NumericArchive(directory, 8, 32 * 1024**2)
-    pipeline = LiveCapture(request.config, factory)
+    samples = RawSamples(request)
+    pipeline = LiveCapture(request.config, factory, samples)
+    monitor = ResourceMonitor(resources)
     rows: list[dict[str, Any]] = []
     started = time.perf_counter_ns()
     deadline = started + int(request.seconds * 1e9)
@@ -257,6 +253,8 @@ def run_capture(
     finally:
         observation_ended = time.perf_counter_ns()
         stats = pipeline.close()
+        resource_stats = monitor.close()
+        sample_stats = samples.close()
         archive_stats = archive.close()
     for row in rows:
         row["archive"] = archive.records.get(row["decision_id"])
@@ -269,12 +267,21 @@ def run_capture(
         "stop_reason": stop_reason,
         "execution_error": execution_error,
         "timing_kind": "measured",
+        "started_ns": started,
+        "ended_ns": observation_ended,
         "commands_sent": False,
         "input_conditions": request.input_conditions,
         "decisions": rows,
         "pipeline": stats,
         "archive": archive_stats,
-        "resources_released": stats["resources_released"] and archive_stats["resources_released"],
+        "resources_released": (
+            stats["resources_released"]
+            and archive_stats["resources_released"]
+            and resource_stats["resources_released"]
+            and sample_stats["resources_released"]
+        ),
+        "resource_monitor": resource_stats,
+        "raw_samples": sample_stats,
         "elapsed_s": (observation_ended - started) / 1e9,
         "dynamic_game_validation": False,
         "moving_observations": sum(
@@ -285,6 +292,10 @@ def run_capture(
             and row["activity"].get("fresh")
             and row["activity"].get("is_race_on") == 1
             and row["activity"].get("speed_mps", 0) > 1
+        ),
+        "game_frame_time": game_frame_time_unavailable(),
+        "latest_age_ms": percentiles(
+            [row["latest_age_ms"] for row in rows if "latest_age_ms" in row]
         ),
     }
     _write_json(directory / "capture.json", summary)

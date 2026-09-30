@@ -45,6 +45,12 @@ def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Record and replay FH5 Data Out experiments")
     commands = parser.add_subparsers(dest="mode", required=True)
+    trace = commands.add_parser("capture-frame-times", help="Attach independent PresentMon QPC CSV")
+    trace.add_argument("recording", type=Path)
+    trace.add_argument("--csv", type=Path, required=True)
+    trace.add_argument("--pid", type=int, required=True)
+    trace.add_argument("--swap-chain", required=True)
+    trace.add_argument("--report", type=Path, required=True)
     capture = commands.add_parser(
         "capture-dxgi", help="Validate DXGI probe; --live passively captures FH5"
     )
@@ -52,6 +58,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     capture.add_argument("--output", type=Path, required=True)
     capture.add_argument("--seconds", type=float, default=30)
     capture.add_argument("--port", type=int, default=5300)
+    capture.add_argument("--raw-samples", type=int, default=0, help="Bounded source samples, 0–8")
+    capture.add_argument(
+        "--diagnostic-mss",
+        choices=("numeric", "jpeg"),
+        help="Explicit MSS comparison, not a production fallback",
+    )
     capture.add_argument(
         "--live", action="store_true", help="Read-only physical client capture; F8 stops"
     )
@@ -240,6 +252,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     perception_replay.add_argument("--labels", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.mode == "capture-frame-times":
+            from fh5.capture_trace import CaptureTraceReview
+
+            result = run_experiment(
+                CaptureTraceReview(args.recording, args.csv, args.report, args.pid, args.swap_chain)
+            )
+            print(json.dumps(result.summary["capture"]["game_frame_time"], ensure_ascii=False))
+            return int(result.summary["capture"]["game_frame_time"]["frame_count"] == 0)
         if args.mode == "capture-dxgi":
             from fh5.capture_cli import capture_command
 

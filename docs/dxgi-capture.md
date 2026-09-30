@@ -1,6 +1,6 @@
 # DXGI 数值采集基础切片
 
-对应 #34，目前提供采集/预处理解耦、源时间、历史选择及诊断入口。**本票未验收完成**：尚缺原生画面动态实测、同尺寸 MSS 对照及页面交互；不会据软件测试关闭 #34 或宣称已满足驾驶时效。
+对应 #34，提供采集/预处理解耦、源时间、历史选择、资源统计及对照入口。**本票未验收完成**：尚缺原生画面动态实测、同尺寸 MSS 实测对照及页面交互；不会据软件测试关闭 #34 或宣称已满足驾驶时效。
 
 ## 入口
 
@@ -39,4 +39,38 @@ QPC 整数 ticks 先减参考值再映射到 `perf_counter_ns`，记录校准采
 
 `CaptureReplay` 经 `run_experiment` 注入原始 BGRA、QPC 映射、接收和处理耗时，使用同一历史状态机检查积压、重复呈现与 epoch。其耗时标为 simulated，不能与实机数据一起报告为性能。
 
-原生 SDK 桥已完成独立软件测试与本机无像素资源预检，见 [验证记录](validation/t32-dxgi-capture.md)。仍需推进的软件及实机验证：完善源帧率/缺口、资源峰值和游戏帧时间报告；同实际客户区的 MSS 数值/MSS+JPEG 诊断对照；少量 4K 原图对照样本；动态只读短测与播放/拖动检查。当前不训练模型、不发送动作，也未接入 #36 的容错策略运行器。
+## 性能与原图诊断
+
+`cadence` 按时间质量分别报告有效样本数、同 epoch 内的间隔分位数及频率。DXGI 只计唯一非零呈现时间；`desktop_presentations_coalesced` 来自原生累计帧数，不能等同于 FH5 丢帧。间隔大于名义采集周期的 1.5 倍记为长缺口，重开前后不连算。MSS 没有独立呈现时间，明确仅报告代理时钟下的采样频率，不能拿循环次数冒充新画面 FPS。
+
+资源探测在独立低频线程运行，约每秒一次，失败或卡住不会阻塞采集；停机如未退出则明确标记。RAM 是本进程工作集/私有提交，CPU 以使用的核数表示；显存通过可用的 `nvidia-smi` 按 UUID 报告整个设备的采样值，包含游戏和其他程序，**不归因于采集进程**。采样最大值不等于连续监测峰值。内存字段依据 [Windows PROCESS_MEMORY_COUNTERS_EX](https://learn.microsoft.com/en-us/windows/win32/api/psapi/ns-psapi-process_memory_counters_ex)，GPU 口径见 [NVIDIA SMI](https://docs.nvidia.com/deploy/nvidia-smi/index.html)。
+
+加 `--raw-samples 3` 保存最多三份原始 BGRA 数值和 PNG 展示对照，默认至少间隔五秒、原始字节总预算 128 MiB、一个持有槽。原图与同帧模型输入在报告中并列，原始数据带哈希。PNG 与哈希由旁路 worker 处理；繁忙就略过该样本，不影响实时历史。它有 CPU/内存竞争成本，正式比较须保持相同设置。数量、原始字节预算与实际文件总量是不同口径。
+
+## MSS 同尺寸对照
+
+对照需安装 `events` extra，并沿用同一配置、同一实际客户区和游戏条件。分别在独立目录运行，不能同时争抢截图资源：
+
+```powershell
+uv run --locked fh5 capture-dxgi --config configs/capture-dxgi.example.json --output runs/dxgi-4k --seconds 30 --live
+uv run --locked fh5 capture-dxgi --config configs/capture-dxgi.example.json --output runs/mss-numeric-4k --seconds 30 --diagnostic-mss numeric --live
+uv run --locked fh5 capture-dxgi --config configs/capture-dxgi.example.json --output runs/mss-jpeg-4k --seconds 30 --diagnostic-mss jpeg --live
+```
+
+`numeric` 使用 MSS 数值 BGRA 与相同 bilinear 预处理；`jpeg` 调用原来的 `WindowsColorFrames`（reduce/960×540 JPEG），再经一个有界复用文件读写、解码和最终 resize，分报这些成本。JPEG 模式明确使用 `legacy_offline` 来源和独立处理版本，禁止原始高分辨率采样，不能当作新管线输入条件。它复现主要旧成本，不等于重跑全部旧控制器；文件系统缓存未强制清空。所有模式都核对物理客户区、前台与窗口变化，只捕获 FH5；无游戏时零帧且非零退出。
+
+MSS 的捕获开始代理时间不具有原生呈现精度，因此三个报告不能直接计算严格的源帧年龄加速比。比较阶段时间、可用观察比例和有界性，另记录相同游戏条件与负载。CLI 不会自动回退到 MSS 或低分辨率。
+
+## 独立游戏帧时间
+
+未提供独立记录时 `game_frame_time` 为 unavailable，不能把桌面呈现间隔当作游戏帧时间。可离线导入同次采集的 PresentMon CSV：
+
+```powershell
+uv run --locked fh5 capture-frame-times runs/dxgi-4k --csv runs/fh5-presentmon.csv --pid 1234 --swap-chain 0x1234 --report runs/dxgi-4k-with-frame-times.html
+```
+
+PID、交换链填写真实记录中的值。需要 `Application/ProcessID/SwapChainAddress/CPUStartQPC/MsBetweenPresents` 列，`DisplayedTime` 可选；CSV 限 32 MiB/100,000 行。按保存的 DXGI QPC 映射，只统计 FH5 指定进程/交换链、CPU 帧开始落在本次捕获窗口的条目，保留原始两份文件摘要。拒绝使用 MSS 代理时间对齐；导入不自动确认场景条件或动态验收，也不修改原报告。
+
+使用支持相应列的 [PresentMon Console](https://github.com/GameTechDev/PresentMon/blob/main/README-ConsoleApplication.md) 导出（`--qpc_time` 提供整数 ticks）。不同版本列名不一致时明确拒绝，不猜测单位；`MsBetweenPresents` 表示应用 Present 调用间隔，`DisplayedTime` 表示屏幕驻留时间，均不冒称 GPU 渲染时长。本入口只分析已有 CSV，不安装或启动 ETW 采集器。
+
+原生 SDK 桥已完成独立软件测试与本机无像素资源预检，见 [验证记录](validation/t32-dxgi-capture.md)。上述工具的软件行为已验证；仍需实际 FH5 的 4K 静止细节/运动短测、MSS 同场景比较、真实游戏帧时间与页面播放/拖动核验。当前不训练模型、不发送动作，也未接入 #36 的容错策略运行器。

@@ -31,6 +31,12 @@ def preview_png(pixels: bytes, size: tuple[int, int]) -> bytes:
 
 def write_numeric_report(path: Path, summary: dict[str, Any], root: Path) -> None:
     display = json.loads(json.dumps(summary))
+    for sample in (display.get("raw_samples") or {}).get("records", []):
+        for key in ("preview", "model_preview"):
+            try:
+                sample[key + "_url"] = asset(root, sample[key]).as_uri()
+            except ValueError:
+                sample[key + "_url"] = None
     for row in display["decisions"]:
         references = (row.get("archive") or {}).get("previews", row.get("previews", []))
         urls: list[str | None] = []

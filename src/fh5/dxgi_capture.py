@@ -126,6 +126,7 @@ class DXGIFrames:
                 image.bgra,
                 layout,
                 time_quality="dxgi_qpc",
+                accumulated_frames=image.accumulated_frames,
             ),
             boundary=boundary,
         )
