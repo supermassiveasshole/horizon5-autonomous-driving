@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 from fh5.capture import CaptureEvent, RawCapture
@@ -47,6 +47,44 @@ class DesktopImage:
     source_texture_size: tuple[int, int]
 
 
+class ClientCaptureGuard:
+    """Share physical-client boundaries across native and diagnostic sources."""
+
+    def __init__(self, settings: DXGISettings, target: Callable[[], ClientArea | None]) -> None:
+        self.settings, self.target = settings, target
+        self.previous: ClientArea | None = None
+
+    def begin(self) -> ClientArea | CaptureEvent:
+        target = self.target()
+        if target is None:
+            boundary = "focus_lost" if self.previous is not None else None
+            self.previous = None
+            return CaptureEvent(
+                time.perf_counter_ns(), boundary=boundary, reason="target_unavailable"
+            )
+        left, top, right, bottom = target.rect
+        if (right - left, bottom - top) != self.settings.expected_client_size:
+            self.previous = None
+            return CaptureEvent(
+                time.perf_counter_ns(),
+                boundary="client_size_mismatch",
+                reason="client_size_mismatch",
+            )
+        return target
+
+    def end(self, target: ClientArea, received_ns: int) -> CaptureEvent:
+        if target != self.target():
+            self.previous = None
+            return CaptureEvent(
+                received_ns, boundary="window_changed_during_capture", reason="capture_discarded"
+            )
+        boundary = (
+            "window_changed" if self.previous is not None and self.previous != target else None
+        )
+        self.previous = target
+        return CaptureEvent(received_ns, boundary=boundary)
+
+
 class DXGIFrames:
     source_kind = "dxgi"
 
@@ -57,27 +95,16 @@ class DXGIFrames:
         target: Callable[[], ClientArea | None],
         camera_factory: Callable[[DXGISettings], Any],
     ) -> None:
-        self.settings, self.target, self.camera_factory = settings, target, camera_factory
+        self.settings, self.camera_factory = settings, camera_factory
+        self.guard = ClientCaptureGuard(settings, target)
         self.camera: Any = None
-        self.previous: ClientArea | None = None
 
     def capture(self) -> CaptureEvent:
-        target = self.target()
-        if target is None:
-            boundary = "focus_lost" if self.previous is not None else None
-            self.previous = None
-            return CaptureEvent(
-                time.perf_counter_ns(), boundary=boundary, reason="target_unavailable"
-            )
+        target = self.guard.begin()
+        if isinstance(target, CaptureEvent):
+            return target
         left, top, right, bottom = target.rect
         size = (right - left, bottom - top)
-        if size != self.settings.expected_client_size:
-            self.previous = None
-            return CaptureEvent(
-                time.perf_counter_ns(),
-                boundary="client_size_mismatch",
-                reason="client_size_mismatch",
-            )
         if self.camera is None:
             self.camera = self.camera_factory(self.settings)
         camera = self.camera
@@ -89,18 +116,11 @@ class DXGIFrames:
         region = (left - x0, top - y0, right - x0, bottom - y0)
         image: DesktopImage | None = camera.grab(region)
         received = time.perf_counter_ns()
-        after = self.target()
-        if target != after:
-            self.previous = after
-            return CaptureEvent(
-                received, boundary="window_changed_during_capture", reason="capture_discarded"
-            )
-        boundary = (
-            "window_changed" if self.previous is not None and self.previous != target else None
-        )
-        self.previous = target
+        event = self.guard.end(target, received)
+        if event.reason is not None:
+            return event
         if image is None:
-            return CaptureEvent(received, boundary=boundary, reason="no_new_frame")
+            return replace(event, reason="no_new_frame")
         if image.size != size:
             raise OSError("DXGI returned pixels that differ from the physical client crop")
         if image.protected:
@@ -117,8 +137,8 @@ class DXGIFrames:
             "source_texture_size": list(image.source_texture_size),
             "color_space": "DXGI_FORMAT_B8G8R8A8_UNORM; HDR state unverified",
         }
-        return CaptureEvent(
-            received,
+        return replace(
+            event,
             frame=RawCapture(
                 image.present_ticks,
                 camera.mapping,
@@ -128,7 +148,6 @@ class DXGIFrames:
                 time_quality="dxgi_qpc",
                 accumulated_frames=image.accumulated_frames,
             ),
-            boundary=boundary,
         )
 
     def close(self) -> None:

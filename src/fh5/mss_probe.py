@@ -5,12 +5,12 @@ from __future__ import annotations
 import importlib
 import time
 from collections.abc import Callable
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from pathlib import Path
 from typing import Any
 
 from fh5.capture import CaptureEvent, QpcMapping, RawCapture
-from fh5.dxgi_capture import ClientArea, DXGISettings
+from fh5.dxgi_capture import ClientArea, ClientCaptureGuard, DXGISettings
 from fh5.live_vision import ColorSource
 
 
@@ -24,44 +24,27 @@ class MSSFrames:
         target: Callable[[], ClientArea | None],
         grabber_factory: Callable[[], Any],
     ) -> None:
-        self.settings, self.target, self.factory = settings, target, grabber_factory
+        self.settings, self.factory = settings, grabber_factory
+        self.guard = ClientCaptureGuard(settings, target)
         self.backend: Any = None
-        self.previous: ClientArea | None = None
 
     def capture(self) -> CaptureEvent:
-        target = self.target()
-        if target is None:
-            boundary = "focus_lost" if self.previous is not None else None
-            self.previous = None
-            return CaptureEvent(
-                time.perf_counter_ns(), boundary=boundary, reason="target_unavailable"
-            )
+        target = self.guard.begin()
+        if isinstance(target, CaptureEvent):
+            return target
         left, top, right, bottom = target.rect
         size = (right - left, bottom - top)
-        if size != self.settings.expected_client_size:
-            self.previous = None
-            return CaptureEvent(
-                time.perf_counter_ns(),
-                boundary="client_size_mismatch",
-                reason="client_size_mismatch",
-            )
         if self.backend is None:
             self.backend = self.factory()
         started = time.perf_counter_ns()
         shot = self.backend.grab({"left": left, "top": top, "width": size[0], "height": size[1]})
         pixels = bytes(shot.bgra)
         ended = time.perf_counter_ns()
-        if self.target() != target:
-            self.previous = None
-            return CaptureEvent(
-                ended, boundary="window_changed_during_capture", reason="capture_discarded"
-            )
+        event = self.guard.end(target, ended)
+        if event.reason is not None:
+            return event
         if tuple(shot.size) != size:
             raise OSError("MSS returned pixels that differ from physical client crop")
-        boundary = (
-            "window_changed" if self.previous is not None and self.previous != target else None
-        )
-        self.previous = target
         layout = {
             **asdict(target),
             "backend": "mss",
@@ -70,9 +53,8 @@ class MSSFrames:
             "color_space": "MSS BGRA; HDR state unverified",
             "clock": "monotonic capture-start proxy; unknown presentation uncertainty",
         }
-        return CaptureEvent(
-            ended,
-            boundary=boundary,
+        return replace(
+            event,
             frame=RawCapture(
                 started,
                 QpcMapping(0, 0, 1_000_000_000, 0),
@@ -130,26 +112,13 @@ class LegacyJPEGFrames:
         source_factory: Callable[[], ColorSource],
     ) -> None:
         self.settings, self.directory = settings, directory
-        self.target, self.factory = target, source_factory
+        self.guard, self.factory = ClientCaptureGuard(settings, target), source_factory
         self.source: ColorSource | None = None
-        self.previous: ClientArea | None = None
 
     def capture(self) -> CaptureEvent:
-        target = self.target()
-        if target is None:
-            boundary = "focus_lost" if self.previous is not None else None
-            self.previous = None
-            return CaptureEvent(
-                time.perf_counter_ns(), boundary=boundary, reason="target_unavailable"
-            )
-        x0, y0, x1, y1 = target.rect
-        if (x1 - x0, y1 - y0) != self.settings.expected_client_size:
-            self.previous = None
-            return CaptureEvent(
-                time.perf_counter_ns(),
-                boundary="client_size_mismatch",
-                reason="client_size_mismatch",
-            )
+        target = self.guard.begin()
+        if isinstance(target, CaptureEvent):
+            return target
         if self.source is None:
             self.source = self.factory()
         frame = self.source.capture()
@@ -165,20 +134,13 @@ class LegacyJPEGFrames:
             pixels = encoded.convert("RGBA").tobytes("raw", "BGRA")
             size = encoded.size
         ended = time.perf_counter_ns()
-        if self.target() != target:
-            self.previous = None
-            return CaptureEvent(
-                ended, boundary="window_changed_during_capture", reason="capture_discarded"
-            )
+        event = self.guard.end(target, ended)
+        if event.reason is not None:
+            return event
         if frame.client_size != self.settings.expected_client_size:
             raise OSError("Legacy MSS source differs from physical comparison crop")
-        boundary = (
-            "window_changed" if self.previous is not None and self.previous != target else None
-        )
-        self.previous = target
-        return CaptureEvent(
-            ended,
-            boundary=boundary,
+        return replace(
+            event,
             frame=RawCapture(
                 frame.capture_start_ns,
                 QpcMapping(0, 0, 1_000_000_000, 0),
