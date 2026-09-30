@@ -334,3 +334,24 @@ def test_temporal_cli_exports_a_loadable_model_and_reports_without_game_input(tm
     )
     replayed = json.loads(capsys.readouterr().out)
     assert replayed["decisions"] == 12
+
+
+def test_temporal_replay_detects_prediction_drift_from_frozen_evidence(tmp_path):
+    from fh5.temporal_bc import TemporalBCReplay, TemporalBCTrain
+
+    config, snapshot = temporal_fixture(tmp_path)
+    run_experiment(TemporalBCTrain(config, tmp_path / "model"))
+    evidence = tmp_path / "model/report.json"
+    data = json.loads(evidence.read_text())
+    data["decisions"][0]["prediction"][0] += 0.01
+    evidence.write_text(json.dumps(data))
+    manifest = tmp_path / "model/model.json"
+    value = json.loads(manifest.read_text())
+    value["verification"] = {
+        "path": "report.json",
+        "sha256": hashlib.sha256(evidence.read_bytes()).hexdigest(),
+        "tolerance": 1e-6,
+    }
+    manifest.write_text(json.dumps(value))
+    with pytest.raises(ValueError, match="prediction drift"):
+        run_experiment(TemporalBCReplay(tmp_path / "model", snapshot, tmp_path / "drift.html"))

@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from fh5.bc import BCReplay, BCTrain
 from fh5.bc_network import make_actor
+from fh5.learning_runtime import preserve_torch_state
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -350,28 +351,8 @@ def _checked_config(value: Any) -> dict[str, Any]:
 
 def run_offline(request: BCTrain | BCReplay) -> RunResult:
     torch = importlib.import_module("torch")
-    prior = (
-        torch.get_num_threads(),
-        torch.are_deterministic_algorithms_enabled(),
-        torch.is_deterministic_algorithms_warn_only_enabled(),
-        torch.backends.cudnn.benchmark,
-        torch.get_rng_state(),
-        torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None,
-        os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
-    )
-    try:
+    with preserve_torch_state(torch):
         return _run_offline(request, torch)
-    finally:
-        torch.set_num_threads(prior[0])
-        torch.use_deterministic_algorithms(prior[1], warn_only=prior[2])
-        torch.backends.cudnn.benchmark = prior[3]
-        torch.set_rng_state(prior[4])
-        if prior[5] is not None:
-            torch.cuda.set_rng_state_all(prior[5])
-        if prior[6] is None:
-            os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
-        else:
-            os.environ["CUBLAS_WORKSPACE_CONFIG"] = prior[6]
 
 
 def _run_offline(request: BCTrain | BCReplay, torch: Any) -> RunResult:

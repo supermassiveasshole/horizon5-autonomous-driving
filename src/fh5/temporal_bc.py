@@ -15,7 +15,14 @@ from typing import TYPE_CHECKING, Any
 
 from fh5.bc_learning import VIEWS, _checked_config, _error, _write
 from fh5.bc_network import make_actor
-from fh5.numeric_images import NumericDecision, NumericFrame, PixelContract, validate_decision
+from fh5.learning_runtime import preserve_torch_state
+from fh5.numeric_images import (
+    NumericDecision,
+    NumericFrame,
+    PixelContract,
+    asset,
+    validate_decision,
+)
 from fh5.numeric_recording import _result, read_numeric_frame
 from fh5.numeric_report import preview_png
 from fh5.temporal_features import (
@@ -179,32 +186,12 @@ def _snapshot(path: Path) -> tuple[dict[str, Any], PixelContract, list[dict[str,
 
 def run_temporal_bc(request: TemporalBCTrain | TemporalBCReplay) -> RunResult:
     torch = importlib.import_module("torch")
-    prior = (
-        torch.get_num_threads(),
-        torch.are_deterministic_algorithms_enabled(),
-        torch.is_deterministic_algorithms_warn_only_enabled(),
-        torch.backends.cudnn.benchmark,
-        torch.get_rng_state(),
-        torch.cuda.get_rng_state_all() if torch.cuda.is_initialized() else None,
-        os.environ.get("CUBLAS_WORKSPACE_CONFIG"),
-    )
-    try:
+    with preserve_torch_state(torch):
         torch.set_num_threads(2)
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.benchmark = False
         return _run(request, torch)
-    finally:
-        torch.set_num_threads(prior[0])
-        torch.use_deterministic_algorithms(prior[1], warn_only=prior[2])
-        torch.backends.cudnn.benchmark = prior[3]
-        torch.set_rng_state(prior[4])
-        if prior[5] is not None:
-            torch.cuda.set_rng_state_all(prior[5])
-        if prior[6] is None:
-            os.environ.pop("CUBLAS_WORKSPACE_CONFIG", None)
-        else:
-            os.environ["CUBLAS_WORKSPACE_CONFIG"] = prior[6]
 
 
 def _run(request: TemporalBCTrain | TemporalBCReplay, torch: Any) -> RunResult:
@@ -420,8 +407,48 @@ def _run(request: TemporalBCTrain | TemporalBCReplay, torch: Any) -> RunResult:
         )
     actor.clear_input_cache()
     if training:
+        if max_error > 1e-6:
+            raise ValueError("Temporal frozen reload prediction drift exceeds tolerance")
         manifest["training"]["reload_max_abs_error"] = max_error
         _write(output / "model.json", manifest)
+        verification = {
+            "status": "training_reload",
+            "compared_decisions": len(records),
+            "max_abs_error": max_error,
+            "tolerance": 1e-6,
+        }
+    else:
+        evidence = manifest.get("verification")
+        if not evidence or evidence["tolerance"] != 1e-6:
+            raise ValueError("Temporal model lacks frozen prediction verification evidence")
+        prior_report, prior_digest = _read(asset(output, evidence["path"]))
+        if prior_digest != evidence["sha256"] or len(prior_report["decisions"]) != len(records):
+            raise ValueError("Frozen temporal prediction evidence changed")
+        replay_error = 0.0
+        for previous, current in zip(prior_report["decisions"], records):
+            for field in (
+                "decision_id",
+                "decision_ns",
+                "epoch",
+                "frames",
+                "actor",
+                "features",
+                "timing",
+            ):
+                if previous[field] != current[field]:
+                    raise ValueError("Temporal replay input drift: " + field)
+            replay_error = max(
+                replay_error,
+                max(abs(a - b) for a, b in zip(previous["prediction"], current["prediction"])),
+            )
+        if replay_error > evidence["tolerance"]:
+            raise ValueError("Temporal replay prediction drift exceeds tolerance")
+        verification = {
+            "status": "verified",
+            "compared_decisions": len(records),
+            "max_abs_error": replay_error,
+            "tolerance": evidence["tolerance"],
+        }
     metrics = _metrics(records)
     summary = {
         "version": 1,
@@ -434,8 +461,17 @@ def _run(request: TemporalBCTrain | TemporalBCReplay, torch: Any) -> RunResult:
         "dataset_sha256": digest,
         "groups": data["groups"],
         "closed_loop_validated": False,
+        "verification": verification,
     }
-    return _result(report, summary, section="temporal_bc", root=output)
+    result = _result(report, summary, section="temporal_bc", root=output)
+    if training:
+        manifest["verification"] = {
+            "path": "report.json",
+            "sha256": hashlib.sha256(report.with_suffix(".json").read_bytes()).hexdigest(),
+            "tolerance": 1e-6,
+        }
+        _write(output / "model.json", manifest)
+    return result
 
 
 def _metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
