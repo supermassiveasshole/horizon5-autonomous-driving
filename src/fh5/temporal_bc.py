@@ -16,7 +16,7 @@ from typing import TYPE_CHECKING, Any
 from fh5.bc_learning import VIEWS, _checked_config, _error, _write
 from fh5.bc_network import make_actor
 from fh5.collection_store import read_bounded
-from fh5.learning_runtime import preserve_torch_state
+from fh5.learning_runtime import TrainingBudget, move_learning_state, preserve_torch_state
 from fh5.numeric_images import (
     NumericDecision,
     NumericFrame,
@@ -61,8 +61,10 @@ def _read(path: Path) -> tuple[dict[str, Any], str]:
     return value, hashlib.sha256(raw).hexdigest()
 
 
-def _configuration(path: Path) -> dict[str, Any]:
-    value, _ = _read(path)
+def _configuration(path: Path, *, expected_sha256: str | None = None) -> dict[str, Any]:
+    value, digest = _read(path)
+    if expected_sha256 is not None and digest != expected_sha256:
+        raise ValueError("Frozen training configuration changed")
     if set(value) != {
         "version",
         "dataset",
@@ -210,17 +212,23 @@ def _snapshot(
     return data, pixels, rows
 
 
-def run_temporal_bc(request: TemporalBCTrain | TemporalBCReplay) -> RunResult:
+def run_temporal_bc(
+    request: TemporalBCTrain | TemporalBCReplay,
+    budget: TrainingBudget | None = None,
+    cpu_threads: int = 2,
+) -> RunResult:
     torch = importlib.import_module("torch")
     with preserve_torch_state(torch):
-        torch.set_num_threads(2)
+        torch.set_num_threads(cpu_threads)
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.benchmark = False
-        return _run(request, torch)
+        return _run(request, torch, budget)
 
 
-def _run(request: TemporalBCTrain | TemporalBCReplay, torch: Any) -> RunResult:
+def _run(
+    request: TemporalBCTrain | TemporalBCReplay, torch: Any, budget: TrainingBudget | None = None
+) -> RunResult:
     from fh5.numeric_actor import FrozenNumericActor
 
     if isinstance(request, TemporalBCTrain):
@@ -246,6 +254,8 @@ def _run(request: TemporalBCTrain | TemporalBCReplay, torch: Any) -> RunResult:
     if digest != config["dataset_sha256"]:
         raise ValueError("Frozen numerical dataset hash mismatch")
     data, pixels, rows = _snapshot(dataset, expected_sha256=digest)
+    if budget:
+        budget.checkpoint("snapshot_validated", 0)
     if device not in ("cpu", "cuda") or (device == "cuda" and not torch.cuda.is_available()):
         raise ValueError("Requested temporal BC device unavailable")
     timing = time_contract(config["time_mode"], pixels)
@@ -262,9 +272,22 @@ def _run(request: TemporalBCTrain | TemporalBCReplay, torch: Any) -> RunResult:
         "action": data["action_contract"],
     }
     training = isinstance(request, TemporalBCTrain)
+    models: list[Any] = []
+    optimizer = None
+
+    def checkpoint(phase: str, completed: int) -> None:
+        if budget:
+            budget.checkpoint(
+                phase,
+                completed,
+                lambda: move_learning_state(torch, models, optimizer, "cpu"),
+                lambda: move_learning_state(torch, models, optimizer, device),
+            )
+
     if training:
         torch.manual_seed(config["seed"])
         model = make_actor(contract).to(device)
+        models.append(model)
         training_rows = [r for r in rows if r["split"] == "train" and r["entry"]["bc_eligible"]]
         if not training_rows or not any(
             r["split"] != "train" and r["entry"]["bc_eligible"] for r in rows
@@ -287,7 +310,8 @@ def _run(request: TemporalBCTrain | TemporalBCReplay, torch: Any) -> RunResult:
 
         optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
         started, losses, gradient = time.monotonic(), [], 0.0
-        for _ in range(config["steps"]):
+        for step in range(config["steps"]):
+            checkpoint("update", step)
             indices = torch.randperm(len(training_rows) // 2)[: config["batch_size"] // 2].tolist()
             batch = [training_rows[i * 2 + v] for i in indices for v in (0, 1)]
             rgb = (
@@ -320,6 +344,8 @@ def _run(request: TemporalBCTrain | TemporalBCReplay, torch: Any) -> RunResult:
             )
             optimizer.step()
             losses.append(float(loss.item()))
+            del rgb, features, target, loss
+        checkpoint("freeze", config["steps"])
         stats = {
             "steps_completed": config["steps"],
             "losses": losses,
@@ -359,12 +385,14 @@ def _run(request: TemporalBCTrain | TemporalBCReplay, torch: Any) -> RunResult:
         manifest["weights_sha256"] = hashlib.sha256((output / "actor.pt").read_bytes()).hexdigest()
         _write(output / "model.json", manifest)
     actor = FrozenNumericActor(output, pixels, device)
+    models.append(actor.model)
     if actor.original_contract != contract:
         raise ValueError("Snapshot model contract mismatch")
     records, max_error = [], 0.0
     (output / "previews").mkdir(exist_ok=True)
     preview_paths: dict[int, str] = {}
     for row in rows:
+        checkpoint("prediction", config["steps"] if training else 0)
         decision = row["decision"]
         features_list = actor.input_features(decision.actor, decision.frames)
         prediction = actor.predict(decision.actor, decision.frames)

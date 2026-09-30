@@ -3,9 +3,34 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from typing import Any
+from typing import Any, Protocol
+
+
+class TrainingBudget(Protocol):
+    def checkpoint(
+        self,
+        phase: str,
+        completed: int,
+        suspend: Callable[[], None] | None = None,
+        resume: Callable[[], None] | None = None,
+    ) -> None: ...
+
+
+def move_learning_state(torch: Any, models: list[Any], optimizer: Any, device: str) -> None:
+    """Move live parameter/optimizer storage at a completed work-unit boundary."""
+    for model in models:
+        model.zero_grad(set_to_none=True)
+        model.to(device)
+    if optimizer is not None:
+        for state in optimizer.state.values():
+            for key, value in state.items():
+                if torch.is_tensor(value):
+                    # Adam's scalar step stays on CPU for its non-capturable path.
+                    state[key] = value.to("cpu" if key == "step" else device)
+    if device == "cpu" and torch.cuda.is_initialized():
+        torch.cuda.empty_cache()
 
 
 @contextmanager

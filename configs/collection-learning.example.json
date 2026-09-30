@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "training_config": "../runs/numeric-candidate/train.json",
+  "training_config_sha256": "REPLACE_WITH_TRAINING_CONFIG_SHA256",
+  "collector_bundle": "../runs/frozen-collector",
+  "collector_manifest_sha256": "REPLACE_WITH_FROZEN_JSON_SHA256",
+  "budget": {
+    "cpu_threads": 2,
+    "poll_interval_s": 0.25,
+    "max_wait_s": 300,
+    "max_total_s": 3600,
+    "max_unit_s": 10,
+    "max_private_bytes": 8589934592,
+    "min_free_disk_bytes": 10737418240,
+    "max_status_age_ms": 3000,
+    "max_image_age_ms": 250,
+    "max_pending_bytes": 16777216,
+    "max_gpu_memory_mib": 20000,
+    "max_gpu_utilization_percent": 80
+  }
+}

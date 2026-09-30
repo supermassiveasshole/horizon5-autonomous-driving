@@ -44,6 +44,7 @@ from fh5.demonstrations import (
     replay_demonstration,
 )
 from fh5.events import EventEnvironment, EventRun, read_event, run_event
+from fh5.learning_schedule import LearningResources, ScheduledBCTrain, run_scheduled_bc
 from fh5.numeric_images import (
     NumericActor,
     NumericDecision,
@@ -236,6 +237,7 @@ def run_experiment(
     | CollectionDatasetReview
     | CollectionBCPrepare
     | CollectionBCAssess
+    | ScheduledBCTrain
     | TemporalBCPrepare
     | TemporalBCTrain
     | TemporalBCReplay
@@ -280,6 +282,7 @@ def run_experiment(
     numeric_actor_factory: Callable[[], NumericActor] | None = None,
     realtime_journal_sink: Callable[[bytes], None] | None = None,
     collection_environment: CollectionEnvironment | None = None,
+    learning_resources: LearningResources | None = None,
     collection_write: WriteFile | None = None,
     collection_installer: CollectionInstaller | None = None,
 ) -> RunResult:
@@ -324,6 +327,8 @@ def run_experiment(
         return prepare_collection_bc(request)
     if isinstance(request, CollectionBCAssess):
         return assess_collection_bc(request)
+    if isinstance(request, ScheduledBCTrain):
+        return run_scheduled_bc(request, learning_resources)
     if isinstance(request, (CollectionDataset, CollectionDatasetReview)):
         return run_collection_dataset(request)
     if isinstance(request, (TemporalBCTrain, TemporalBCReplay)):

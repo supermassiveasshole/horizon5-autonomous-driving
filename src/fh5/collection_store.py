@@ -236,6 +236,7 @@ class CollectionArchive:
         with self.lock:
             return {
                 **deepcopy(self.progress),
+                "session_sha256": self.binding,
                 "seen_rows": self.offered,
                 "written_rows": self.written,
                 "dropped_rows": self.dropped,

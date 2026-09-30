@@ -84,6 +84,8 @@ def test_sealed_blocks_preserve_numeric_frames_raw_packets_and_human_input(tmp_p
     assert collected["stop_reason"] == "source_end"
     assert collected["sealed_blocks"] == 5
     assert collected["seen_rows"] == collected["written_rows"] == 13
+    assert collected["last_poll_ns"] == 1_850_000_000
+    assert collected["latest_image_source_ns"] == 1_850_000_000
     review = run_experiment(CollectionReview(req.output_dir, tmp_path / "review.html"))
     r = review.summary["collection"]
     assert r["complete"] and r["verified_blocks"] == 5 and r["errors"] == []

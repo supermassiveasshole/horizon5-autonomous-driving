@@ -80,6 +80,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     assess.add_argument("--config", type=Path, required=True)
     assess.add_argument("--output", type=Path, required=True)
+    scheduled = commands.add_parser(
+        "collection-bc-train", help="Train a frozen snapshot within collection resource budgets"
+    )
+    scheduled.add_argument("--config", type=Path, required=True)
+    scheduled.add_argument("--output", type=Path, required=True)
     for name in ("collection-status", "collection-stop", "collection-review"):
         collection = commands.add_parser(
             name, help="Inspect, stop or verify a passive collection session"
@@ -384,6 +389,15 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
+        if args.mode == "collection-bc-train":
+            from fh5.learning_schedule import ScheduledBCTrain
+
+            scheduled_result = run_experiment(ScheduledBCTrain(args.config, args.output))
+            summary = scheduled_result.summary["learning_schedule"]
+            print(
+                json.dumps({k: v for k, v in summary.items() if k != "events"}, ensure_ascii=False)
+            )
+            return 0 if summary["state"] == "completed" else 2
         if args.mode.startswith("collection-"):
             from fh5.collection import CollectionControl, CollectionReview
 

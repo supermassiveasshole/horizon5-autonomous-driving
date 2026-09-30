@@ -203,6 +203,8 @@ class CollectionState:
 
     def progress(self) -> dict[str, Any]:
         return {
+            "last_poll_ns": self.previous_ns,
+            "latest_image_source_ns": self.last_source,
             "coverage_polls": dict(self.coverage),
             "counts": dict(self.counts),
             "active_driving_seconds": self.active_ns / 1e9,

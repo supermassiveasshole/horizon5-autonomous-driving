@@ -93,8 +93,9 @@ class _Memory(ctypes.Structure):
 class WindowsResources:
     """Read current-process counters and optional NVIDIA whole-device samples."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, include_gpu: bool = True) -> None:
         self.previous: tuple[int, int] | None = None
+        self.include_gpu = include_gpu
         self.nvidia = shutil.which("nvidia-smi")
 
     def __call__(self) -> dict[str, Any]:
@@ -125,6 +126,9 @@ class WindowsResources:
             (cpu - self.previous[1]) / (now - self.previous[0]) if self.previous else None
         )
         self.previous = (now, cpu)
+        if not self.include_gpu:
+            row["gpu_status"] = "not_requested"
+            return row
         if self.nvidia is None:
             row["gpu_status"] = "nvidia-smi unavailable"
             return row
