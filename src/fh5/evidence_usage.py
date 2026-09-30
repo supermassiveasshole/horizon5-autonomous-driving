@@ -72,9 +72,11 @@ def _registry(path: Path, *, create: bool = False) -> Iterator[sqlite3.Connectio
             )
             db.execute("CREATE TABLE legacy_reviews (batch TEXT PRIMARY KEY)")
             if not had_slots:
-                # Uses identify prior reviews, but cannot recover their original slot membership.
+                # Empty/unreadable old reviews may have no uses at all. Reservations
+                # cannot distinguish those reviews from batches never started.
                 db.execute(
-                    "INSERT INTO legacy_reviews SELECT DISTINCT batch FROM uses WHERE batch<>''"
+                    "INSERT INTO legacy_reviews SELECT batch FROM reservations "
+                    "UNION SELECT batch FROM uses WHERE batch<>''"
                 )
             db.execute("PRAGMA user_version=2")
         if db.execute("SELECT count(*) FROM uses").fetchone()[0] > 20_000:

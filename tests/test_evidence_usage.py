@@ -363,3 +363,30 @@ def test_legacy_registry_preserves_history_and_marks_missing_old_slot_bindings_u
         c["prior_role"] for c in reviewed.summary["evaluation"]["independence"]["conflicts"]
     }
     run_experiment(EvaluationPrepare(config, tmp_path / "next-batch", registry))
+
+
+def test_legacy_empty_attempt_cannot_be_silently_replaced_after_migration(tmp_path, policy):
+    import sqlite3
+
+    _, config = prepare(tmp_path, policy, purpose="final")
+    registry = tmp_path / "usage.sqlite"
+    batch = tmp_path / "reserved"
+    run_experiment(EvaluationPrepare(config, batch, registry))
+    empty = record(tmp_path, "empty", [])
+    path = ledger(tmp_path, [entry("run-0", empty)])
+    data = json.loads(path.read_bytes())
+    data["batch_sha256"] = sha(batch / "batch.json")
+    path.write_text(json.dumps(data))
+    original = run_experiment(EvaluationReview(batch, path, tmp_path / "original", registry))
+    assert original.summary["evaluation"]["metrics"]["outcomes"]["interface_error"] == 1
+    with sqlite3.connect(registry) as db:
+        db.execute("DROP TABLE slots")
+        db.execute("DROP TABLE legacy_reviews")
+        db.execute("PRAGMA user_version=1")
+    replacement = record(tmp_path, "replacement", [(0, 0.2), (1, 0.2)])
+    data["entries"] = [entry("run-0", replacement)]
+    path.write_text(json.dumps(data))
+    result = run_experiment(EvaluationReview(batch, path, tmp_path / "migrated", registry))
+    usage = result.summary["evaluation"]["independence"]
+    assert usage["status"] == "unknown"
+    assert "legacy_slot_history_unavailable" in usage["unknown_reasons"]
