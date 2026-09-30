@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>数值决策与动作有效期</title>
+<style>body{font:16px system-ui;background:#101820;color:#edf2f4;max-width:1280px;margin:2rem auto;padding:0 1rem}button,input{font:inherit}button{padding:.5rem}input{width:100%}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#1c2934;padding:1rem}#images{display:flex;gap:1rem;min-height:160px}#images img{width:30%;object-fit:contain}small{color:#b2c4cf}</style>
+<h1>数值决策与动作有效期</h1>
+<p>此报告只表示合成执行器或只读影子结果。未向游戏发送控制，不能作为车辆响应或驾驶能力验收。</p>
+<pre id="summary"></pre>
+<button id="play">播放决策</button> <span id="position"></span>
+<input id="seek" type="range" min="0" value="0" aria-label="选择决策">
+<p><small>每项同时显示原始帧时间、预处理完成时间、帧间 Δt、图像年龄、推理截止时间、动作租期和记录完整性。无存档时明确留空；不会补图。</small></p>
+<div id="images"></div><p id="image-note"></p><pre id="detail"></pre>
+<script>
+const data=/*REALTIME_DATA*/null;
+const byId=id=>document.getElementById(id), rows=data.decisions;
+let position=0, playing=false, timer=null, generation=0;
+byId('summary').textContent=JSON.stringify({evidence:data.evidence_kind,stop:data.stop_reason,metrics:data.metrics,journal:data.journal,evidence_status:data.evidence,resources_released:data.resources_released},null,2);
+byId('seek').max=Math.max(0,rows.length-1);
+async function render(){
+  const d=rows[position]; if(!d){byId('detail').textContent='没有可用决策';return;}
+  const token=++generation; byId('seek').value=position;
+  byId('position').textContent=`${position+1}/${rows.length} · ${d.decision_id} · ${d.status}`;
+  const commands=data.commands.filter(c=>c.decision_id===d.decision_id || (c.issued_ns>=d.decision_ns && c.issued_ns<(rows[position+1]?.decision_ns??Infinity)));
+  byId('detail').textContent=JSON.stringify({decision:d,commands},null,2);
+  const urls=d.preview_urls||[];
+  const images=await Promise.all(urls.map(url=>new Promise(resolve=>{
+    if(!url){resolve(null);return;}const img=new Image();img.alt='该决策选择的历史图像';img.onload=()=>resolve(img);img.onerror=()=>resolve(null);img.src=url;
+  })));
+  if(token!==generation)return;
+  byId('images').replaceChildren(...images.filter(Boolean));
+  byId('image-note').textContent=urls.length?`${images.filter(Boolean).length}/${urls.length} 张存档预览`:'此项没有图像存档（跳过、合成时序回放或旁路缺口）';
+}
+function stop(){playing=false;clearTimeout(timer);byId('play').textContent='播放决策';}
+function next(){if(!playing)return;if(position>=rows.length-1){stop();return;}const wait=Math.max(20,Math.min(1000,(rows[position+1].decision_ns-rows[position].decision_ns)/1e6));timer=setTimeout(()=>{position++;render();next();},wait);}
+byId('seek').oninput=e=>{stop();position=Number(e.target.value);render();};
+byId('play').onclick=()=>{if(playing){stop();return;}if(position>=rows.length-1)position=0;playing=true;byId('play').textContent='暂停';render();next();};
+render();
+</script></html>

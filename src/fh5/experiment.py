@@ -43,6 +43,9 @@ from fh5.perception import (
     run_perception,
 )
 from fh5.policy import PolicyActor, PolicyDrive, PolicyEnvironment, read_policy, run_policy
+from fh5.realtime import RealtimeEnvironment, RealtimeReplay, RealtimeRun
+from fh5.realtime_replay import replay_realtime
+from fh5.realtime_runtime import run_realtime
 from fh5.recovery import RecoveryReplay, replay_recovery
 from fh5.report import write_report
 from fh5.reward_audit import RewardAudit, audit_rewards
@@ -199,7 +202,9 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 
 def run_experiment(
-    request: CaptureReplay
+    request: RealtimeReplay
+    | RealtimeRun
+    | CaptureReplay
     | CaptureRun
     | CaptureTraceReview
     | TemporalBCPrepare
@@ -242,8 +247,21 @@ def run_experiment(
     capture_source_factory: Callable[[], CaptureSource] | None = None,
     capture_activity: Callable[[], dict[str, Any] | None] | None = None,
     capture_resources: Callable[[], dict[str, Any]] | None = None,
+    realtime_environment: RealtimeEnvironment | None = None,
+    numeric_actor_factory: Callable[[], NumericActor] | None = None,
+    realtime_journal_sink: Callable[[bytes], None] | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, RealtimeReplay):
+        return replay_realtime(request)
+    if isinstance(request, RealtimeRun):
+        if realtime_environment is None or numeric_actor_factory is None:
+            raise ValueError(
+                "Real-time experiment requires an environment and frozen actor factory"
+            )
+        return run_realtime(
+            request, realtime_environment, numeric_actor_factory, realtime_journal_sink
+        )
     if isinstance(request, CaptureReplay):
         return replay_capture(request)
     if isinstance(request, CaptureTraceReview):

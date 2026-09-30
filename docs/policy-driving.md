@@ -1,5 +1,7 @@
 # 冻结 BC 短段驾驶（T08 / #9）
 
+以下保留旧 `PolicyDrive` / v1 的行为和历史验收。新[容错数值决策切片（#36）](realtime-decisions.md)以独立监督、有期限跳过及旁路降级替换旧的缺图/写盘故障立即终止机制；目前仅模拟执行器验证，尚未替换本页 `--live` 实现，也不追认旧实机记录。
+
 入口为 `run_experiment(PolicyDrive(config_file, output_dir), policy_environment=..., policy_actor=...)`。
 实机只接受经过哈希、训练条件、观测/动作版本和权重内部元数据校验的 `FrozenActor`；合成测试可注入外部环境和测试 actor。本切片不更新权重、不计算 RL 奖励、不自动重开。
 
