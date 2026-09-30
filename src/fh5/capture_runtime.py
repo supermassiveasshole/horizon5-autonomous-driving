@@ -253,7 +253,7 @@ def run_capture(
         stop_reason = "interrupted"
     except Exception as error:
         stop_reason = "observation_error"
-        execution_error = str(error)
+        execution_error = f"{type(error).__name__}: {error}"
     finally:
         observation_ended = time.perf_counter_ns()
         stats = pipeline.close()
