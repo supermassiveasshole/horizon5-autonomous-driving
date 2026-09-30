@@ -17,6 +17,10 @@ from fh5.bc import BCReplay, BCTrain, run_bc
 from fh5.capture import CaptureReplay, CaptureRun, replay_capture
 from fh5.capture_runtime import CaptureSource, run_capture
 from fh5.capture_trace import CaptureTraceReview, review_capture_trace
+from fh5.collection import CollectionControl, CollectionEnvironment, CollectionReview, CollectionRun
+from fh5.collection_review import review_collection
+from fh5.collection_runtime import collect, control_collection
+from fh5.collection_store import WriteFile
 from fh5.control import Control, ControlEnvironment, read_control, run_control
 from fh5.demonstration_dataset import DemonstrationDataset, export_demonstrations
 from fh5.demonstrations import (
@@ -206,6 +210,9 @@ def run_experiment(
     request: RealtimeReplay
     | RealtimeRun
     | RealtimeNumericReplay
+    | CollectionRun
+    | CollectionReview
+    | CollectionControl
     | CaptureReplay
     | CaptureRun
     | CaptureTraceReview
@@ -252,8 +259,18 @@ def run_experiment(
     realtime_environment: RealtimeEnvironment | None = None,
     numeric_actor_factory: Callable[[], NumericActor] | None = None,
     realtime_journal_sink: Callable[[bytes], None] | None = None,
+    collection_environment: CollectionEnvironment | None = None,
+    collection_write: WriteFile | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, CollectionControl):
+        return control_collection(request)
+    if isinstance(request, CollectionReview):
+        return review_collection(request)
+    if isinstance(request, CollectionRun):
+        if collection_environment is None:
+            raise ValueError("Collection requires an explicit passive input environment")
+        return collect(request, collection_environment, collection_write)
     if isinstance(request, RealtimeReplay):
         return replay_realtime(request)
     if isinstance(request, RealtimeNumericReplay):

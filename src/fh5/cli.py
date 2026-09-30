@@ -45,6 +45,13 @@ def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Record and replay FH5 Data Out experiments")
     commands = parser.add_subparsers(dest="mode", required=True)
+    for name in ("collection-status", "collection-stop", "collection-review"):
+        collection = commands.add_parser(
+            name, help="Inspect, stop or verify a passive collection session"
+        )
+        collection.add_argument("recording", type=Path)
+        if name == "collection-review":
+            collection.add_argument("--report", type=Path, required=True)
     realtime_replay = commands.add_parser(
         "realtime-replay", help="Independently replay recorded numerical predictions; no devices"
     )
@@ -272,6 +279,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     perception_replay.add_argument("--labels", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.mode.startswith("collection-"):
+            from fh5.collection import CollectionControl, CollectionReview
+
+            collection_request = (
+                CollectionReview(args.recording, args.report)
+                if args.mode == "collection-review"
+                else CollectionControl(args.recording, stop=args.mode == "collection-stop")
+            )
+            result = run_experiment(collection_request)
+            summary = result.summary["collection"]
+            print(json.dumps(summary, ensure_ascii=False))
+            return 4 if summary.get("errors") else 0
         if args.mode == "realtime-replay":
             from fh5.realtime_cli import replay_command
 
