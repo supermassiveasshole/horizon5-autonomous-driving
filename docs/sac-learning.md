@@ -1,6 +1,6 @@
-# SAC 转移与双 Q 预热
+# SAC 数值转移、预热与离线策略更新
 
-对应 [#11](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/11) 的第一段软件实现。当前提供数值转移构造、完整冻结 BC 的双 Q 预热及保存重载；不是完整 SAC 策略更新，也不代表已改善驾驶。三个入口都不连接游戏或控制设备。
+对应 [#11](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/11) 的离线软件实现。当前提供数值转移构造、完整冻结 BC 的双 Q 预热，以及实际更新 actor、双 Q、温度和共享编码器的有界 SAC 训练。输入仍为明确声明的合成经验，尚未形成自主游戏采样循环或证明驾驶改善。所有入口均不连接游戏或控制设备。
 
 ## 输入与边界
 
@@ -34,10 +34,26 @@
 uv run --locked fh5 sac-prepare --recording runs/synthetic/recording --trace runs/synthetic/trace.json --task runs/synthetic/task.json --reward runs/synthetic/reward.json --evidence runs/synthetic/evidence.json --output runs/sac-replay
 uv run --locked fh5 sac-warmup --model runs/temporal-bc --replay runs/sac-replay/replay.json --replay-sha256 <prepare返回的摘要> --output runs/critic-first --steps 100
 uv run --locked fh5 sac-critic-replay --checkpoint runs/critic-first --replay runs/sac-replay/replay.json --report runs/critic-reloaded.html
+uv run --locked fh5 sac-train --config configs/sac-learning.example.json --output runs/sac-candidate
+uv run --locked fh5 sac-policy-replay --checkpoint runs/sac-candidate --replay runs/sac-replay/replay.json --report runs/sac-policy.html
 ```
 
 `sac-prepare` 无可用转移时返回 4；输入错误返回 2；成功返回 0。报告展示资格、排除原因、Q 更新量与 BC 不变检查。loss 或 Q 变化不等于驾驶进步。
 
+## 策略、温度与共享编码器更新
+
+`SACTrain` 从已保存的 BC/双 Q 预热检查点出发，采用固定经验和有限 CPU 更新预算。`steps=0` 可单独核对交接，不执行优化。新策略版本 `conditional-temporal-sac-v1` 保留原数值 Δt 输入，并向策略提供上一实际命令、实际间隔和可执行区间；任务进度/计时上下文仍只提供给 critic。
+
+策略把 BC 的受限动作转换为有限逆 tanh 均值，新增动作上下文均值修正和 log 标准差。初始修正为零，默认 log 标准差 −3，范围 [−5, −1]，以较窄高斯开始探索；饱和边界的均值留在同一整数命令格内。保存前报告所用经验上的 BC 交接整数命令误差。此检查不证明所有未知状态或实机驾驶相同。
+
+采样 `z = mean + std * noise`，连续动作 `a = center + scale * tanh(z)`。log 密度包含正态项、tanh Jacobian 和 `log(scale)`；命令坐标下目标熵为归一化目标熵（默认 −2）加两轴 `log(scale)` 之和。温度优化使用相同坐标。真实终止的目标只含结算奖励；非终止采用 `r + discount * (min(target Q) - alpha * log_probability)`。
+
+最终发送契约仍是整数命令。Q 前向及 replay 使用量化后的值；actor 对量化使用**直通梯度近似**，熵密度定义在量化前的连续动作上。这是版本化的连续松弛，不把整数命令的概率质量冒充连续密度，也不宣称是精确离散 SAC。后续若改变近似或坐标，须更换契约并重新对照。
+
+critic 优化器独占图像/状态编码器和双 Q；actor 优化器只持有策略头及上下文/方差层，actor 在共享特征处停止梯度；目标网络有单独的目标编码器。每次 critic 更新后重新编码 actor 输入，训练不缓存旧 latent。每两次 critic 更新一次 actor/温度，编码器默认学习率 1e−5，actor 3e−5，critic/温度 1e−4，目标软更新率 0.005。报告检查双方不越权修改参数。固定经验上的更新次数不等于在线采样更新比；有界新采样调度仍待接入。
+
+`policy.json` 与 `policy.pt` 相互绑定配置、动作语义、BC、经验和权重摘要，保存两套优化器、温度优化器、目标网络、RNG 和步数；目前用于冻结重载检查，完整跨进程续训由 #13 接入。独立输出保留初始化 BC，原检查点不会覆盖。原始 uint8 图像按内容去重，上限 512 MiB；单次浮点图像 batch 上限 256 MiB。当前仅验证 CPU；GPU/游戏共同运行预算未验证。
+
 ## 后续工作
 
-继续实现 tanh 高斯采样、命令坐标 Jacobian 与熵温度更新、actor 更新、critic 所属共享编码器解冻和目标编码器同步；随后接入有界采样/学习交替、尝试边界换版、示范混合与模仿约束退出。原生动作时序适配、完整数据用途登记、GPU 与 4K 游戏共存、实机驾驶比较仍待完成。#11 保持开放，这些实机项不阻塞可独立测试的学习器、#13 续训和 #14 筛选实现。
+接入有界采样/学习交替、尝试边界换版、示范混合与模仿约束退出。原生动作时序适配、完整数据用途登记、GPU 与 4K 游戏共存、实机驾驶比较仍待完成。#11 保持开放，这些实机项不阻塞可独立测试的学习循环、#13 续训和 #14 筛选实现。

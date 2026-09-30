@@ -34,7 +34,28 @@ from fh5.vision import VisionRecord
 def _sac(args: argparse.Namespace) -> int:
     from fh5.sac import SACCriticReplay, SACCriticWarmup
     from fh5.sac_actions import ActionBounds
+    from fh5.sac_learning import SACPolicyReplay, SACTrain
     from fh5.sac_replay import SACReplayPrepare
+
+    if args.mode == "sac-train":
+        options = json.loads(args.config.read_text(encoding="utf-8-sig"))
+        if not isinstance(options, dict) or options.pop("version", None) != 1:
+            raise ValueError("SAC training requires a version 1 configuration")
+        try:
+            request = SACTrain(
+                args.config.parent / options.pop("warmup"),
+                args.config.parent / options.pop("replay"),
+                args.output,
+                **options,
+            )
+        except (KeyError, TypeError) as error:
+            raise ValueError("Invalid SAC training fields") from error
+        print(json.dumps(run_experiment(request).summary["sac_learning"], ensure_ascii=False))
+        return 0
+    if args.mode == "sac-policy-replay":
+        replayed = run_experiment(SACPolicyReplay(args.checkpoint, args.replay, args.report))
+        print(json.dumps(replayed.summary["sac_policy"], ensure_ascii=False))
+        return 0
 
     if args.mode == "sac-prepare":
         summary = run_experiment(
@@ -104,6 +125,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     evidence_use.add_argument("--recording", type=Path, action="append", required=True)
     evidence_use.add_argument("--model-sha256")
     evidence_use.add_argument("--output", type=Path, required=True)
+    sac_train = commands.add_parser("sac-train", help="Bounded synthetic SAC updates; no devices")
+    sac_train.add_argument("--config", type=Path, required=True)
+    sac_train.add_argument("--output", type=Path, required=True)
+    sac_policy = commands.add_parser("sac-policy-replay", help="Replay a frozen learned SAC policy")
+    for name in ("checkpoint", "replay", "report"):
+        sac_policy.add_argument("--" + name, type=Path, required=True)
     sac_prepare = commands.add_parser(
         "sac-prepare", help="Prepare synthetic numerical learning transitions; no devices"
     )
@@ -480,7 +507,13 @@ def main(argv: Sequence[str] | None = None) -> int:
             ):
                 return 4
             return 0
-        if args.mode in ("sac-prepare", "sac-warmup", "sac-critic-replay"):
+        if args.mode in (
+            "sac-prepare",
+            "sac-warmup",
+            "sac-critic-replay",
+            "sac-train",
+            "sac-policy-replay",
+        ):
             return _sac(args)
         if args.mode == "evidence-use":
             from fh5.evidence_usage import RecordUsage

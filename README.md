@@ -120,7 +120,7 @@ uv run --locked ruff format --check .
 
 ### 离线模仿学习
 
-#11 已增加 [SAC 转移构造与双 Q 预热](docs/sac-learning.md)：`sac-prepare`、`sac-warmup`、`sac-critic-replay` 可在合成数值经验上实际更新与重载 critic，并验证整个 BC 不变。完整 SAC 策略更新及实机收益仍待完成。
+#11 已增加 [SAC 转移、预热与离线更新](docs/sac-learning.md)：在合成数值经验上核验完整 BC 冻结预热后，`sac-train` 实际更新策略、温度、编码器和双 Q，`sac-policy-replay` 重载冻结策略。自主游戏采样循环及实机收益仍待完成。
 
 安装 `learning` 可选依赖后，通过 `fh5 bc-train --config configs/bc.example.json --output runs/bc-first` 训练固定预算的多模态 BC；`fh5 bc-replay` 重放冻结模型。两者不发送游戏输入。数据、参考遮蔽、模型与误差解释见 [BC 说明](docs/bc.md)，首轮结果见 [T27 验证](docs/validation/t27-bc.md)。
 

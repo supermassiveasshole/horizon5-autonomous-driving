@@ -1,0 +1,17 @@
+{
+  "version": 1,
+  "warmup": "../runs/critic-first",
+  "replay": "../runs/sac-replay/replay.json",
+  "steps": 100,
+  "batch_size": 32,
+  "critic_lr": 0.0001,
+  "actor_lr": 0.00003,
+  "encoder_lr": 0.00001,
+  "alpha_lr": 0.0001,
+  "initial_alpha": 0.01,
+  "initial_log_std": -3.0,
+  "normalized_target_entropy": -2.0,
+  "actor_interval": 2,
+  "tau": 0.005,
+  "seed": 7
+}
