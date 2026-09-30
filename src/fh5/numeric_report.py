@@ -7,6 +7,7 @@ import struct
 import zlib
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from fh5.numeric_images import asset
 
@@ -30,11 +31,17 @@ def preview_png(pixels: bytes, size: tuple[int, int]) -> bytes:
 
 
 def write_numeric_report(path: Path, summary: dict[str, Any], root: Path) -> None:
+    def preview_url(relative: str) -> str:
+        target = asset(root, relative)
+        if target.is_relative_to(path.parent.resolve()):
+            return quote(target.relative_to(path.parent.resolve()).as_posix())
+        return target.as_uri()
+
     display = json.loads(json.dumps(summary))
     for sample in (display.get("raw_samples") or {}).get("records", []):
         for key in ("preview", "model_preview"):
             try:
-                sample[key + "_url"] = asset(root, sample[key]).as_uri()
+                sample[key + "_url"] = preview_url(sample[key])
             except ValueError:
                 sample[key + "_url"] = None
     for row in display["decisions"]:
@@ -45,7 +52,7 @@ def write_numeric_report(path: Path, summary: dict[str, Any], root: Path) -> Non
                 urls.append(None)
                 continue
             try:
-                urls.append(asset(root, relative).as_uri())
+                urls.append(preview_url(relative))
             except ValueError:
                 urls.append(None)
         row["preview_urls"] = urls

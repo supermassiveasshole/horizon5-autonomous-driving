@@ -334,3 +334,147 @@ def test_completed_collection_does_not_override_gpu_resource_pressure(tmp_path):
     assert summary["pressure_counts"]["gpu_pressure"] > 0
     assert "cuda_waits_for_collection_exit" not in summary["pressure_counts"]
     assert summary["stop_reason"] == "resource_wait_timeout" and resources.closed
+
+
+def test_frozen_schedule_remains_runnable_after_developer_configs_change(tmp_path):
+    from fh5.learning_schedule import ScheduledBCTrain
+
+    config, training, _ = configuration(tmp_path)
+    run_experiment(ScheduledBCTrain(config, tmp_path / "first"), learning_resources=Resources())
+    config.write_text("developer schedule changed")
+    training.write_text("developer training configuration changed")
+    summary = run_experiment(
+        ScheduledBCTrain(tmp_path / "first/schedule-config.json", tmp_path / "second"),
+        learning_resources=Resources(),
+    ).summary["learning_schedule"]
+    assert summary["state"] == "completed"
+    reports = [
+        json.loads((tmp_path / name / "candidate/report.json").read_bytes())
+        for name in ("first", "second")
+    ]
+    assert [r["prediction"] for r in reports[0]["decisions"]] == [
+        r["prediction"] for r in reports[1]["decisions"]
+    ]
+
+
+def test_published_candidate_previews_resolve_after_staging_directory_is_moved(tmp_path):
+    from pathlib import Path
+    from urllib.parse import unquote, urlparse
+    from urllib.request import url2pathname
+
+    from fh5.learning_schedule import ScheduledBCTrain
+
+    config, _, _ = configuration(tmp_path)
+    output = tmp_path / "scheduled with spaces"
+    result = run_experiment(
+        ScheduledBCTrain(config, output), learning_resources=Resources()
+    ).summary["learning_schedule"]
+    assert result["state"] == "completed"
+    candidate = output / "candidate"
+    html = (candidate / "report.html").read_text(encoding="utf-8")
+    display, _ = json.JSONDecoder().raw_decode(html.split("const data=", 1)[1])
+    urls = [url for row in display["decisions"] for url in row["preview_urls"]]
+    assert urls
+    for url in urls:
+        parsed = urlparse(url)
+        preview = (
+            Path(url2pathname(parsed.path))
+            if parsed.scheme == "file"
+            else candidate / unquote(parsed.path)
+        )
+        assert preview.is_file(), url
+        assert preview.read_bytes().startswith(b"\x89PNG")
+
+
+@pytest.mark.parametrize(
+    ("fault", "reason"),
+    [
+        ("total", "total_time_limit"),
+        ("unit", "work_unit_overrun"),
+        ("stop", "requested_stop"),
+    ],
+)
+def test_device_transfer_cannot_dispatch_training_after_budget_or_stop(
+    tmp_path, monkeypatch, fault, reason
+):
+    import torch
+
+    from fh5.learning_schedule import ScheduledBCTrain
+
+    resources = Resources(pressures=(3,))
+    config, _, _ = configuration(
+        tmp_path,
+        max_total_s=5 if fault == "total" else 120,
+        max_unit_s=5 if fault == "unit" else 60,
+    )
+    original_to = torch.nn.Module.to
+    delayed = False
+
+    def device_transfer(model, *args, **kwargs):
+        nonlocal delayed
+        result = original_to(model, *args, **kwargs)
+        # Model a slow external Torch device transfer after pressure clears.
+        # Training, scheduling and optimizer logic remain real.
+        if resources.reads >= 5 and not delayed:
+            delayed = True
+            resources.time += 10
+            if fault == "stop":
+                (tmp_path / "scheduled/stop.request").touch()
+        return result
+
+    monkeypatch.setattr(torch.nn.Module, "to", device_transfer)
+    summary = run_experiment(
+        ScheduledBCTrain(config, tmp_path / "scheduled"), learning_resources=resources
+    ).summary["learning_schedule"]
+    assert delayed and resources.closed
+    assert summary["stop_reason"] == reason
+    assert summary["steps_completed"] == 0
+    assert summary["max_work_unit_s"] >= 10
+    assert summary["candidate"] is None
+
+
+@pytest.mark.parametrize("mismatch", ["session", "worker"])
+def test_scheduler_binds_actual_collector_session_and_worker_to_its_manifest(tmp_path, mismatch):
+    import time
+
+    from test_collection_process import prepare
+
+    from fh5.collection import CollectionControl
+    from fh5.collection_process import CollectionStart
+    from fh5.learning_schedule import ScheduledBCTrain
+
+    config, _, _ = configuration(tmp_path)
+    folder = tmp_path / "collector"
+    folder.mkdir()
+    bundle, _, _ = prepare(folder, seconds=2)
+    run_experiment(CollectionStart(bundle))
+    status = {}
+    try:
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            status = run_experiment(CollectionControl(bundle)).summary["collection"]
+            if status.get("complete") and status["process_liveness"] == "exited":
+                break
+            time.sleep(0.05)
+    finally:
+        run_experiment(CollectionControl(bundle, stop=True))
+    assert status.get("complete") and status["process_liveness"] == "exited"
+    manifest = bundle / "frozen.json"
+    if mismatch == "worker":
+        manifest.write_bytes(manifest.read_bytes() + b" ")
+    digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    session_path = bundle / "recording/session.json"
+    session = json.loads(session_path.read_bytes())
+    session["software_snapshot"]["manifest_sha256"] = digest if mismatch == "worker" else "1" * 64
+    session_path.write_text(json.dumps(session))
+    final_path = bundle / "recording/final.json"
+    final = json.loads(final_path.read_bytes())
+    final["session_sha256"] = hashlib.sha256(session_path.read_bytes()).hexdigest()
+    final_path.write_text(json.dumps(final))
+    options = json.loads(config.read_bytes())
+    options.update(collector_bundle=str(bundle), collector_manifest_sha256=digest)
+    config.write_text(json.dumps(options))
+    with pytest.raises(ValueError, match="snapshot differs"):
+        run_experiment(ScheduledBCTrain(config, tmp_path / "scheduled"))
+    summary = json.loads((tmp_path / "scheduled/schedule.json").read_bytes())
+    assert summary["steps_completed"] == 0 and summary["candidate"] is None

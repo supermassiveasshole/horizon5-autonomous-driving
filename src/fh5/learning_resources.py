@@ -52,6 +52,19 @@ class NativeLearningResources:
             raw = read_bounded(self.bundle / "recording/session.json", 1024**2)
             if hashlib.sha256(raw).hexdigest() != status["session_sha256"]:
                 raise ValueError("Collector status does not match its recorded session")
+            snapshot = json.loads(raw).get("software_snapshot") or {}
+            worker = status.get("worker-state") or {}
+            for name, binding in (("session", snapshot), ("worker", worker)):
+                digest = binding.get("manifest_sha256")
+                if digest is not None and digest != self.digest:
+                    raise ValueError(f"Collector {name} snapshot differs from scheduled binding")
+                status[name + "_manifest_sha256"] = digest
+            if (
+                snapshot.get("verified") is not True
+                or snapshot.get("manifest_sha256") != self.digest
+                or worker.get("manifest_sha256") != self.digest
+            ):
+                status = dict(status, software_snapshot_verified=False)
         else:
             status = dict(status, software_snapshot_verified=False)
         # Keep expensive OS/process queries in the learner, never in acquisition.
@@ -74,6 +87,8 @@ class NativeLearningResources:
             "pid",
             "process_birth",
             "session_sha256",
+            "session_manifest_sha256",
+            "worker_manifest_sha256",
             "error",
             "stop_reason",
         )

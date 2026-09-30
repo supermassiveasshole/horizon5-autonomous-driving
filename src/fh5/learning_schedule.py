@@ -197,6 +197,20 @@ class LearningSchedule:
                 suspend()
             raise
 
+    def _check_limits(self, now: int, work_started: int | None = None) -> None:
+        elapsed = 0.0
+        if work_started is not None:
+            elapsed = (now - work_started) / 1e9
+            if elapsed < 0:
+                raise ScheduleStopped("resource_clock_regressed")
+            self.max_unit_s = max(self.max_unit_s, elapsed)
+        if self.stop_path.exists():
+            raise ScheduleStopped("requested_stop")
+        if elapsed > self.budget["max_unit_s"]:
+            raise ScheduleStopped("work_unit_overrun")
+        if now < self.started or now - self.started > self.budget["max_total_s"] * 1e9:
+            raise ScheduleStopped("total_time_limit")
+
     def _checkpoint(
         self,
         phase: str,
@@ -204,25 +218,13 @@ class LearningSchedule:
         suspend: Callable[[], None] | None,
         resume: Callable[[], None] | None,
     ) -> None:
-        now = self.source.now_ns()
         self.completed = completed
-        if self.stop_path.exists():
-            raise ScheduleStopped("requested_stop")
-        if self.unit_started is not None:
-            elapsed = (now - self.unit_started) / 1e9
-            if elapsed < 0:
-                raise ScheduleStopped("resource_clock_regressed")
-            self.max_unit_s = max(self.max_unit_s, elapsed)
-            if elapsed > self.budget["max_unit_s"]:
-                raise ScheduleStopped("work_unit_overrun")
+        self._check_limits(self.source.now_ns(), self.unit_started)
         waiting_since: int | None = None
         healthy = 0
         while True:
             now = self.source.now_ns()
-            if self.stop_path.exists():
-                raise ScheduleStopped("requested_stop")
-            if now < self.started or now - self.started > self.budget["max_total_s"] * 1e9:
-                raise ScheduleStopped("total_time_limit")
+            self._check_limits(now)
             if waiting_since is not None and now - waiting_since >= self.budget["max_wait_s"] * 1e9:
                 raise ScheduleStopped("resource_wait_timeout")
             sample = self.source.sample()
@@ -232,8 +234,7 @@ class LearningSchedule:
             sample = json.loads(payload)
             self.samples += 1
             now = self.source.now_ns()
-            if now < self.started or now - self.started > self.budget["max_total_s"] * 1e9:
-                raise ScheduleStopped("total_time_limit")
+            self._check_limits(now)
             reasons = self._reasons(sample, now)
             self.reasons.update(reasons)
             self.events.append(
@@ -248,9 +249,10 @@ class LearningSchedule:
             if not reasons:
                 healthy += 1
                 if waiting_since is None or healthy >= 2:
+                    self.unit_started = self.source.now_ns()
                     if waiting_since is not None and resume:
                         resume()
-                    self.unit_started = self.source.now_ns()
+                    self._check_limits(self.source.now_ns(), self.unit_started)
                     return
             else:
                 healthy = 0
@@ -258,7 +260,9 @@ class LearningSchedule:
                 waiting_since = now
                 self.pauses += 1
                 if suspend:
+                    transfer_started = self.source.now_ns()
                     suspend()
+                    self._check_limits(self.source.now_ns(), transfer_started)
             self.source.wait(self.budget["poll_interval_s"])
             self.wait_s += self.budget["poll_interval_s"]
 
@@ -300,6 +304,13 @@ def run_scheduled_bc(request: ScheduledBCTrain, resources: LearningResources | N
     frozen_config = request.output_dir / "training.json"
     write_file(frozen_config, encode(training))
     write_file(request.output_dir / "requested-training.json", training_raw)
+    write_file(request.output_dir / "requested-schedule.json", encode(config))
+    config = dict(
+        config,
+        training_config=str(frozen_config.resolve()),
+        training_config_sha256=hashlib.sha256(encode(training)).hexdigest(),
+        collector_bundle=str((base / config["collector_bundle"]).resolve()),
+    )
     write_file(request.output_dir / "schedule-config.json", encode(config))
     state, reason, failure = "stopped", None, None
     candidate_hash = None
