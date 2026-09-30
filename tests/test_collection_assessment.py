@@ -153,9 +153,42 @@ def test_missing_baseline_still_reports_copy_action_and_missing_strata(tmp_path)
     assert metrics["strata"]["release_rt"]["candidate"]["count"] == 0
 
 
-@pytest.mark.parametrize(
-    "kind", ["old_source", "seen_holdout", "renamed_source", "candidate_seen_holdout"]
-)
+@pytest.mark.parametrize("fault", ["session", "sequence", "clock"])
+def test_training_rejects_source_ranges_that_contradict_actual_heldout_samples(tmp_path, fault):
+    numeric, _ = candidates(tmp_path)
+    data = json.loads((numeric / "dataset.json").read_bytes())
+    heldout = json.loads((numeric / "evaluation.json").read_bytes())
+    for group in heldout["groups"]:
+        original = group["id"]
+        group.update(id=original + "-renamed", split="train")
+        for source in group["source_ranges"]:
+            if fault == "session":
+                source["session_sha256"] = "0" * 64
+            elif fault == "sequence":
+                source["start_sequence"] += 1000
+                source["end_sequence"] += 1000
+            else:
+                source["first_ns"] += 100_000_000_000
+                source["last_ns"] += 100_000_000_000
+        for row in heldout["decisions"]:
+            if row["group"] == original:
+                row["group"] = group["id"]
+    data["groups"] += heldout["groups"]
+    data["decisions"] += heldout["decisions"]
+    altered = numeric / "contradictory-training.json"
+    altered.write_text(json.dumps(data))
+    options = json.loads((tmp_path / "candidate.json").read_bytes())
+    options.update(
+        dataset=str(altered), dataset_sha256=hashlib.sha256(altered.read_bytes()).hexdigest()
+    )
+    config = tmp_path / "contradictory-config.json"
+    config.write_text(json.dumps(options))
+    with pytest.raises(ValueError, match="source range"):
+        run_experiment(TemporalBCTrain(config, tmp_path / "contradictory-model"))
+    assert not (tmp_path / "contradictory-model").exists()
+
+
+@pytest.mark.parametrize("kind", ["old_source", "seen_holdout", "candidate_seen_holdout"])
 def test_seen_or_incompatible_models_cannot_claim_fair_heldout_scores(tmp_path, kind):
     from fh5.collection_assessment import CollectionBCAssess
 
@@ -170,17 +203,6 @@ def test_seen_or_incompatible_models_cannot_claim_fair_heldout_scores(tmp_path, 
     else:
         data = json.loads((numeric / "dataset.json").read_bytes())
         heldout = json.loads((numeric / "evaluation.json").read_bytes())
-        if kind == "renamed_source":
-            # Different names and session digest cannot establish independence
-            # for observations from the exact same host-clock interval.
-            for group in heldout["groups"]:
-                original = group["id"]
-                group["id"] = original + "-renamed"
-                for source in group["source_ranges"]:
-                    source["session_sha256"] = "0" * 64
-                for row in heldout["decisions"]:
-                    if row["group"] == original:
-                        row["group"] = group["id"]
         data["groups"] += [dict(g, split="train") for g in heldout["groups"]]
         data["decisions"] += heldout["decisions"]
         altered = numeric / "leaky-training.json"

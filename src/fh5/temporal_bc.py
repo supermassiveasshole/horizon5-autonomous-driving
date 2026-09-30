@@ -102,6 +102,7 @@ def _snapshot(
     if any(not 32 <= v <= 640 for v in pixels.size):
         raise ValueError("Temporal training image size outside bounded model range")
     groups = {g["id"]: g["split"] for g in data["groups"]}
+    source_ranges = {g["id"]: g.get("source_ranges") for g in data["groups"]}
     if (
         len(groups) != len(data["groups"])
         or not groups
@@ -123,6 +124,26 @@ def _snapshot(
         if entry["decision_id"] in seen or entry["group"] not in groups:
             raise ValueError("Duplicate decision or unknown attempt group")
         seen.add(entry["decision_id"])
+        ranges = source_ranges[entry["group"]]
+        if ranges is not None:
+            sequence = entry.get("source_sequence")
+            if (
+                not isinstance(sequence, int)
+                or isinstance(sequence, bool)
+                or not any(
+                    entry["decision_id"] == f"{r['session_sha256']}:{sequence}"
+                    and r["start_sequence"] <= sequence < r["end_sequence"]
+                    and r["first_ns"] <= entry["decision_ns"] <= r["last_ns"]
+                    and all(
+                        r["first_ns"] <= f["source_time_ns"] <= entry["decision_ns"]
+                        and f["epoch"].startswith(r["session_sha256"] + ":")
+                        and f["frame_id"].startswith(r["session_sha256"] + ":")
+                        for f in entry["frames"]
+                    )
+                    for r in ranges
+                )
+            ):
+                raise ValueError("Numerical sample contradicts its declared source range")
         frames = []
         for metadata in entry["frames"]:
             key = (metadata["epoch"], metadata["frame_id"])
