@@ -60,7 +60,7 @@ def _input(base: Path, binding: Any) -> EvaluationInput:
     )
     result.verify()
     ledger = json.loads(read_bounded(result.ledger_file, 4 * 1024**2))
-    if ledger.get("batch_sha256") != result.batch_sha256:
+    if not isinstance(ledger, dict) or ledger.get("batch_sha256") != result.batch_sha256:
         raise ValueError("Candidate comparison ledger belongs to another batch")
     if batch["config"]["purpose"] != "development":
         raise ValueError("Final acceptance batches cannot be consumed for candidate selection")
@@ -84,6 +84,8 @@ def _eligibility(side: str, review: dict[str, Any], criteria: dict[str, Any]) ->
     for name in ("invalid", "pending_review", "interface_error"):
         if counts[name]:
             reasons.append(f"{side}:{name}_attempts")
+    if any(attempt.get("pending_checks") for attempt in review["attempts"]):
+        reasons.append(side + ":unresolved_validity")
     if review["unstarted_slots"] or review["unresolved_recordings"]:
         reasons.append(side + ":incomplete_plan")
     if counts["valid_complete"] < criteria["min_valid_attempts"]:
@@ -92,6 +94,8 @@ def _eligibility(side: str, review: dict[str, Any], criteria: dict[str, Any]) ->
         reasons.append(side + ":known_evidence_reuse")
     if review["independence"].get("error"):
         reasons.append(side + ":usage_registry_error")
+    if "legacy_slot_history_unavailable" in review["independence"].get("unknown_reasons", []):
+        reasons.append(side + ":attempt_history_unavailable")
     return reasons
 
 
@@ -202,9 +206,10 @@ def compare_candidates(request: CandidateCompare) -> RunResult:
         ):
             raise ValueError("Comparison review consumed different input bytes")
         origins[side] = {
-            r["files"]["packets.jsonl"]
+            digest
             for r in json.loads(used_ledger)["entries"]
-            if r["files"].get("packets.jsonl") != hashlib.sha256(b"").hexdigest()
+            if (digest := r["files"].get("packets.jsonl"))
+            and digest != hashlib.sha256(b"").hexdigest()
         }
     for binding in inputs.values():
         binding.verify()

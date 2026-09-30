@@ -221,6 +221,113 @@ def test_known_training_reuse_blocks_comparison_and_registers_actual_selection_u
     assert result["reviews"]["candidate"]["metrics"]["all_attempts"] == 1
 
 
+def test_missing_legacy_attempt_history_cannot_recommend_a_replacement_success(tmp_path, policies):
+    import sqlite3
+
+    from fh5.candidate_selection import CandidateCompare
+    from fh5.evaluation import EvaluationReview
+    from fh5.evidence_usage import RecordUsage
+
+    config = comparison(tmp_path, policies, candidate=("valid",))
+    registry = tmp_path / "usage.sqlite"
+    folder = tmp_path / "old-failure"
+    folder.mkdir()
+    source = record(folder, "drive", [(0, 0.2), (1, 0.2), (2, 0.2), (3, 0.2)], speed=30)
+    proof = evidence(folder, source)
+    run_experiment(RecordUsage(registry, (source,), "selection", folder / "registered"))
+    previous = folder / "ledger.json"
+    previous.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "batch_sha256": sha(tmp_path / "candidate/frozen/batch.json"),
+                "entries": [entry("run-0", source, proof)],
+            }
+        )
+    )
+    old = run_experiment(
+        EvaluationReview(tmp_path / "candidate/frozen", previous, folder / "review", registry)
+    )
+    assert old.summary["evaluation"]["metrics"]["outcomes"]["driving_failed"] == 1
+    # External legacy storage fixture: v1 did not preserve per-slot failure history.
+    with sqlite3.connect(registry) as db:
+        db.execute("DROP TABLE slots")
+        db.execute("DROP TABLE legacy_reviews")
+        db.execute("PRAGMA user_version=1")
+
+    result = run_experiment(CandidateCompare(config, tmp_path / "decision", registry)).summary[
+        "candidate_selection"
+    ]
+    assert (
+        "legacy_slot_history_unavailable"
+        in result["reviews"]["candidate"]["independence"]["unknown_reasons"]
+    )
+    assert result["local_recommendation"] == "retain_incumbent"
+    assert "candidate:attempt_history_unavailable" in result["reasons"]
+    assert result["aggressive_by_reference"] == {}
+
+
+@pytest.mark.parametrize("check", ["suspected", "missing_coverage"])
+def test_driving_failure_does_not_hide_unresolved_validity_from_either_candidate_slot(
+    tmp_path, policies, check
+):
+    from fh5.candidate_selection import CandidateCompare
+
+    config = comparison(
+        tmp_path, policies, incumbent=("valid", "valid"), candidate=("valid", "failed")
+    )
+    folder = tmp_path / "candidate/source-1"
+    events = [{"packet_index": 1, "kind": "wall_riding", "status": "suspected"}]
+    proof = evidence(
+        folder,
+        folder / "drive",
+        events if check == "suspected" else [],
+        coverage=check != "missing_coverage",
+    )
+    path = tmp_path / "candidate/ledger.json"
+    ledger = json.loads(path.read_bytes())
+    ledger["entries"][1]["evidence"] = {"file": str(proof), "sha256": sha(proof)}
+    path.write_text(json.dumps(ledger))
+    binding = json.loads(config.read_bytes())
+    binding["candidate"]["ledger_sha256"] = sha(path)
+    config.write_text(json.dumps(binding))
+
+    result = run_experiment(CandidateCompare(config, tmp_path / "decision")).summary[
+        "candidate_selection"
+    ]
+    assert result["reviews"]["candidate"]["metrics"]["outcomes"]["driving_failed"] == 1
+    assert result["local_recommendation"] == "retain_incumbent"
+    assert result["aggressive_by_reference"] == {}
+    assert "candidate:unresolved_validity" in result["reasons"]
+
+
+def test_incomplete_recording_inventory_keeps_interface_failure_and_comparison_report(
+    tmp_path, policies
+):
+    from fh5.candidate_selection import CandidateCompare
+
+    config = comparison(
+        tmp_path, policies, incumbent=("valid", "valid"), candidate=("valid", "failed")
+    )
+    path = tmp_path / "candidate/ledger.json"
+    ledger = json.loads(path.read_bytes())
+    ledger["entries"][1]["files"] = {}
+    path.write_text(json.dumps(ledger))
+    binding = json.loads(config.read_bytes())
+    binding["candidate"]["ledger_sha256"] = sha(path)
+    config.write_text(json.dumps(binding))
+
+    result = run_experiment(CandidateCompare(config, tmp_path / "decision"))
+    selection = result.summary["candidate_selection"]
+    assert selection["reviews"]["candidate"]["metrics"]["all_attempts"] == 2
+    assert selection["reviews"]["candidate"]["metrics"]["outcomes"]["interface_error"] == 1
+    assert selection["local_recommendation"] == "retain_incumbent"
+    assert selection["aggressive_by_reference"] == {}
+    assert "candidate:interface_error_attempts" in selection["reasons"]
+    assert result.report_path.is_file()
+    assert (tmp_path / "decision/selection.json").is_file()
+
+
 @pytest.mark.parametrize(
     "outcome,reason",
     [("unknown", "candidate:pending_review_attempts"), ("unstarted", "candidate:incomplete_plan")],
@@ -257,6 +364,23 @@ def test_cli_compares_from_sources_without_devices_or_training(tmp_path, policie
     assert result["commands_sent"] is False
     assert result["training_state_modified"] is False
     assert (tmp_path / "cli/report.html").is_file()
+
+
+def test_cli_rejects_non_object_ledger_before_creating_comparison(tmp_path, policies, capsys):
+    from fh5.cli import main
+
+    config = comparison(tmp_path, policies, candidate=("valid",))
+    path = tmp_path / "candidate/ledger.json"
+    path.write_text("[]")
+    binding = json.loads(config.read_bytes())
+    binding["candidate"]["ledger_sha256"] = sha(path)
+    config.write_text(json.dumps(binding))
+    assert (
+        main(["candidate-compare", "--config", str(config), "--output", str(tmp_path / "decision")])
+        == 2
+    )
+    assert "ledger" in capsys.readouterr().err.lower()
+    assert not (tmp_path / "decision").exists()
 
 
 def test_exact_reliability_tolerance_is_not_rejected_by_binary_rounding(tmp_path, policies):

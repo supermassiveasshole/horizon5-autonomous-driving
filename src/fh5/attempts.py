@@ -473,6 +473,7 @@ def _attempt(
         "control_owner": base.metadata["control_source"],
         "outcome": outcome,
         "reasons": reasons,
+        "pending_checks": sorted(set(pending)),
         "interface_faults": sorted(faults),
         "uncovered_checks": missing,
         "task_completed": completed,
