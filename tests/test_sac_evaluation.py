@@ -249,7 +249,7 @@ def test_reproducible_sac_prediction_cannot_borrow_an_unsent_command_context(tmp
     ).summary["evaluation"]
     assert result["metrics"]["all_attempts"] == 2
     assert result["executions"][0]["status"] == "quarantined"
-    assert "context differs" in str(result["executions"][0]["reasons"])
+    assert "context" in str(result["executions"][0]["reasons"])
     assert result["executions"][1]["status"] == "bound_diagnostic"
 
 

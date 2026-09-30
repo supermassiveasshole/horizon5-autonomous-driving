@@ -259,8 +259,8 @@ def review_execution(
         )
         if not replay["verified"]:
             raise ValueError("Execution numerical replay failed: " + str(replay["errors"]))
-        _verify_history(report)
         _verify_commands(report)
+        _verify_history(report)
         modes = {
             "reference_assisted" if any(d["actor"]["reference"]["mask"]) else "no_reference"
             for d in report["decisions"]
