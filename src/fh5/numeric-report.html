@@ -22,6 +22,7 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:13px;background:#17233
 <details open><summary>本次输入、时间与预测</summary><pre id="metadata"></pre></details>
 <details><summary>像素契约与模型版本</summary><pre id="contract"></pre></details>
 <details><summary>运行与存档完整性</summary><pre id="integrity"></pre></details>
+<details id="metrics-section"><summary>离线训练与分组误差（不代表驾驶能力）</summary><pre id="metrics"></pre></details>
 <script>
 const data=/*NUMERIC_DATA*/null;
 const rows=data.decisions, slider=document.querySelector('#index'), play=document.querySelector('#play');
@@ -30,6 +31,8 @@ const cache=new Map();
 const text=(id,value)=>{document.getElementById(id).textContent=value;};
 text('contract',JSON.stringify({contract:data.contract,model:data.model,availability_note:data.availability_note},null,2));
 text('integrity',JSON.stringify({archive:data.archive,stop_reason:data.stop_reason,execution_error:data.execution_error,replay_errors:data.replay_errors,replay_tolerance:data.replay_tolerance},null,2));
+document.getElementById('metrics-section').hidden=!data.metrics;
+text('metrics',JSON.stringify({training:data.training,metrics:data.metrics},null,2));
 text('notice',data.model?.diagnostic_only || data.diagnostic_only ? '旧数据兼容诊断：尚未验证新采集分布、实时性或驾驶能力。' : '数值接口诊断：不构成实时驾驶验收。');
 slider.max=Math.max(0,rows.length-1);slider.disabled=play.disabled=!rows.length;
 function loadImage(url){
@@ -52,8 +55,9 @@ async function show(index){
   row.frames.forEach((frame,i)=>{
     const figure=document.createElement('figure'), box=document.createElement('div'), caption=document.createElement('figcaption');box.className='image';
     if(pictures[i]){const img=pictures[i].cloneNode();img.alt=`历史 ${i+1}：${frame.frame_id}`;box.append(img);}else{box.textContent='展示副本缺失；不替换实际模型输入';}
-    const age=(row.decision_ns-frame.source_time_ns)/1e6;
-    caption.textContent=`${i+1}. ${frame.frame_id}\n图像年龄 ${age.toFixed(3)} ms · ${frame.size.join('×')} RGB\n${frame.time_quality} · ${frame.epoch}`;
+    const age=row.timing ? row.timing.image_age_s[i]*1000 : (row.decision_ns-frame.source_time_ns)/1e6;
+    const delta=row.timing && i>0 ? ` · 相邻 Δt ${(row.timing.adjacent_delta_s[i-1]*1000).toFixed(3)} ms` : '';
+    caption.textContent=`${i+1}. ${frame.frame_id}\n图像年龄 ${age.toFixed(3)} ms${delta} · ${frame.size.join('×')} RGB\n${frame.time_quality} · ${frame.epoch}`;
     figure.append(box,caption);fragment.append(figure);
   });cards.replaceChildren(fragment);
   const {preview_urls,...metadata}=row;text('metadata',JSON.stringify(metadata,null,2));

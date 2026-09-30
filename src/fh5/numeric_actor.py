@@ -13,6 +13,13 @@ from typing import Any
 from fh5.bc_learning import ARCHITECTURE, MODEL_METADATA_KEYS, _numeric
 from fh5.bc_network import make_actor
 from fh5.numeric_images import NumericFrame, PixelContract
+from fh5.temporal_features import (
+    TEMPORAL_ARCHITECTURE,
+    TEMPORAL_METADATA_KEYS,
+    actor_shape,
+    temporal_features,
+    time_contract,
+)
 
 
 class FrozenNumericActor:
@@ -26,12 +33,25 @@ class FrozenNumericActor:
         *,
         legacy_diagnostic: bool = False,
     ) -> None:
-        if not legacy_diagnostic:
-            raise ValueError("Old BC weights require explicit legacy_diagnostic=True")
         original = json.loads((model_dir / "model.json").read_text(encoding="utf-8"))
-        if original.get("version") != 1 or original.get("architecture") != ARCHITECTURE:
+        temporal = original.get("version") == 2
+        if not temporal and not legacy_diagnostic:
+            raise ValueError("Old BC weights require explicit legacy_diagnostic=True")
+        if (original.get("version"), original.get("architecture")) not in (
+            (1, ARCHITECTURE),
+            (2, TEMPORAL_ARCHITECTURE),
+        ):
             raise ValueError("Unsupported frozen numerical actor model")
         c = original["contract"]
+        self.temporal = c.get("temporal") if temporal else None
+        if temporal and (
+            not self.temporal
+            or self.temporal != time_contract(self.temporal["mode"], contract)
+            or original["numeric_contract"] != contract.metadata()
+        ):
+            raise ValueError("Frozen temporal actor contract mismatch")
+        if temporal:
+            self.kind = "frozen-numeric-temporal-bc-v2"
         if (
             c["image_size"] != list(contract.size)
             or c["observation"]["history_offsets_ms"] != list(contract.history_offsets_ms)
@@ -56,7 +76,8 @@ class FrozenNumericActor:
         ):
             raise ValueError("Requested numerical actor device unavailable")
         saved = self.torch.load(BytesIO(weights), map_location=device, weights_only=True)
-        if saved["metadata"] != {k: original[k] for k in MODEL_METADATA_KEYS}:
+        keys = TEMPORAL_METADATA_KEYS if temporal else MODEL_METADATA_KEYS
+        if saved["metadata"] != {k: original[k] for k in keys}:
             raise ValueError("Frozen numerical actor metadata mismatch")
         self.model = make_actor(c).to(device)
         self.model.load_state_dict(saved["actor"], strict=True)
@@ -72,10 +93,25 @@ class FrozenNumericActor:
             "numeric_contract": contract.metadata(),
             "model_contract": c,
             "original_preprocessing": original["preprocessing"],
-            "diagnostic_only": True,
+            "diagnostic_only": not temporal or contract.origin == "legacy_offline",
             "new_capture_distribution_validated": False,
-            "explicit_dt_model": False,
+            "explicit_dt_model": temporal,
         }
+        if temporal:
+            self.manifest.update(
+                dataset_sha256=original["dataset_sha256"],
+                provenance=original["provenance"],
+                groups=original["groups"],
+            )
+
+    def input_features(
+        self, actor: dict[str, Any], frames: tuple[NumericFrame, ...]
+    ) -> list[float]:
+        if self.temporal is None:
+            return _numeric(actor)
+        if actor_shape(actor, len(frames)) != self.original_contract["actor_shape"]:
+            raise ValueError("Temporal actor feature shape mismatch")
+        return temporal_features(actor, frames, self.temporal)
 
     def predict(self, actor: dict[str, Any], frames: tuple[NumericFrame, ...]) -> list[float]:
         if (
@@ -86,7 +122,7 @@ class FrozenNumericActor:
             or any(f.size != self.contract.size for f in frames)
         ):
             raise ValueError("Incomplete numerical actor observation")
-        values = _numeric(actor)
+        values = self.input_features(actor, frames)
         if len(values) != self.original_contract["numeric_size"]:
             raise ValueError("Numerical actor feature shape mismatch")
         tensors = []

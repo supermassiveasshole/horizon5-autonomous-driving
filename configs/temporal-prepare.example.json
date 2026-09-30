@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "dataset": "../runs/t27-dataset-reviewed/dataset.json",
+  "image_size": [480, 270],
+  "history_patterns_ms": [[200, 100, 0], [300, 150, 0], [400, 200, 0]],
+  "max_selection_error_ms": 100,
+  "max_image_age_ms": 1000
+}

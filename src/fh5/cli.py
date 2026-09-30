@@ -87,6 +87,15 @@ def main(argv: Sequence[str] | None = None) -> int:
     bc_replay.add_argument("--dataset", type=Path, required=True)
     bc_replay.add_argument("--report", type=Path, required=True)
     bc_replay.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    for name in ("temporal-prepare", "temporal-train"):
+        temporal = commands.add_parser(name, help="Prepare/train frozen numerical Δt BC offline")
+        temporal.add_argument("--config", type=Path, required=True)
+        temporal.add_argument("--output", type=Path, required=True)
+    temporal_replay = commands.add_parser("temporal-replay", help="Reload numerical Δt BC offline")
+    temporal_replay.add_argument("--model", type=Path, required=True)
+    temporal_replay.add_argument("--dataset", type=Path, required=True)
+    temporal_replay.add_argument("--report", type=Path, required=True)
+    temporal_replay.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     numeric_prepare = commands.add_parser(
         "numeric-prepare", help="Decode legacy BC images once into a numerical offline source"
     )
@@ -105,7 +114,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         numeric.add_argument("recording", type=Path)
         numeric.add_argument("--model", type=Path, required=True)
         numeric.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
-        numeric.add_argument("--legacy-diagnostic", action="store_true", required=True)
+        numeric.add_argument("--legacy-diagnostic", action="store_true")
         if name == "numeric-infer":
             numeric.add_argument("--output", type=Path, required=True)
             numeric.add_argument("--max-decisions", type=int, default=1000)
@@ -221,6 +230,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     perception_replay.add_argument("--labels", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.mode in ("temporal-prepare", "temporal-train", "temporal-replay"):
+            return _temporal_command(args)
         if args.mode in ("numeric-prepare", "numeric-infer", "numeric-replay"):
             return _numeric_command(args)
         if args.mode == "input-devices":
@@ -730,6 +741,35 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 130
     if result.summary["valid_packets"] == 0:
         return 3
+    return 0
+
+
+def _temporal_command(args: argparse.Namespace) -> int:
+    from fh5.temporal_bc import TemporalBCReplay, TemporalBCTrain
+    from fh5.temporal_import import TemporalBCPrepare
+
+    if args.mode == "temporal-prepare":
+        result = run_experiment(TemporalBCPrepare(args.config, args.output))
+        summary = result.summary["temporal_import"]
+    elif args.mode == "temporal-train":
+        result = run_experiment(TemporalBCTrain(args.config, args.output))
+        summary = result.summary["temporal_bc"]
+    else:
+        result = run_experiment(
+            TemporalBCReplay(args.model, args.dataset, args.report, args.device)
+        )
+        summary = result.summary["temporal_bc"]
+    print(
+        json.dumps(
+            {
+                "commands_sent": False,
+                "decisions": summary.get("selected_observations", len(summary["decisions"])),
+                "dataset_sha256": summary["dataset_sha256"],
+                "report": str(result.report_path),
+                "training": {k: v for k, v in summary.get("training", {}).items() if k != "losses"},
+            }
+        )
+    )
     return 0
 
 

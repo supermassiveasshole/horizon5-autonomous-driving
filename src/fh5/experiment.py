@@ -52,6 +52,8 @@ from fh5.routes import (
     load_route,
     locate_route,
 )
+from fh5.temporal_bc import TemporalBCReplay, TemporalBCTrain, run_temporal_bc
+from fh5.temporal_import import TemporalBCPrepare, prepare_temporal
 from fh5.tracking import TrackingDrive, read_tracking_route, run_tracking
 from fh5.vision import VisionEnvironment, VisionRecord, read_vision, run_vision
 
@@ -194,7 +196,10 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 
 def run_experiment(
-    request: LegacyNumericImport
+    request: TemporalBCPrepare
+    | TemporalBCTrain
+    | TemporalBCReplay
+    | LegacyNumericImport
     | NumericInfer
     | NumericReplay
     | PolicyDrive
@@ -230,6 +235,10 @@ def run_experiment(
     numeric_actor: NumericActor | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, TemporalBCPrepare):
+        return prepare_temporal(request)
+    if isinstance(request, (TemporalBCTrain, TemporalBCReplay)):
+        return run_temporal_bc(request)
     if isinstance(request, LegacyNumericImport):
         return prepare_legacy(request)
     if isinstance(request, (NumericInfer, NumericReplay)):

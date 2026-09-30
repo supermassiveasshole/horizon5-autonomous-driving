@@ -169,6 +169,14 @@ def _prediction(actor: NumericActor, decision: NumericDecision) -> list[float]:
     return result
 
 
+def _features(actor: NumericActor, decision: NumericDecision) -> list[float]:
+    provider = getattr(actor, "input_features", None)
+    if provider is None:
+        return _numeric(decision.actor)
+    values: list[float] = provider(decision.actor, decision.frames)
+    return values
+
+
 def _result(
     path: Path, summary: dict[str, Any], *, section: str = "numeric", root: Path | None = None
 ) -> RunResult:
@@ -228,7 +236,7 @@ def infer_numeric(
             }
             if reason is None:
                 try:
-                    row["features"] = _numeric(decision.actor)
+                    row["features"] = _features(actor, decision)
                     row["prediction"] = _prediction(actor, decision)
                 except Exception as error:
                     rows.append(
@@ -312,8 +320,6 @@ def replay_numeric(request: NumericReplay, actor: NumericActor) -> RunResult:
             frames = []
             for frame in recorded["frames"]:
                 frames.append(read_numeric_frame(directory, frame))
-            features = _numeric(recorded["actor"])
-            row.update(pixels_match=True, features_match=features == recorded["features"])
             decision = NumericDecision(
                 recorded["decision_id"],
                 recorded["epoch"],
@@ -326,6 +332,8 @@ def replay_numeric(request: NumericReplay, actor: NumericActor) -> RunResult:
             reason = validate_decision(decision, contract)
             if reason is not None:
                 raise ValueError(f"Invalid replay observation: {reason}")
+            features = _features(actor, decision)
+            row.update(pixels_match=True, features_match=features == recorded["features"])
             prediction = _prediction(actor, decision)
             error = max(abs(a - b) for a, b in zip(prediction, recorded["prediction"]))
             row.update(replayed_prediction=prediction, prediction_max_abs_error=error)

@@ -186,12 +186,12 @@ def test_demo_replay_binds_raw_input_and_profile_and_builds_only_prior_action_hi
         run_experiment(replace(DemonstrationReplay(directory, directory / "bad.html")))
 
 
-def dataset_fixture(tmp_path, boundary=False):
+def dataset_fixture(tmp_path, boundary=False, **observation_overrides):
     from test_navigation_observations import navigation_fixture
 
     from fh5.demonstrations import DemonstrationRecord
 
-    setup = navigation_fixture(tmp_path, max_telemetry_age_ms=200)
+    setup = navigation_fixture(tmp_path, max_telemetry_age_ms=200, **observation_overrides)
     profile = profile_file(tmp_path)
     value = json.loads(profile.read_text())
     value["calibration"] = {
