@@ -48,7 +48,7 @@ for(const sample of originals){
   }
 }
 document.getElementById('metrics-section').hidden=!data.metrics;
-text('metrics',JSON.stringify({training:data.training,metrics:data.metrics},null,2));
+text('metrics',JSON.stringify({mode:data.mode,selection_allowed:data.selection_allowed,baseline:data.baseline,training:data.training,metrics:data.metrics,verification:data.verification},null,2));
 text('notice',data.model?.diagnostic_only || data.diagnostic_only ? '仅限诊断：包含合成、未核实或旧来源条件，尚未验证实时驾驶能力。' : '数值接口诊断：不构成实时驾驶验收。');
 slider.max=Math.max(0,rows.length-1);slider.disabled=play.disabled=!rows.length;
 function loadImage(url){
@@ -66,7 +66,7 @@ async function show(index){
   const pictures=await Promise.all(row.frames.map((_,i)=>loadImage(row.preview_urls[i])));
   if(token!==generation)return;
   text('position',`${index+1} / ${rows.length}`);
-  text('result',`${row.decision_id} · ${row.status || '离线准备'} · ${row.replay_error || row.reason || (row.exact_replay_available ? '数值存档完整' : row.archive_reason || '待推理')} · 预测 ${JSON.stringify(row.replayed_prediction || row.prediction || null)} · 示范动作 ${JSON.stringify(row.supervision?.action || null)}（仅供比较）`);
+  text('result',`${row.decision_id} · ${row.status || '离线准备'} · ${row.replay_error || row.reason || (row.exact_replay_available ? '数值存档完整' : row.archive_reason || '待推理')} · 预测 ${JSON.stringify(row.replayed_prediction || row.prediction || null)} · 示范动作 ${JSON.stringify(row.supervision?.action || null)}（仅供比较）${'baseline_prediction' in row ? ` · 冻结基线 ${JSON.stringify(row.baseline_prediction)} · 复制最近动作 ${JSON.stringify(row.previous_action)} · 计分 ${row.scored}` : ''}`);
   const cards=document.getElementById('cards'), fragment=document.createDocumentFragment();
   row.frames.forEach((frame,i)=>{
     const figure=document.createElement('figure'), box=document.createElement('div'), caption=document.createElement('figcaption');box.className='image';

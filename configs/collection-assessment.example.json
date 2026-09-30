@@ -1,0 +1,12 @@
+{
+  "version": 1,
+  "mode": "development",
+  "dataset": "../runs/numeric-candidate/dataset.json",
+  "dataset_sha256": "REPLACE_WITH_EXPORTED_DATASET_SHA256",
+  "candidate": {
+    "directory": "../runs/new-candidate",
+    "manifest_sha256": "REPLACE_WITH_CANDIDATE_MODEL_JSON_SHA256"
+  },
+  "baseline": null,
+  "device": "cpu"
+}

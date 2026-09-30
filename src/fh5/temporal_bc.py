@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from fh5.bc_learning import VIEWS, _checked_config, _error, _write
 from fh5.bc_network import make_actor
+from fh5.collection_store import read_bounded
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_images import (
     NumericDecision,
@@ -53,7 +54,7 @@ class TemporalBCReplay:
 
 
 def _read(path: Path) -> tuple[dict[str, Any], str]:
-    raw = path.read_bytes()
+    raw = read_bounded(path, 128 * 1024**2)
     value = json.loads(raw)
     if not isinstance(value, dict):
         raise ValueError("Expected temporal BC JSON object")
@@ -85,8 +86,12 @@ def _configuration(path: Path) -> dict[str, Any]:
     return value
 
 
-def _snapshot(path: Path) -> tuple[dict[str, Any], PixelContract, list[dict[str, Any]]]:
-    data, _ = _read(path)
+def _snapshot(
+    path: Path, *, expected_sha256: str | None = None
+) -> tuple[dict[str, Any], PixelContract, list[dict[str, Any]]]:
+    data, digest = _read(path)
+    if expected_sha256 is not None and digest != expected_sha256:
+        raise ValueError("Numerical dataset changed before input reconstruction")
     if (
         data.get("version") != 1
         or data.get("kind") != "numeric-bc-snapshot-v1"
@@ -219,7 +224,7 @@ def _run(request: TemporalBCTrain | TemporalBCReplay, torch: Any) -> RunResult:
     _, digest = _read(dataset)
     if digest != config["dataset_sha256"]:
         raise ValueError("Frozen numerical dataset hash mismatch")
-    data, pixels, rows = _snapshot(dataset)
+    data, pixels, rows = _snapshot(dataset, expected_sha256=digest)
     if device not in ("cpu", "cuda") or (device == "cuda" and not torch.cuda.is_available()):
         raise ValueError("Requested temporal BC device unavailable")
     timing = time_contract(config["time_mode"], pixels)

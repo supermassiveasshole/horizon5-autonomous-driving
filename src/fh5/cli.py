@@ -75,6 +75,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     collection_bc.add_argument("--config", type=Path, required=True)
     collection_bc.add_argument("--output", type=Path, required=True)
+    assess = commands.add_parser(
+        "collection-bc-assess", help="Compare frozen models on development or final data"
+    )
+    assess.add_argument("--config", type=Path, required=True)
+    assess.add_argument("--output", type=Path, required=True)
     for name in ("collection-status", "collection-stop", "collection-review"):
         collection = commands.add_parser(
             name, help="Inspect, stop or verify a passive collection session"
@@ -367,6 +372,17 @@ def main(argv: Sequence[str] | None = None) -> int:
 
             prepared = run_experiment(CollectionBCPrepare(args.config, args.output))
             print(json.dumps(prepared.summary["collection_bc"], ensure_ascii=False))
+            return 0
+        if args.mode == "collection-bc-assess":
+            from fh5.collection_assessment import CollectionBCAssess
+
+            assessed = run_experiment(CollectionBCAssess(args.config, args.output))
+            summary = assessed.summary["collection_assessment"]
+            print(
+                json.dumps(
+                    {k: v for k, v in summary.items() if k != "decisions"}, ensure_ascii=False
+                )
+            )
             return 0
         if args.mode.startswith("collection-"):
             from fh5.collection import CollectionControl, CollectionReview

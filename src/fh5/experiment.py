@@ -18,6 +18,7 @@ from fh5.capture import CaptureReplay, CaptureRun, replay_capture
 from fh5.capture_runtime import CaptureSource, run_capture
 from fh5.capture_trace import CaptureTraceReview, review_capture_trace
 from fh5.collection import CollectionControl, CollectionEnvironment, CollectionReview, CollectionRun
+from fh5.collection_assessment import CollectionBCAssess, assess_collection_bc
 from fh5.collection_bc import CollectionBCPrepare, prepare_collection_bc
 from fh5.collection_dataset import (
     CollectionDataset,
@@ -234,6 +235,7 @@ def run_experiment(
     | CollectionDataset
     | CollectionDatasetReview
     | CollectionBCPrepare
+    | CollectionBCAssess
     | TemporalBCPrepare
     | TemporalBCTrain
     | TemporalBCReplay
@@ -320,6 +322,8 @@ def run_experiment(
         return prepare_temporal(request)
     if isinstance(request, CollectionBCPrepare):
         return prepare_collection_bc(request)
+    if isinstance(request, CollectionBCAssess):
+        return assess_collection_bc(request)
     if isinstance(request, (CollectionDataset, CollectionDatasetReview)):
         return run_collection_dataset(request)
     if isinstance(request, (TemporalBCTrain, TemporalBCReplay)):

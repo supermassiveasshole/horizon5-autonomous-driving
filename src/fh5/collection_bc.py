@@ -306,9 +306,22 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
                     },
                 }
             )
+    coverage = {entry["attempt"]: entry for entry in data["coverage"]}
     groups = [
         {
             **g,
+            "source_ranges": [
+                {
+                    "session_sha256": source["session_sha256"],
+                    "start_sequence": attempt["start_sequence"],
+                    "end_sequence": attempt["end_sequence"],
+                    "first_ns": coverage[attempt["id"]]["first_ns"],
+                    "last_ns": coverage[attempt["id"]]["last_ns"],
+                }
+                for source in data["sources"]
+                for attempt in source["review"]["attempts"]
+                if attempt["group"] == g["id"]
+            ],
             "evidence_id": hashlib.sha256(
                 encode({"selection": digest, "attempts": g["attempts"]})
             ).hexdigest(),
@@ -324,13 +337,20 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
         "diagnostic_only": data["diagnostic_only"],
         "envelope": data["config"]["rules"],
         "reference": reference_info,
+        "input_conditions": session["input_conditions"],
+        "vehicle": {
+            k: session["configuration"][k] for k in ("expected_car_ordinal", "expected_pi")
+        },
+        "input_mapping": session["profile"]["mapping"],
         "final_evaluation_available": any(g["split"] == "evaluation" for g in groups),
         "evaluation_policy": "separate sealed file; not training or development feedback",
     }
-    hashes = {}
-    for filename, evaluation in (("dataset.json", False), ("evaluation.json", True)):
+    hashes: dict[str, str] = {}
+    # Bind the final file in training provenance before any candidate is trained.
+    # This prevents rehashing a different holdout after seeing the model's results.
+    for filename, evaluation in (("evaluation.json", True), ("dataset.json", False)):
         group_ids = {g["id"] for g in groups if (g["split"] == "evaluation") == evaluation}
-        snapshot = {
+        snapshot: dict[str, Any] = {
             "version": 1,
             "kind": "numeric-bc-snapshot-v1",
             "pixel_contract": contract.metadata(),
@@ -340,6 +360,8 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
             "provenance": dict(provenance, partition="evaluation" if evaluation else "development"),
             "excluded": [e for e in excluded if e["group"] in group_ids],
         }
+        if not evaluation:
+            snapshot["provenance"]["final_dataset_sha256"] = hashes["evaluation.json"]
         payload = encode(snapshot)
         if len(payload) > 128 * 1024**2:
             raise ValueError("Numeric dataset exceeds 128 MiB metadata budget")
