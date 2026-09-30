@@ -222,7 +222,15 @@ class ShadowEnvironment:
             ):
                 task_fault = "local_end"
             elif not self.ready:
-                a, b = self.route["points"][:2]
+                pairs = list(zip(self.route["points"], self.route["points"][1:]))
+                a, b = next(
+                    (
+                        (a, b)
+                        for a, b in pairs
+                        if a["s_m"] <= self.geometry["reference_s_m"] < b["s_m"]
+                    ),
+                    pairs[-1],
+                )
                 heading = math.atan2(
                     b["position_m"][0] - a["position_m"][0],
                     b["position_m"][2] - a["position_m"][2],

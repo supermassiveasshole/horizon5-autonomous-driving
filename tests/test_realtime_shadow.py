@@ -9,7 +9,7 @@ import threading
 import time
 
 import pytest
-from test_route_check import route
+from test_route_check import record, route
 
 from fh5.capture import CaptureConfig, CaptureEvent, QpcMapping, RawCapture
 from fh5.experiment import Packet, run_experiment
@@ -17,6 +17,7 @@ from fh5.numeric_images import PixelContract
 from fh5.realtime import RealtimeConfig, RealtimeRun
 from fh5.realtime_shadow import LocalTask, ShadowEnvironment, TelemetryBatch
 from fh5.realtime_udp import UDPTelemetry
+from fh5.routes import BuildRoute
 
 
 class Desktop:
@@ -320,3 +321,41 @@ def test_restart_gap_before_preparation_clears_old_frames(tmp_path):
     ).summary["realtime"]
     assert any(d["status"] == "accepted" for d in r["decisions"])
     assert actor.inputs[1][1][0].source_time_ns >= telemetry.resumed_ns
+
+
+@pytest.mark.parametrize("yaw,accepted", [(0, True), (math.pi / 2, False)])
+def test_nonzero_task_start_uses_local_road_heading(tmp_path, yaw, accepted):
+    class CornerTelemetry(Telemetry):
+        def read(self, period_s):
+            packet = super().read(period_s).packets[0]
+            raw = bytearray(packet.payload)
+            struct.pack_into("<fff", raw, 244, 2, 2, 1)
+            struct.pack_into("<f", raw, 56, yaw)
+            return TelemetryBatch(
+                (Packet(packet.received_monotonic_ns, packet.received_utc, bytes(raw)),)
+            )
+
+    # Build an independently reviewed synthetic L-shaped task at the experiment seam.
+    request, _, actor, _, capture = setup(tmp_path)
+    source = record(tmp_path, "curved", [(0, 0), (1, 0), (2, 0), (2, 1), (2, 2), (2, 3)])
+    annotation = tmp_path / "annotations.json"
+    notes = json.loads(annotation.read_text())
+    notes["corridors"][0].update(s_end_m=5, polygon_xz=[[-1, -1], [4, -1], [4, 4], [-1, 4]])
+    annotation.write_text(json.dumps(notes))
+    run_experiment(BuildRoute(source, tmp_path / "curve-task", 0, 5, annotations_file=annotation))
+    path = tmp_path / "curve-task/route.json"
+    task = LocalTask(
+        path, hashlib.sha256(path.read_bytes()).hexdigest(), start_station_m=3, end_margin_m=0.5
+    )
+    env = ShadowEnvironment(
+        request,
+        CaptureConfig(pixels=request.config.pixels),
+        lambda: capture,
+        CornerTelemetry(),
+        Desktop(),
+        task,
+    )
+    r = run_experiment(
+        request, realtime_environment=env, numeric_actor_factory=lambda: actor
+    ).summary["realtime"]
+    assert any(d["status"] == "accepted" for d in r["decisions"]) is accepted

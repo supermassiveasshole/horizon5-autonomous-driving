@@ -11,10 +11,9 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-from fh5.capture import CaptureConfig, CaptureRun
+from fh5.capture import CaptureRun
+from fh5.capture_config import parse_capture_config
 from fh5.capture_runtime import CaptureSource
-from fh5.dxgi_capture import DXGISettings
-from fh5.numeric_images import PixelContract
 
 
 class PassiveActivity:
@@ -53,14 +52,7 @@ def capture_command(args: argparse.Namespace) -> int:
     from fh5.experiment import run_experiment
 
     document = json.loads(Path(args.config).read_text(encoding="utf-8"))
-    if (
-        set(document) != {"version", "pixels", "pipeline", "target", "input_conditions"}
-        or document["version"] != 1
-    ):
-        raise ValueError("Unsupported capture configuration")
-    config = CaptureConfig(
-        pixels=PixelContract.from_metadata(document["pixels"]), **document["pipeline"]
-    )
+    config, target = parse_capture_config(document)
     if args.diagnostic_mss == "jpeg":
         if args.raw_samples:
             raise ValueError("Legacy JPEG comparison cannot supply high-resolution raw samples")
@@ -72,12 +64,7 @@ def capture_command(args: argparse.Namespace) -> int:
                 resize="legacy-jpeg-roundtrip-then-bilinear-diagnostic-v1",
             ),
         )
-    target_doc = dict(document["target"])
-    target_doc["expected_client_size"] = tuple(target_doc["expected_client_size"])
-    target = DXGISettings(**target_doc)
     conditions = document["input_conditions"]
-    if conditions.get("version") != 1 or conditions.get("id") != target.condition_id:
-        raise ValueError("Capture input condition identity must match target")
     request = CaptureRun(
         args.output,
         config,

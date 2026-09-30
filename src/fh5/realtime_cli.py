@@ -8,9 +8,7 @@ import json
 from dataclasses import asdict
 from typing import Any
 
-from fh5.capture import CaptureConfig
-from fh5.dxgi_capture import DXGISettings
-from fh5.numeric_images import PixelContract
+from fh5.capture_config import parse_capture_config
 from fh5.realtime import RealtimeConfig, RealtimeRun
 from fh5.realtime_model import ShadowNumericActor, shadow_model_contract
 from fh5.realtime_shadow import LocalTask, ShadowEnvironment
@@ -29,21 +27,11 @@ def shadow_command(args: argparse.Namespace) -> int:
         raise ValueError("Unsupported read-only shadow configuration")
     capture_bytes = (args.config.parent / root["capture_config"]).read_bytes()
     document = json.loads(capture_bytes)
-    if (
-        set(document) != {"version", "pixels", "pipeline", "target", "input_conditions"}
-        or document["version"] != 1
-    ):
-        raise ValueError("Unsupported shadow capture configuration")
-    pixels = PixelContract.from_metadata(document["pixels"])
+    capture, target = parse_capture_config(document)
+    pixels = capture.pixels
     if pixels.origin != "direct_numeric":
         raise ValueError("Shadow DXGI capture requires direct numerical origin")
-    capture = CaptureConfig(pixels=pixels, **document["pipeline"])
-    target_options = dict(document["target"])
-    target_options["expected_client_size"] = tuple(target_options["expected_client_size"])
-    target = DXGISettings(**target_options)
     conditions = document["input_conditions"]
-    if conditions.get("version") != 1 or conditions.get("id") != target.condition_id:
-        raise ValueError("Shadow capture conditions do not match target")
     task_options = dict(root["task"])
     task_options["route_file"] = args.config.parent / task_options["route_file"]
     task = LocalTask(**task_options)
