@@ -162,6 +162,9 @@ def run_realtime(
         and not archive_result["error"]
         and state.pending is None
         and all(c["status"] == "sent" for c in state.commands)
+        and inference["warmup_completed"]
+        and not inference["error"]
+        and any(d["prediction"] is not None for d in state.decisions)
     )
     for row in state.decisions:
         row["archive"] = archive.records.get(row["decision_id"])

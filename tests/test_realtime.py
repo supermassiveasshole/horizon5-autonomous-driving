@@ -523,3 +523,46 @@ def test_input_hard_fault_is_latched_even_if_normal_input_arrives_before_next_gu
     assert r["stop_reason"] == reason
     assert len([c for c in r["commands"] if c["owner"] == "policy"]) == 1
     assert game.closed
+
+
+def test_action_hold_reports_send_return_intervals_and_call_uncertainty(tmp_path):
+    class SlowSink(ThreadedGame):
+        def send(self, command):
+            time.sleep(0.015)
+            super().send(command)
+
+    result = run_experiment(
+        RealtimeRun(
+            tmp_path / "hold", RealtimeConfig(pixels=PixelContract(size=(2, 1))), seconds=0.35
+        ),
+        realtime_environment=SlowSink(),
+        numeric_actor_factory=FastActor,
+    )
+    commands = result.summary["realtime"]["commands"]
+    first, second = commands[:2]
+    assert second["previous_hold_ns"] == second["returned_ns"] - first["returned_ns"]
+    assert (
+        second["previous_hold_lower_bound_ns"]
+        <= second["previous_hold_ns"]
+        <= second["previous_hold_upper_bound_ns"]
+    )
+    assert second["hold_time_basis"] == "send_return_proxy; game_application_time_unverified"
+
+
+def test_model_startup_failure_never_claims_exact_replay_evidence(tmp_path):
+    def fail_model():
+        raise ValueError("weights unavailable")
+
+    game = ThreadedGame()
+    result = run_experiment(
+        RealtimeRun(
+            tmp_path / "startup", RealtimeConfig(pixels=PixelContract(size=(2, 1))), seconds=0.2
+        ),
+        realtime_environment=game,
+        numeric_actor_factory=fail_model,
+    )
+    r = result.summary["realtime"]
+    assert r["stop_reason"] == "model_startup_failed"
+    assert r["commands"] == []
+    assert r["evidence"]["exact_replay_eligible"] is False
+    assert game.closed

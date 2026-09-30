@@ -97,6 +97,7 @@ class DecisionState:
         return s.task_fault
 
     def _send(self, now: int, command: Command, owner: str, work: Work | None = None) -> None:
+        previous = self.last_action
         row: dict[str, Any] = {
             "issued_ns": now,
             "returned_ns": now,
@@ -106,7 +107,10 @@ class DecisionState:
             "target": asdict(command),
             "sent": None,
             "status": "failed",
-            "previous_hold_ns": now - self.last_action["returned_ns"] if self.last_action else None,
+            "previous_hold_ns": None,
+            "previous_hold_lower_bound_ns": None,
+            "previous_hold_upper_bound_ns": None,
+            "hold_time_basis": "send_return_proxy; game_application_time_unverified",
         }
         try:
             self.send(command)
@@ -116,6 +120,10 @@ class DecisionState:
             raise
         finally:
             row["returned_ns"] = self.clock() if self.clock else now
+            if previous and previous["status"] == row["status"] == "sent":
+                row["previous_hold_ns"] = row["returned_ns"] - previous["returned_ns"]
+                row["previous_hold_lower_bound_ns"] = now - previous["returned_ns"]
+                row["previous_hold_upper_bound_ns"] = row["returned_ns"] - previous["issued_ns"]
             self.commands.append(row)
             self.last_action = row
             self.notify("command", dict(row))
