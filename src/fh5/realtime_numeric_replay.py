@@ -79,6 +79,12 @@ def read_realtime_journal(root: Path, report: dict[str, Any]) -> list[dict[str, 
             if len(line) > 1024**2 or len(sequences) >= 1_000_000:
                 raise ValueError("Journal event exceeds bounded replay limit")
             event = json.loads(line)
+            if (
+                not isinstance(event, dict)
+                or not isinstance(event.get("kind"), str)
+                or not isinstance(event.get("data"), dict)
+            ):
+                raise ValueError("Malformed real-time journal event")
             sequence = event["sequence"]
             if (
                 type(sequence) is not int

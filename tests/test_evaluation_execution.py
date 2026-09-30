@@ -3,6 +3,7 @@
 import hashlib
 import json
 import struct
+from copy import deepcopy
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -17,6 +18,7 @@ from fh5.evaluation import EvaluationReview
 from fh5.experiment import Packet, Record, run_experiment
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import PixelContract
+from fh5.numeric_recording import read_numeric_frame
 from fh5.realtime import RealtimeConfig, RealtimeRun
 
 
@@ -54,10 +56,19 @@ class PacketGame(ThreadedGame):
         )
 
 
-def execution(tmp_path, policy, *, shadow=False, reference_mode="no_reference", **options):
+def execution(
+    tmp_path,
+    policy,
+    *,
+    shadow=False,
+    source_kind="synthetic",
+    reference_mode="no_reference",
+    **options,
+):
     prepare(tmp_path, policy, [reference_mode])
     pixels = PixelContract(size=(64, 36))
     game = PacketGame()
+    game.source_kind = source_kind
 
     def factory():
         if shadow:
@@ -90,7 +101,10 @@ def execution(tmp_path, policy, *, shadow=False, reference_mode="no_reference", 
             }
         )
     )
-    run_experiment(Record(config, tmp_path / "recording"), packets=game.packets)
+    run_experiment(
+        Record(config, tmp_path / "recording", "udp" if source_kind == "shadow" else "synthetic"),
+        packets=game.packets,
+    )
     row = entry("run-0", tmp_path / "recording")
     row["execution"] = {
         "directory": "execution",
@@ -188,8 +202,11 @@ def test_execution_metrics_recompute_the_timeline_instead_of_trusting_summary_va
     assert summary["execution_metrics"]["effective_hz"] == metrics["effective_hz"]
 
 
-def test_shadow_actor_adapter_is_replayed_without_claiming_game_control(tmp_path, policy):
-    path, _ = execution(tmp_path, policy, shadow=True)
+@pytest.mark.parametrize("source_kind", ["synthetic", "shadow"])
+def test_shadow_actor_adapter_is_replayed_without_claiming_game_control(
+    tmp_path, policy, source_kind
+):
+    path, original = execution(tmp_path, policy, shadow=True, source_kind=source_kind)
     summary = run_experiment(
         EvaluationReview(tmp_path / "frozen", path, tmp_path / "review")
     ).summary["evaluation"]
@@ -197,6 +214,12 @@ def test_shadow_actor_adapter_is_replayed_without_claiming_game_control(tmp_path
     assert proof["status"] == "bound_diagnostic"
     assert proof["game_control_verified"] is False
     assert proof["verified_predictions"] >= 3
+    if source_kind == "shadow":
+        assert all(
+            d["actor"]["actions"] == [None, None, None]
+            for d in original["decisions"]
+            if "actor" in d
+        )
 
 
 def test_archive_gaps_keep_all_attempts_and_explain_why_execution_is_quarantined(tmp_path, policy):
@@ -337,3 +360,98 @@ def test_safety_state_must_be_from_the_linked_telemetry_not_an_unrelated_clock(t
     ).summary["evaluation"]
     assert summary["executions"][0]["status"] == "quarantined"
     assert "safety" in str(summary["executions"][0]["reasons"])
+
+
+@pytest.mark.parametrize("timing", ["after_deadline", "after_send"])
+def test_accepted_prediction_must_arrive_before_its_command_and_deadline(tmp_path, policy, timing):
+    path, report = execution(tmp_path, policy)
+    row = next(d for d in report["decisions"] if d["status"] == "accepted")
+    command = next(c for c in report["commands"] if c["decision_id"] == row["decision_id"])
+    row["inference_returned_ns"] = (
+        row["deadline_ns"] + 1_000_000_000
+        if timing == "after_deadline"
+        else command["issued_ns"] + 1
+    )
+    journal = tmp_path / "execution/realtime-events.jsonl"
+    events = [json.loads(line) for line in journal.read_text().splitlines()]
+    for event in events:
+        if (
+            event["kind"] == "decision_result"
+            and event["data"]["decision_id"] == row["decision_id"]
+        ):
+            event["data"]["inference_returned_ns"] = row["inference_returned_ns"]
+    journal.write_text("".join(json.dumps(e) + "\n" for e in events))
+    report["journal"]["sha256"] = sha(journal)
+    replace_report(tmp_path, path, report)
+    summary = run_experiment(
+        EvaluationReview(tmp_path / "frozen", path, tmp_path / "review")
+    ).summary["evaluation"]
+    assert summary["executions"][0]["status"] == "quarantined"
+    assert summary["execution_metrics"]["effective_hz"] is None
+    assert summary["metrics"]["all_attempts"] == 1
+
+
+def test_malformed_journal_kind_is_isolated_without_losing_the_attempt_report(tmp_path, policy):
+    path, report = execution(tmp_path, policy)
+    journal = tmp_path / "execution/realtime-events.jsonl"
+    events = [json.loads(line) for line in journal.read_text().splitlines()]
+    events[0]["kind"] = None
+    journal.write_text("".join(json.dumps(e) + "\n" for e in events))
+    report["journal"]["sha256"] = sha(journal)
+    replace_report(tmp_path, path, report)
+    result = run_experiment(EvaluationReview(tmp_path / "frozen", path, tmp_path / "review"))
+    summary = result.summary["evaluation"]
+    assert result.report_path.is_file()
+    assert summary["executions"][0]["status"] == "quarantined"
+    assert summary["executions"][0]["metrics"] is None
+    assert summary["metrics"]["all_attempts"] == 1
+
+
+def test_reproducible_prediction_cannot_validate_an_action_history_that_was_never_sent(
+    tmp_path, policy
+):
+    path, report = execution(tmp_path, policy)
+    row = next(d for d in report["decisions"] if d["status"] == "accepted")
+    assert row["actor"]["actions"] == [None, None, None]
+    row["actor"].update(
+        actions=[[0.9, 0.8]] * 3,
+        action_mask=[True] * 3,
+        action_age_ms=[210.0, 110.0, 10.0],
+    )
+    archive = tmp_path / "execution" / row["archive"]["path"]
+    saved = json.loads(archive.read_bytes())
+    saved["actor"] = deepcopy(row["actor"])
+    archive.write_text(json.dumps(saved))
+    row["archive"]["sha256"] = sha(archive)
+    frames = tuple(read_numeric_frame(tmp_path / "execution", f) for f in saved["frames"])
+    actor = FrozenNumericActor(tmp_path / "frozen/model", PixelContract(size=(64, 36)))
+    row["features"] = actor.input_features(row["actor"], frames)
+    row["prediction"] = actor.predict(row["actor"], frames)
+    steer, longitudinal = row["prediction"]
+    cfg = report["configuration"]
+    command = next(c for c in report["commands"] if c["decision_id"] == row["decision_id"])
+    command["sent"] = command["target"] = {
+        "steer_i16": round(max(-cfg["max_steer"], min(cfg["max_steer"], steer)) * 32767),
+        "throttle_u8": round(max(0, min(cfg["max_throttle"], longitudinal)) * 255),
+        "brake_u8": round(max(0, min(cfg["max_brake"], -longitudinal)) * 255),
+    }
+    journal = tmp_path / "execution/realtime-events.jsonl"
+    events = [json.loads(line) for line in journal.read_text().splitlines()]
+    for event in events:
+        if event["data"].get("decision_id") != row["decision_id"]:
+            continue
+        if event["kind"] == "decision_started":
+            event["data"]["actor"] = deepcopy(row["actor"])
+        elif event["kind"] == "decision_result":
+            event["data"] = deepcopy(row)
+        elif event["kind"] == "command":
+            event["data"] = deepcopy(command)
+    journal.write_text("".join(json.dumps(e) + "\n" for e in events))
+    report["journal"]["sha256"] = sha(journal)
+    replace_report(tmp_path, path, report)
+    summary = run_experiment(
+        EvaluationReview(tmp_path / "frozen", path, tmp_path / "review")
+    ).summary["evaluation"]
+    assert summary["executions"][0]["status"] == "quarantined"
+    assert summary["metrics"]["all_attempts"] == 1
+    assert "action history" in str(summary["executions"][0]["reasons"])

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import importlib
 import json
+from bisect import bisect_left
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -103,6 +104,15 @@ def _verify_commands(report: dict[str, Any]) -> None:
             raise ValueError("Execution policy command lacks a unique accepted decision")
         seen.add(decision_id)
         decision = accepted[decision_id]
+        clock = [
+            decision["decision_ns"],
+            decision["worker_started_ns"],
+            decision["worker_returned_ns"],
+            decision["inference_returned_ns"],
+            command["issued_ns"],
+        ]
+        if any(type(at) is not int for at in clock) or any(a > b for a, b in zip(clock, clock[1:])):
+            raise ValueError("Execution inference and command timing is not causal")
         steer, longitudinal = decision["prediction"]
         expected = {
             "steer_i16": round(max(-config["max_steer"], min(config["max_steer"], steer)) * 32767),
@@ -120,6 +130,38 @@ def _verify_commands(report: dict[str, Any]) -> None:
             )
     if seen != accepted.keys():
         raise ValueError("Accepted decision has no successful execution command")
+
+
+def _verify_history(report: dict[str, Any]) -> None:
+    commands = sorted(report["commands"], key=lambda command: command["returned_ns"])
+    returned = [command["returned_ns"] for command in commands]
+    for row in report["decisions"]:
+        if "actor" not in row:
+            continue
+        actions: list[list[float] | None] = []
+        ages: list[float | None] = []
+        for offset in report["configuration"]["action_offsets_ms"]:
+            target = row["decision_ns"] - offset * 1_000_000
+            index = bisect_left(returned, target) - 1
+            if (
+                report["evidence_kind"] == "synthetic"
+                and index >= 0
+                and target - returned[index] <= 200_000_000
+            ):
+                sent = commands[index]["sent"]
+                actions.append(
+                    [sent["steer_i16"] / 32767, (sent["throttle_u8"] - sent["brake_u8"]) / 255]
+                )
+                ages.append((row["decision_ns"] - returned[index]) / 1e6)
+            else:
+                actions.append(None)
+                ages.append(None)
+        if (
+            row["actor"]["actions"] != actions
+            or row["actor"]["action_mask"] != [action is not None for action in actions]
+            or row["actor"]["action_age_ms"] != ages
+        ):
+            raise ValueError("Execution action history differs from recorded successful sends")
 
 
 def review_execution(
@@ -190,6 +232,7 @@ def review_execution(
         if not replay["verified"]:
             raise ValueError("Execution numerical replay failed: " + str(replay["errors"]))
         _verify_commands(report)
+        _verify_history(report)
         modes = {
             "reference_assisted" if any(d["actor"]["reference"]["mask"]) else "no_reference"
             for d in report["decisions"]
