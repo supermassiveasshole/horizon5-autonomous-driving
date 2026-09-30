@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 from fh5.collection_store import atomic_json, encode, read_bounded, write_file
 from fh5.evaluation import EvaluationReview, _read, read_evaluation_batch
 from fh5.evaluation_handoff import ReadyHandoff
+from fh5.evaluation_model import asset_limit, evaluation_actor
 from fh5.events import EventEnvironment, EventRun, validate_event_file
 from fh5.numeric_images import PixelContract
 from fh5.realtime import RealtimeConfig, RealtimeEnvironment, RealtimeRun
@@ -74,7 +75,7 @@ def _freeze(request: EvaluationRun) -> tuple[dict[str, Any], Path, dict[str, Any
     for name in ["batch.json", *batch["files"]]:
         dest = root / "frozen" / name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        write_file(dest, read_bounded(request.batch_dir / name, 128 * 1024**2))
+        write_file(dest, read_bounded(request.batch_dir / name, asset_limit(name)))
     read_evaluation_batch(root / "frozen", request.batch_sha256)
     assets = root / "event-assets"
     assets.mkdir()
@@ -132,7 +133,6 @@ def _verify_event_protocol(root: Path, expected: str) -> None:
 
 def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -> RunResult:
     from fh5.experiment import Packet, Record, RunResult, run_experiment
-    from fh5.numeric_actor import FrozenNumericActor
 
     summary: dict[str, Any] = {
         "version": 1,
@@ -151,7 +151,6 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
         if environment.source_kind != "synthetic":
             raise ValueError("Repeated evaluation currently requires synthetic external I/O")
         batch, event_file, event_parameters = _freeze(request)
-        model_sha = batch["files"]["model/model.json"]
         protocol_sha = _read(root / "run-protocol.json")[1]
         settings = dict(batch["config"]["runtime"])
         settings["pixels"] = PixelContract.from_metadata(settings["pixels"])
@@ -231,8 +230,8 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
                 realtime_environment=ReadyHandoff(
                     drive, preparation["ready_state"], event_parameters, config
                 ),
-                numeric_actor_factory=lambda: FrozenNumericActor(
-                    root / "frozen/model", config.pixels, expected_manifest_sha256=model_sha
+                numeric_actor_factory=lambda: evaluation_actor(
+                    root / "frozen/model", batch["config"]["model"], batch["config"]["runtime"]
                 ),
             ).summary["realtime"]
             attempt.update(

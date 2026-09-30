@@ -146,7 +146,7 @@ def reserve_batch(registry: Path, batch: dict[str, Any]) -> None:
             "INSERT INTO reservations VALUES (?, ?, ?, ?)",
             (
                 digest,
-                batch["files"]["model/model.json"],
+                batch["config"]["model"]["manifest_sha256"],
                 batch["config"]["purpose"],
                 datetime.now(UTC).isoformat(),
             ),
@@ -288,7 +288,7 @@ def _review_usage(
         reserved = bool(
             reservation
             and batch.get("usage_registry_id") == before["registry_id"]
-            and reservation["model"] == batch["files"]["model/model.json"]
+            and reservation["model"] == batch["config"]["model"]["manifest_sha256"]
             and reservation["purpose"] == batch["config"]["purpose"]
         )
         unknown = []
@@ -317,7 +317,7 @@ def _review_usage(
             sources,
             "final" if batch["config"]["purpose"] == "final" else "selection",
             batch_sha256,
-            batch["files"]["model/model.json"],
+            batch["config"]["model"]["manifest_sha256"],
         )
         snapshot = _snapshot(db)
     write_file(output / "usage-snapshot.json", encode(snapshot))

@@ -34,10 +34,12 @@ class DecisionState:
         clock: Callable[[], int] | None = None,
         simulated_history: bool = True,
         notify: Callable[[str, Any], None] | None = None,
+        require_command_context: bool = False,
     ) -> None:
         self.config, self.send = config, send
         self.clock, self.simulated_history = clock, simulated_history
         self.notify = notify or (lambda kind, row: None)
+        self.require_command_context = require_command_context
         self.safety: SafetyState | None = None
         self.decisions: list[dict[str, Any]] = []
         self.commands: list[dict[str, Any]] = []
@@ -299,6 +301,19 @@ class DecisionState:
             and observation.frames[-1].source_time_ns <= self.submitted_source[1]
         ):
             row["status"] = "skip_repeated_source"
+        elif self.require_command_context and self.last_action is None:
+            try:
+                self._send(now, NEUTRAL, "initial_neutral")
+                row["status"] = "skip_initial_command_context"
+            except Exception:
+                row["status"] = "send_failed"
+                self.stop(now, "send_failed")
+        elif (
+            self.require_command_context
+            and self.last_action
+            and self.last_action["returned_ns"] >= now
+        ):
+            row["status"] = "skip_command_context_time"
         else:
             actor = self._actor(now, observation)
             row.update(
@@ -308,6 +323,8 @@ class DecisionState:
                 safety_at_decision=asdict(self.safety) if self.safety else None,
                 telemetry_received_ns=observation.telemetry_received_ns,
             )
+            if self.require_command_context:
+                row["command_context"] = self.command_context()
             work = Work(row, observation, actor)
             self.pending = work
             self.submitted_source = observation.epoch, observation.frames[-1].source_time_ns
@@ -315,6 +332,18 @@ class DecisionState:
             return work
         self.notify("decision_skipped", dict(row))
         return None
+
+    def command_context(self) -> dict[str, Any]:
+        if self.last_action is None or self.last_action["status"] != "sent":
+            raise ValueError("No successful command available")
+        return {
+            "version": 1,
+            "command_index": len(self.commands) - 1,
+            **{
+                key: deepcopy(self.last_action[key])
+                for key in ("sent", "issued_ns", "returned_ns", "owner")
+            },
+        }
 
     def complete(
         self, now: int, work: Work, prediction: list[float], error: str | None = None
@@ -342,6 +371,8 @@ class DecisionState:
             row["status"] = "discard_invalid_prediction"
         elif self.capture_epoch != work.observation.epoch:
             row["status"] = "discard_capture_epoch"
+        elif self.require_command_context and row["command_context"] != self.command_context():
+            row["status"] = "discard_command_context_changed"
         elif reason := self.observation_reason(now, work.observation):
             row["status"] = "discard_" + reason
         else:

@@ -63,6 +63,8 @@ uv run --locked fh5 realtime-replay runs/shadow-10hz --model runs/t35-temporal-2
 
 实验接口为 `run_experiment(RealtimeNumericReplay(...), numeric_actor=...)`。它验证数值可复现性，**不重新执行原来的墙钟调度、发送或车辆反应**，不把“重放成功”变成实时性能或成绩验收。旧 v1 实时记录缺少必要绑定，不能追认为通过。哈希用于本地完整性核验，不是抵御同时修改全部资产与清单的数字签名。
 
+冻结 SAC 评估通过显式成功命令上下文使用同一运行线程和旁路，说明见[评估版本 2](evaluation.md#冻结-sac-的版本-2-批次)。首次就绪发送中立后才进行模型决策；推理期间命令改变会丢弃旧结果。该模式仅支持合成执行器，BC 和只读影子的原语义保持。`RealtimeReplay` 的 `require_command_context=True` 提供对应的确定性时序故障验证。
+
 ## 验证与剩余工作
 
 `uv run --locked pytest tests/test_realtime.py` 覆盖 5%/10% 源帧丢失、100 ms 缺图恢复、300 ms 断图锁止、重复旧帧、源槽复用、采集边界、迟到/挂起推理、部分发送失败，以及真实线程下 400 ms 推理暂停、1 秒写盘暂停。

@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import Any
 
-from fh5.numeric_images import NumericActor, NumericFrame
+from fh5.numeric_images import NumericActor, NumericDecision, NumericFrame, decision_prediction
 from fh5.numeric_recording import numeric_features
 from fh5.realtime import RealtimeConfig, RealtimeObservation, SafetyState
 from fh5.realtime_state import DecisionState, Work
@@ -89,7 +89,19 @@ class InferenceWorker:
         )
         if work is None:
             raise ValueError("Cannot construct bounded numerical warmup")
-        actor.predict(work.actor, frames)
+        context = None
+        if actor.manifest.get("command_context"):
+            context = {
+                "version": 1,
+                "command_index": 0,
+                "issued_ns": now - 50_000_000,
+                "returned_ns": now - 50_000_000,
+                "sent": {"steer_i16": 0, "throttle_u8": 0, "brake_u8": 0},
+                "owner": "warmup",
+            }
+        decision_prediction(
+            actor, NumericDecision("warmup", "warmup", now, frames, work.actor), context
+        )
 
     def _run(self) -> None:
         try:
@@ -99,6 +111,15 @@ class InferenceWorker:
                 != self.config.pixels.metadata()
             ):
                 raise ValueError("Frozen actor and real-time numerical contracts differ")
+            if actor.manifest.get("command_context") and (
+                actor.manifest["command_context"] != "successful-send-return-proxy-v1"
+                or self.config.action_offsets_ms != (200, 100, 0)
+                or any(
+                    actor.manifest.get("bounds", {}).get(key) != getattr(self.config, key)
+                    for key in ("max_steer", "max_throttle", "max_brake")
+                )
+            ):
+                raise ValueError("Command-conditioned actor and execution contract differ")
             self.kind, self.manifest = actor.kind, deepcopy(actor.manifest)
             self._warmup(actor)
             self.warmup_completed = True
@@ -116,7 +137,19 @@ class InferenceWorker:
                     features = numeric_features(
                         actor, deepcopy(work.actor), work.observation.frames
                     )
-                    prediction = list(actor.predict(deepcopy(work.actor), work.observation.frames))
+                    prediction = list(
+                        decision_prediction(
+                            actor,
+                            NumericDecision(
+                                work.row["decision_id"],
+                                work.observation.epoch,
+                                work.row["decision_ns"],
+                                work.observation.frames,
+                                deepcopy(work.actor),
+                            ),
+                            deepcopy(work.row.get("command_context")),
+                        )
+                    )
                 except Exception as failure:
                     error = f"{type(failure).__name__}: {failure}"
                 self.results.put_nowait(

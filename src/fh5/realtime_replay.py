@@ -15,7 +15,11 @@ if TYPE_CHECKING:
 
 def replay_realtime(request: RealtimeReplay) -> RunResult:
     request.output_dir.mkdir(parents=True, exist_ok=False)
-    state = DecisionState(request.config, lambda command: None)
+    state = DecisionState(
+        request.config,
+        lambda command: None,
+        require_command_context=request.require_command_context,
+    )
     points = {p.at_ns: p for p in request.inputs}
     replies = iter(request.replies)
     pending: tuple[int, Work, list[float], str | None] | None = None
@@ -51,6 +55,7 @@ def replay_realtime(request: RealtimeReplay) -> RunResult:
         state.pending.row["status"] = "abandoned_inference"
     result: dict[str, Any] = {
         "version": 1,
+        "require_command_context": request.require_command_context,
         "evidence_kind": "synthetic_deadline_replay",
         "commands_sent_to_game": False,
         "decisions": state.decisions,

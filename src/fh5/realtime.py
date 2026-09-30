@@ -128,6 +128,7 @@ class RealtimeReplay:
     config: RealtimeConfig
     inputs: tuple[TimelineInput, ...]
     replies: tuple[InferenceReply, ...]
+    require_command_context: bool = False
 
     def __post_init__(self) -> None:
         if (
@@ -136,6 +137,7 @@ class RealtimeReplay:
             or any(a.at_ns >= b.at_ns for a, b in zip(self.inputs, self.inputs[1:]))
             or self.inputs[-1].at_ns - self.inputs[0].at_ns > 600_000_000_000
             or len(self.replies) > 12_000
+            or type(self.require_command_context) is not bool
         ):
             raise ValueError("Replay requires a bounded forward timeline")
 

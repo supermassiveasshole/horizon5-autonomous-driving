@@ -9,7 +9,7 @@ from dataclasses import asdict
 from typing import Any
 
 from fh5.capture_config import parse_capture_config
-from fh5.numeric_images import PixelContract
+from fh5.numeric_images import NumericActor, PixelContract
 from fh5.realtime import RealtimeConfig, RealtimeNumericReplay, RealtimeRun
 from fh5.realtime_model import ShadowNumericActor, shadow_model_contract
 from fh5.realtime_numeric_replay import read_realtime_recording
@@ -19,17 +19,25 @@ from fh5.realtime_udp import UDPTelemetry
 
 def replay_command(args: argparse.Namespace) -> int:
     from fh5.experiment import run_experiment
+    from fh5.sac_evaluation_actor import SACEvaluationActor
 
     recording = read_realtime_recording(args.recording)
-    if recording["actor_kind"] != ShadowNumericActor.kind:
-        raise ValueError("CLI replay requires the frozen temporal shadow actor")
-    actor = ShadowNumericActor(
-        args.model,
-        PixelContract.from_metadata(recording["configuration"]["pixels"]),
-        recording["model"]["weights_sha256"],
-        args.device,
-        allow_legacy_source_diagnostic=args.allow_legacy_source_diagnostic,
-    )
+    actor: NumericActor
+    pixels = PixelContract.from_metadata(recording["configuration"]["pixels"])
+    if recording["actor_kind"] == SACEvaluationActor.kind:
+        if args.device != "cpu" or args.allow_legacy_source_diagnostic:
+            raise ValueError("SAC replay requires CPU and its exact numerical source contract")
+        actor = SACEvaluationActor(args.model, pixels, recording["model"]["sac_manifest_sha256"])
+    elif recording["actor_kind"] == ShadowNumericActor.kind:
+        actor = ShadowNumericActor(
+            args.model,
+            pixels,
+            recording["model"]["weights_sha256"],
+            args.device,
+            allow_legacy_source_diagnostic=args.allow_legacy_source_diagnostic,
+        )
+    else:
+        raise ValueError("CLI replay requires a supported frozen shadow or SAC actor")
     result = run_experiment(
         RealtimeNumericReplay(args.recording, args.report, args.tolerance),
         numeric_actor=actor,

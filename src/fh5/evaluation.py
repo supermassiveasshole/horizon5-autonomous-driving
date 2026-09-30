@@ -19,6 +19,7 @@ from fh5.bc_learning import VIEWS
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.evaluation_execution import review_execution
 from fh5.evaluation_metrics import combine_execution_metrics
+from fh5.evaluation_model import asset_limit, model_payloads, validate_model
 from fh5.evidence_usage import bind_evaluation_slots, reserve_batch, review_usage, source_keys
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_images import PixelContract
@@ -57,17 +58,16 @@ def read_evaluation_batch(
     directory: Path, expected_sha256: str
 ) -> tuple[dict[str, Any], str, bytes]:
     batch, digest, raw = _read(directory / "batch.json", 4 * 1024**2)
-    if (
-        digest != expected_sha256
-        or batch.get("kind") != "frozen-local-evaluation-v1"
-        or batch.get("version") != 1
+    if digest != expected_sha256 or (batch.get("kind"), batch.get("version")) not in (
+        ("frozen-local-evaluation-v1", 1),
+        ("frozen-local-evaluation-v2", 2),
     ):
         raise ValueError("Frozen evaluation batch changed or unsupported")
     for name, expected in batch["files"].items():
         target = (directory / name).resolve()
         if (
             not target.is_relative_to(directory.resolve())
-            or hashlib.sha256(read_bounded(target, 128 * 1024**2)).hexdigest() != expected
+            or hashlib.sha256(read_bounded(target, asset_limit(name))).hexdigest() != expected
         ):
             raise ValueError("Frozen evaluation dependency changed: " + name)
     return batch, digest, raw
@@ -81,13 +81,16 @@ def _config(path: Path) -> dict[str, Any]:
         set(config)
         != {"version", "purpose", "model", "task", "conditions", "runtime", "plan", "criteria"}
         or type(config["version"]) is not int
-        or config["version"] != 1
+        or config["version"] not in (1, 2)
     ):
         raise ValueError("Unsupported frozen evaluation configuration")
     if config["purpose"] not in ("development", "final"):
         raise ValueError("Evaluation requires development or final purpose")
     for name, required in (
-        ("model", {"directory", "manifest_sha256"}),
+        (
+            "model",
+            {"directory", "manifest_sha256"} | ({"kind"} if config["version"] == 2 else set()),
+        ),
         ("task", {"file", "sha256"}),
     ):
         binding = config[name]
@@ -97,6 +100,8 @@ def _config(path: Path) -> dict[str, Any]:
             or any(not isinstance(v, str) or not v.strip() for v in binding.values())
         ):
             raise ValueError("Evaluation binding is incomplete: " + name)
+    if config["version"] == 2 and config["model"]["kind"] != "sac":
+        raise ValueError("Evaluation version 2 requires an explicit SAC model")
     conditions = config["conditions"]
     if not isinstance(conditions, dict) or set(conditions) != {
         "snapshot",
@@ -162,7 +167,6 @@ def _config(path: Path) -> dict[str, Any]:
 
 def prepare_evaluation(request: EvaluationPrepare) -> RunResult:
     from fh5.experiment import RunResult
-    from fh5.numeric_actor import FrozenNumericActor
 
     if request.output_dir.exists():
         raise FileExistsError(request.output_dir)
@@ -171,12 +175,7 @@ def prepare_evaluation(request: EvaluationPrepare) -> RunResult:
     model_dir = base / config["model"]["directory"]
     if request.output_dir.resolve().is_relative_to(model_dir.resolve()):
         raise ValueError("Evaluation output must be outside the model")
-    model, digest, model_raw = _read(model_dir / "model.json")
-    if digest != config["model"]["manifest_sha256"]:
-        raise ValueError("Evaluation model manifest changed")
-    weights = read_bounded(model_dir / "actor.pt", 128 * 1024**2)
-    if hashlib.sha256(weights).hexdigest() != model["weights_sha256"]:
-        raise ValueError("Evaluation weights changed")
+    model, payloads = model_payloads(model_dir, config["model"])
     for view in {p["reference_mode"] for p in config["plan"]}:
         if model.get("training", {}).get("train_by_view", {}).get(view, 0) <= 0:
             raise ValueError("Evaluation view was not trained: " + view)
@@ -198,12 +197,12 @@ def prepare_evaluation(request: EvaluationPrepare) -> RunResult:
         raise ValueError("Evaluation route changed")
     load_route(route_path)
     task["route_file"] = "route/route.json"
-    payloads = {
-        "model/model.json": model_raw,
-        "model/actor.pt": weights,
-        "task.json": encode(task),
-        "route/route.json": route_raw,
-    }
+    payloads.update(
+        {
+            "task.json": encode(task),
+            "route/route.json": route_raw,
+        }
+    )
     for asset in [*route_manifest["assets"].values(), *route_manifest["evidence"]]:
         content = read_bounded(route_path.parent / asset["path"], 128 * 1024**2)
         if hashlib.sha256(content).hexdigest() != asset["sha256"]:
@@ -215,9 +214,10 @@ def prepare_evaluation(request: EvaluationPrepare) -> RunResult:
         (request.output_dir / name).parent.mkdir(parents=True, exist_ok=True)
         write_file(request.output_dir / name, raw)
     # Validate the copied bytes, including the checkpoint's embedded input metadata.
-    with preserve_torch_state(importlib.import_module("torch")):
-        actor = FrozenNumericActor(
-            request.output_dir / "model", PixelContract.from_metadata(config["runtime"]["pixels"])
+    torch = importlib.import_module("torch")
+    with preserve_torch_state(torch):
+        policy_contract, diagnostic_only = validate_model(
+            torch, request.output_dir / "model", config["model"], config["runtime"]
         )
     config["model"]["directory"] = "model"
     config["task"] = {
@@ -225,13 +225,13 @@ def prepare_evaluation(request: EvaluationPrepare) -> RunResult:
         "sha256": hashlib.sha256(payloads["task.json"]).hexdigest(),
     }
     batch = {
-        "version": 1,
-        "kind": "frozen-local-evaluation-v1",
+        "version": config["version"],
+        "kind": f"frozen-local-evaluation-v{config['version']}",
         "created_utc": datetime.now(UTC).isoformat(),
         "config": config,
         "files": {name: hashlib.sha256(raw).hexdigest() for name, raw in payloads.items()},
-        "model_diagnostic_only": actor.manifest["diagnostic_only"],
-        "policy_contract": actor.original_contract,
+        "model_diagnostic_only": diagnostic_only,
+        "policy_contract": policy_contract,
     }
     path = request.output_dir / "batch.json"
     if request.registry_file is not None:

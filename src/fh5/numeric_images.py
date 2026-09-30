@@ -7,7 +7,7 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -153,6 +153,23 @@ class NumericActor(Protocol):
     manifest: dict[str, Any]
 
     def predict(self, actor: dict[str, Any], frames: tuple[NumericFrame, ...]) -> list[float]: ...
+
+
+@runtime_checkable
+class ContextualNumericActor(Protocol):
+    def predict_decision(
+        self, decision: NumericDecision, command_context: dict[str, Any]
+    ) -> list[float]: ...
+
+
+def decision_prediction(
+    actor: NumericActor, decision: NumericDecision, command_context: dict[str, Any] | None = None
+) -> list[float]:
+    if isinstance(actor, ContextualNumericActor):
+        if command_context is None:
+            raise ValueError("This actor requires acknowledged command context")
+        return actor.predict_decision(decision, command_context)
+    return actor.predict(decision.actor, decision.frames)
 
 
 def validate_decision(decision: NumericDecision, contract: PixelContract) -> str | None:

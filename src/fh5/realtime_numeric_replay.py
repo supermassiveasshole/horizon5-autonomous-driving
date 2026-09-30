@@ -15,6 +15,7 @@ from fh5.numeric_images import (
     NumericDecision,
     PixelContract,
     asset,
+    decision_prediction,
     validate_decision,
 )
 from fh5.numeric_recording import numeric_features, read_numeric_frame
@@ -119,6 +120,7 @@ def read_realtime_journal(root: Path, report: dict[str, Any]) -> list[dict[str, 
             if (
                 started.get("status") != "pending"
                 or started.get("prediction") is not None
+                or started.get("command_context") != row.get("command_context")
                 or any(
                     started[key] != row[key]
                     for key in (
@@ -173,6 +175,8 @@ def _decision(
     ):
         if saved[key] != row[key]:
             raise ValueError("Decision differs from archived input")
+    if saved.get("command_context") != row.get("command_context"):
+        raise ValueError("Archived command context differs from decision")
     if len(saved["frames"]) != len(contract.history_offsets_ms):
         raise ValueError("Archived frame count differs from contract")
     frames = tuple(
@@ -194,7 +198,7 @@ def _decision(
     features = numeric_features(actor, deepcopy(decision.actor), frames)
     if features != row.get("features"):
         raise ValueError("Numerical time/state features differ from recorded inputs")
-    prediction = list(actor.predict(deepcopy(decision.actor), frames))
+    prediction = list(decision_prediction(actor, decision, deepcopy(row.get("command_context"))))
     if not _valid_prediction(prediction):
         raise ValueError("Replay actor returned invalid prediction")
     error = max(abs(a - b) for a, b in zip(prediction, row["prediction"]))

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from fh5.collection_store import read_bounded
 from fh5.evaluation_metrics import execution_metrics
+from fh5.evaluation_model import evaluation_actor
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_images import NumericActor, PixelContract
 from fh5.realtime import RealtimeNumericReplay
@@ -93,7 +94,7 @@ def _verify_commands(report: dict[str, Any]) -> None:
             raise ValueError("Execution command target and successful send differ")
         if command["owner"] != "policy":
             if (
-                command["owner"] not in ("hard_stop", "lease_expiry")
+                command["owner"] not in ("hard_stop", "lease_expiry", "initial_neutral")
                 or command["decision_id"] is not None
                 or command["sent"] != neutral
             ):
@@ -138,6 +139,22 @@ def _verify_history(report: dict[str, Any]) -> None:
     for row in report["decisions"]:
         if "actor" not in row:
             continue
+        if report["model"].get("command_context"):
+            prior = [
+                (i, c)
+                for i, c in enumerate(report["commands"])
+                if c["status"] == "sent" and c["returned_ns"] < row["decision_ns"]
+            ]
+            if not prior:
+                raise ValueError("SAC decision lacks a successful prior command")
+            index, previous = prior[-1]
+            expected = {
+                "version": 1,
+                "command_index": index,
+                **{key: previous[key] for key in ("sent", "issued_ns", "returned_ns", "owner")},
+            }
+            if row.get("command_context") != expected:
+                raise ValueError("SAC context differs from successful command history")
         actions: list[list[float] | None] = []
         ages: list[float | None] = []
         for offset in report["configuration"]["action_offsets_ms"]:
@@ -176,7 +193,6 @@ def review_execution(
     output: Path,
 ) -> dict[str, Any]:
     from fh5.experiment import run_experiment
-    from fh5.numeric_actor import FrozenNumericActor
     from fh5.realtime_model import ShadowNumericActor
 
     result: dict[str, Any] = {
@@ -220,7 +236,9 @@ def review_execution(
                 model = json.loads(read_bounded(batch_dir / "model/model.json", 128 * 1024**2))
                 actor = ShadowNumericActor(batch_dir / "model", contract, model["weights_sha256"])
             else:
-                actor = FrozenNumericActor(batch_dir / "model", contract)
+                actor = evaluation_actor(
+                    batch_dir / "model", batch["config"]["model"], batch["config"]["runtime"]
+                )
             replay = run_experiment(
                 RealtimeNumericReplay(root, output), numeric_actor=actor
             ).summary["realtime_numeric_replay"]

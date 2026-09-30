@@ -113,6 +113,11 @@ def run_realtime(
         if not worker.ready.wait(request.startup_timeout_s) or not worker.warmup_completed:
             state.stop(time.perf_counter_ns(), "model_startup_failed")
         else:
+            state.require_command_context = bool(worker.manifest.get("command_context"))
+            if state.require_command_context and environment.source_kind != "synthetic":
+                raise ValueError(
+                    "Command-conditioned evaluation currently requires synthetic sends"
+                )
             threads = [
                 threading.Thread(target=receive, name="fh5-runtime-input", daemon=True),
                 threading.Thread(target=supervise, name="fh5-action-supervisor", daemon=True),
