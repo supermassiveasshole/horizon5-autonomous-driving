@@ -126,6 +126,7 @@ def state_digest(torch: Any, state: dict[str, Any]) -> str:
 
 def seal_experience(raw: bytes, source: Path, output: Path) -> dict[str, Any]:
     replay = json.loads(raw)
+    sources = source_replays(source.parent, replay)
     output.mkdir(parents=True)
     seen: dict[str, str] = {}
     total = 0
@@ -148,4 +149,29 @@ def seal_experience(raw: bytes, source: Path, output: Path) -> dict[str, Any]:
                 write_file(target, bytes(frame.pixels))
                 seen[name] = sha
     write_file(output / "replay.json", raw)
+    for name, payload in sources.items():
+        target = asset(output, name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        write_file(target, payload)
     return {"replay": "experience/replay.json", "frame_files": len(seen), "frame_bytes": total}
+
+
+def source_replays(root: Path, replay: dict[str, Any]) -> dict[str, bytes]:
+    """Retain source manifests, including excluded/failed experience diagnostics."""
+    sources: dict[str, bytes] = {}
+    total = 0
+    for item in replay.get("source_inventory", []):
+        name = item["path"]
+        raw = read_bounded(asset(root, name), 128 * 1024**2)
+        if (
+            hashlib.sha256(raw).hexdigest() != item["replay_sha256"]
+            or json.loads(raw)["source_hashes"] != item["source_hashes"]
+        ):
+            raise ValueError("SAC experience source manifest changed")
+        total += len(raw)
+        if total > 128 * 1024**2 or len(sources) >= 1000:
+            raise ValueError("SAC experience source manifests exceed capacity")
+        if name in sources:
+            raise ValueError("Duplicate SAC experience source manifest")
+        sources[name] = raw
+    return sources

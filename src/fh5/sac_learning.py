@@ -9,10 +9,12 @@ import json
 import math
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
 from copy import deepcopy
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from io import BytesIO
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
 from fh5.collection_store import encode, read_bounded, write_file
@@ -29,6 +31,7 @@ from fh5.sac_checkpoint import (
     state_digest,
 )
 from fh5.sac_data import LearningReplay
+from fh5.sac_experience import expand_experience
 from fh5.sac_policy import encode_history, make_policy, soft_update
 
 if TYPE_CHECKING:
@@ -67,6 +70,7 @@ class SACResume:
     checkpoint_dir: Path
     output_dir: Path
     steps: int = 100
+    additions: tuple[tuple[Path, str], ...] = ()
 
 
 def _difference(torch: Any, before: dict[str, Any], module: Any) -> float:
@@ -108,14 +112,17 @@ def run_sac_training(
     request: SACTrain | SACResume, stop_requested: Callable[[int], bool] | None = None
 ) -> RunResult:
     torch = importlib.import_module("torch")
-    with preserve_torch_state(torch):
+    with preserve_torch_state(torch), ExitStack() as resources:
         torch.set_num_threads(2)
         torch.use_deterministic_algorithms(True)
-        return _train(request, torch, stop_requested)
+        return _train(request, torch, stop_requested, resources)
 
 
 def _train(
-    operation: SACTrain | SACResume, torch: Any, stop_requested: Callable[[int], bool] | None
+    operation: SACTrain | SACResume,
+    torch: Any,
+    stop_requested: Callable[[int], bool] | None,
+    resources: ExitStack,
 ) -> RunResult:
     from fh5.experiment import RunResult
 
@@ -204,6 +211,30 @@ def _train(
             raise ValueError("Warm-up target encoder is not the frozen BC")
     else:
         saved = restored
+    added = 0
+    if isinstance(operation, SACResume) and operation.additions:
+        if any(
+            operation.output_dir.resolve().is_relative_to(p.parent.resolve())
+            for p, _ in operation.additions
+        ):
+            raise ValueError("SAC output must be outside its experience additions")
+        temporary = Path(resources.enter_context(TemporaryDirectory(prefix="fh5-sac-")))
+        replay_file, replay_sha, added = expand_experience(
+            torch,
+            request.replay_file,
+            warm["replay_sha256"],
+            operation.additions,
+            temporary / "expanded",
+            bc,
+            bounds,
+        )
+        if request.steps > added:
+            raise ValueError("SAC expansion permits at most one update per new transition")
+        request = replace(request, replay_file=replay_file)
+        warm["replay_sha256"] = replay_sha
+        assert continuation is not None
+        continuation["experience_additions"] = [sha for _, sha in operation.additions]
+        continuation["new_transition_credit"] = added
     data = LearningReplay(torch, request.replay_file, warm["replay_sha256"], bc, bounds)
     feature_width = 64 * (bc.original_contract["image_count"] + 1)
     encoder = torch.nn.ModuleDict(
@@ -376,6 +407,7 @@ def _train(
         "device": "cpu",
         "update_duration_s": time.monotonic() - started,
         "steps_requested": request.steps,
+        "experience_added_transitions": added,
         "steps_completed": len(metrics),
         "total_steps": start_step + len(metrics),
         "stop_reason": stop_reason,

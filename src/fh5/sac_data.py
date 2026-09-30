@@ -13,6 +13,7 @@ from fh5.numeric_images import NumericDecision, validate_decision
 from fh5.numeric_recording import read_numeric_frame
 from fh5.sac import _task_features
 from fh5.sac_actions import ActionBounds
+from fh5.sac_checkpoint import source_replays
 
 
 class LearningReplay:
@@ -24,6 +25,7 @@ class LearningReplay:
         if hashlib.sha256(self.raw).hexdigest() != expected:
             raise ValueError("SAC replay changed from its frozen digest")
         replay = json.loads(self.raw)
+        source_replays(path.parent, replay)
         if (replay.get("version"), replay.get("kind"), replay.get("source_kind")) != (
             1,
             "sac-numeric-replay-v1",

@@ -87,6 +87,7 @@ from fh5.routes import (
     locate_route,
 )
 from fh5.sac import SACCriticReplay, SACCriticWarmup, run_critic
+from fh5.sac_cycle import SACCycle, SACEnvironment, run_sac_cycle
 from fh5.sac_learning import (
     SACPolicyReplay,
     SACResume,
@@ -272,6 +273,7 @@ def run_experiment(
     | SACCriticWarmup
     | SACCriticReplay
     | SACTrain
+    | SACCycle
     | SACResume
     | SACPolicyReplay
     | RewardAudit
@@ -311,6 +313,7 @@ def run_experiment(
     collection_environment: CollectionEnvironment | None = None,
     learning_resources: LearningResources | None = None,
     sac_stop_requested: Callable[[int], bool] | None = None,
+    sac_environment: SACEnvironment | None = None,
     evaluation_environment: EvaluationEnvironment | None = None,
     collection_write: WriteFile | None = None,
     collection_installer: CollectionInstaller | None = None,
@@ -388,6 +391,10 @@ def run_experiment(
         return settle_rewards(request)
     if isinstance(request, SACReplayPrepare):
         return prepare_sac_replay(request)
+    if isinstance(request, SACCycle):
+        if sac_environment is None:
+            raise ValueError("SAC cycle requires an explicit synthetic environment")
+        return run_sac_cycle(request, sac_environment)
     if isinstance(request, (SACCriticWarmup, SACCriticReplay)):
         return run_critic(request)
     if isinstance(request, (SACTrain, SACResume)):

@@ -38,7 +38,14 @@ def _sac(args: argparse.Namespace) -> int:
     from fh5.sac_replay import SACReplayPrepare
 
     if args.mode == "sac-resume":
-        resumed = run_experiment(SACResume(args.checkpoint, args.output, steps=args.steps))
+        resumed = run_experiment(
+            SACResume(
+                args.checkpoint,
+                args.output,
+                steps=args.steps,
+                additions=tuple((Path(path), sha) for path, sha in args.add_replay),
+            )
+        )
         print(json.dumps(resumed.summary["sac_learning"], ensure_ascii=False))
         return 4 if resumed.summary["sac_learning"]["stop_reason"] == "stop_requested" else 0
     if args.mode == "sac-train":
@@ -139,6 +146,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     sac_resume.add_argument("--checkpoint", type=Path, required=True)
     sac_resume.add_argument("--output", type=Path, required=True)
     sac_resume.add_argument("--steps", type=int, default=100)
+    sac_resume.add_argument(
+        "--add-replay",
+        nargs=2,
+        action="append",
+        default=[],
+        metavar=("PATH", "SHA256"),
+        help="Append compatible sealed experience with explicit digest; repeat up to 10 times",
+    )
     sac_policy = commands.add_parser("sac-policy-replay", help="Replay a frozen learned SAC policy")
     for name in ("checkpoint", "replay", "report"):
         sac_policy.add_argument("--" + name, type=Path, required=True)
