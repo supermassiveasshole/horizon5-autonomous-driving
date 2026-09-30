@@ -62,6 +62,7 @@ td{overflow-wrap:anywhere}summary{cursor:pointer;font-weight:600}code{font-size:
 </section>
 <section class="panel" id="route-panel" hidden><h2>局部路线与核验覆盖</h2><p id="route-quality"></p><p id="route-check"></p><p class="muted">橙色虚线：参考轨迹，不代表道路边界；绿色区域：已核实走廊；紫色线：检查点门。确认进度仅属于当前前向片段，不是全程成绩。</p><p id="route-position"></p><div class="table-wrap"><table><thead><tr><th>检查点顺序</th><th>距路线起点</th><th>核验状态</th></tr></thead><tbody id="route-gates"></tbody></table></div></section>
 <section class="panel" id="attempt-panel" hidden><h2>完整尝试与局部有效性</h2><p id="attempt-status"></p><p class="muted">局部结论依赖独立几何与人工证据。失败、恢复、接管和接口异常全部保留；局部完成不等于歌利亚全程完赛。当前不允许自动晋升，也不导出训练转移。</p><div class="table-wrap"><table><thead><tr><th>完整尝试 / 包范围</th><th>起点方式 / 控制归属</th><th>局部结果 / 核验模式</th><th>局部起终点 / 进度</th><th>原因 / 未覆盖项目</th><th>正式全程</th></tr></thead><tbody id="attempt-rows"></tbody></table></div><details><summary>前向片段、恢复排除区与证据</summary><pre id="attempt-evidence" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details><p id="attempt-position"></p></section>
+<section class="panel" id="reward-panel" hidden><h2>逐段奖励与终止</h2><p id="reward-status"></p><p class="muted">物理时间取游戏时钟，恢复前后独立结算。表中回报不是正式成绩；quarantined 不可用于学习。外部截断只保留真实末状态引用，尚未导出带动作的训练转移。</p><div class="table-wrap"><table><thead><tr><th>片段</th><th>结果 / 原因</th><th>物理时长</th><th>折扣回报</th><th>学习资格 / 不确定性</th><th>末状态 / 估值引用</th></tr></thead><tbody id="reward-rows"></tbody></table></div><details><summary>逐步进度、时间、终止项及任务状态</summary><pre id="reward-detail" style="white-space:pre-wrap;overflow-wrap:anywhere"></pre></details><div id="reward-audit"></div></section>
 <section class="panel" aria-label="回放控制">
 <div class="controls">
 <button id="play" type="button">播放</button>
@@ -105,6 +106,13 @@ if(attemptReview){
  el("attempt-evidence").textContent=JSON.stringify({source_hashes:attemptReview.source_hashes,evidence:attemptReview.evidence,attempts:attemptReview.attempts},null,2);
 }
 const route=summary.route;
+if(summary.rewards){
+ const r=summary.rewards;el("reward-panel").hidden=false;
+ el("reward-status").textContent=`奖励 ${r.rules_version} · ${r.segments.length} 个片段 · 未向 actor 增加评测参考字段 · 不发送游戏输入`;
+ for(const s of r.segments)row("reward-rows",[s.segment_id,`${s.outcome} / ${s.termination_reason??s.truncation_reason}`,`${fmt(s.physical_duration_s,3)} s`,fmt(s.discounted_return,6),`${s.reward_usable?"可用奖励标签":"隔离"} / ${s.quarantine_reasons.join("、")}`,`${s.final_observation?.packet_index??"无"} / ${s.bootstrap_observation?.packet_index??"不估值"}`]);
+ el("reward-detail").textContent=JSON.stringify(r,null,2);
+ if(summary.reward_audit){const a=summary.reward_audit,p=document.createElement("p");p.textContent=`合成反例检查：${a.passed?"通过":"未通过"}，不证明实机识别准确率。`;el("reward-audit").append(p);for(const c of a.cases){const line=document.createElement("p"),link=document.createElement("a");link.textContent=c.case;link.href=c.report;line.append(link,`：${c.outcome}，回报 ${fmt(c.return,6)}，进度 ${fmt(c.progress_m)} m，${c.passed?"通过":"失败"}`);el("reward-audit").append(line);}}
+}
 if(route){
  el("route-panel").hidden=false;
  el("route-quality").textContent=`参考轨迹 ${fmt(route.length_m,1)} m · 核实走廊覆盖 ${fmt(route.verified_corridor_length_m,1)} m · ${route.low_speed_ready?"几何标注齐备，低速记录与控制仍需单独核验":"道路标注或覆盖尚未齐备"}`;

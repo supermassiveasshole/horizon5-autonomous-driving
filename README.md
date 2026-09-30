@@ -14,6 +14,8 @@ T06 / #7 已加入 `fh5 attempt-review`：完整尝试、前向片段和恢复�
 
 ## 安装与运行
 
+T07 / #8 新增[物理时间奖励与终止结算](docs/rewards.md)：`fh5 reward-replay` 重算历史局部片段，`fh5 reward-audit` 生成完整合成反例与回报排序。独立有效性、奖励标签和正式成绩保持各自结论；未启动 SAC 或新的实机驾驶。
+
 T31 / #33 已加入独立的[数值图像输入与精确回放](docs/numeric-images.md)：旧图像仅在离线准备时解码，冻结策略接收数值 RGB，数值存档在后台执行。真实历史数据已有 200 个观测精确回放；页面交互仍待验收，旧实机 `policy` 尚未迁移。参见 [T31 验证](docs/validation/t31-numeric-images.md)。
 
 需要 Python 3.12 和 [uv](https://docs.astral.sh/uv/)。在仓库根目录运行 PowerShell：

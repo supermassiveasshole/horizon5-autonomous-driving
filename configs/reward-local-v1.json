@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "progress_budget": 1.0,
+  "time_budget": 1.0,
+  "success_bonus": 2.0,
+  "failure_cost": 3.0,
+  "discount_half_lives_per_horizon": 1.0,
+  "max_physics_step_s": 0.5
+}

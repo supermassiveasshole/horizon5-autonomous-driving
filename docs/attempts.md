@@ -1,6 +1,6 @@
 # 局部尝试与独立有效性（T06 / #7）
 
-`run_experiment(AttemptReplay(...))` 和 `fh5 attempt-review` 对**完整录制**作离线判定，不发送游戏输入，不要求自动重开。报告包含全部尝试、前向片段、排除区、局部起终点、控制归属、证据和正式全程结论。实现规则版本为 `local-validity-v1`。
+`run_experiment(AttemptReplay(...))` 和 `fh5 attempt-review` 对**完整录制**作离线判定，不发送游戏输入，不要求自动重开。报告包含全部尝试、前向片段、排除区、局部起终点、控制归属、证据和正式全程结论。当前规则版本为 `local-validity-v2`：增加导航事件、任务阶段边界及显式接口故障清单，原 v1 结果保留。
 
 ```powershell
 uv run --locked fh5 attempt-review runs/my-recording --task runs/my-task.json --evidence runs/my-review.json --output runs/my-verdict
@@ -39,6 +39,7 @@ uv run --locked fh5 attempt-review runs/my-recording --task runs/my-task.json --
 - `events`：`packet_index`、`kind`、`status`（`confirmed` / `suspected`），以及同样的来源、审核者和证据引用。来源为 `independent_review` 或 `policy_prediction`；后者不能确认有效或违规。
 - 事件种类：持续蹭墙、复位提速、草地捷径分别为前三个检查名；另有 `incidental_contact`、`reasonable_cut`、`pause`、`rewind`、`restart`、`stop`、`human_takeover`、`human_placement`、`interface_fault`、`driving_failure`、`conditions_changed`、`race_start`、`game_finish`。
 - 暂停、倒带、接口故障可带 `resume_packet_index`：恢复后的首包。中间区间排除；不提供恢复位置则排除到本次尝试末尾。倒带动画不算前向驾驶。
+- v2 另接受 `navigation_recomputed`、`navigation_hidden`、`destination_changed`。前两者只记录，不证明到达；确认改目的地拆分片段并标记任务变化。已有任务不自动改绑，具体奖励与截断见[奖励说明](rewards.md)。
 
 ## 分段与结论
 

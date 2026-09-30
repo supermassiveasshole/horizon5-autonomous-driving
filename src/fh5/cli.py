@@ -23,6 +23,8 @@ from fh5.experiment import Packet, Record, Replay, run_experiment
 from fh5.observations import ObservationReplay
 from fh5.perception import Perception, PerceptionReplay
 from fh5.policy import PolicyDrive, validate_policy_file
+from fh5.reward_audit import RewardAudit
+from fh5.rewards import RewardReplay
 from fh5.routes import BuildRoute, RouteCheck
 from fh5.vision import VisionRecord
 
@@ -58,6 +60,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     attempt.add_argument("--task", type=Path, required=True)
     attempt.add_argument("--evidence", type=Path)
     attempt.add_argument("--output", type=Path, required=True)
+    reward = commands.add_parser("reward-replay", help="Settle local physical-time rewards offline")
+    reward.add_argument("recording", type=Path)
+    reward.add_argument("--task", type=Path, required=True)
+    reward.add_argument("--reward", type=Path, required=True)
+    reward.add_argument("--evidence", type=Path)
+    reward.add_argument("--output", type=Path, required=True)
+    audit = commands.add_parser(
+        "reward-audit", help="Replay synthetic complete reward counterexamples"
+    )
+    audit.add_argument("--reward", type=Path, required=True)
+    audit.add_argument("--output", type=Path, required=True)
     bc = commands.add_parser("bc-train", help="Train a bounded offline multimodal BC actor")
     bc.add_argument("--config", type=Path, required=True)
     bc.add_argument("--output", type=Path, required=True)
@@ -265,6 +278,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = run_experiment(
                 AttemptReplay(args.recording, args.output, args.task, args.evidence)
             )
+        elif args.mode == "reward-replay":
+            result = run_experiment(
+                RewardReplay(args.recording, args.output, args.task, args.reward, args.evidence)
+            )
+        elif args.mode == "reward-audit":
+            result = run_experiment(RewardAudit(args.reward, args.output))
         elif args.mode == "route-check":
             result = run_experiment(
                 RouteCheck(
@@ -513,6 +532,35 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
         return 0
+    if "rewards" in result.summary:
+        rewards = result.summary["rewards"]
+        segments = rewards["segments"]
+        print(
+            json.dumps(
+                {
+                    "rules_version": rewards["rules_version"],
+                    "report": str(result.report_path),
+                    "commands_sent": False,
+                    "segments": [
+                        {
+                            k: s[k]
+                            for k in (
+                                "outcome",
+                                "reward_usable",
+                                "physical_duration_s",
+                                "discounted_return",
+                                "quarantine_reasons",
+                            )
+                        }
+                        for s in segments
+                    ],
+                    "audit": result.summary.get("reward_audit"),
+                }
+            )
+        )
+        if "reward_audit" in result.summary:
+            return 0 if result.summary["reward_audit"]["passed"] else 4
+        return 0 if segments and all(s["reward_usable"] for s in segments) else 4
     if "attempt_review" in result.summary:
         review = result.summary["attempt_review"]
         print(

@@ -37,6 +37,9 @@ EVENT_KINDS = frozenset(
         "conditions_changed",
         "race_start",
         "game_finish",
+        "navigation_recomputed",
+        "navigation_hidden",
+        "destination_changed",
     }
 )
 INVALID_EVENTS = frozenset(
@@ -279,7 +282,9 @@ def _attempt(
         {
             e["packet_index"]
             for e in events
-            if _confirmed(e) and e["kind"] in {"pause", "rewind", "restart", "interface_fault"}
+            if _confirmed(e)
+            and e["kind"]
+            in {"pause", "rewind", "restart", "interface_fault", "destination_changed"}
         }
         | {boundary for span in excluded_intervals for boundary in span}
     )
@@ -325,6 +330,8 @@ def _attempt(
     )
     if missing:
         pending.append("independent_review_missing")
+    if any(e["kind"] == "destination_changed" and _confirmed(e) for e in events):
+        pending.append("task_phase_changed")
     if any(e["kind"] == "pause" and _confirmed(e) for e in events):
         pending.append("pause")
     task_spans = [f["task_packet_range"] for f in fragments if f["task_packet_range"]]
@@ -466,6 +473,7 @@ def _attempt(
         "control_owner": base.metadata["control_source"],
         "outcome": outcome,
         "reasons": reasons,
+        "interface_faults": sorted(faults),
         "uncovered_checks": missing,
         "task_completed": completed,
         "confirmed_progress_m": max((f["confirmed_progress_m"] for f in fragments), default=0),
@@ -530,7 +538,7 @@ def review_attempts(request: AttemptReplay) -> RunResult:
     events = [*base.events, *({**e, "kind": "reviewed_" + e["kind"]} for e in evidence["events"])]
     review = {
         "version": 1,
-        "rules_version": "local-validity-v1",
+        "rules_version": "local-validity-v2",
         "task": task,
         "recording_packet_count": base.summary["packet_count"],
         "source_kind": base.metadata["source_kind"],

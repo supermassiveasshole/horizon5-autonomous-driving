@@ -41,6 +41,8 @@ from fh5.perception import (
 )
 from fh5.policy import PolicyActor, PolicyDrive, PolicyEnvironment, read_policy, run_policy
 from fh5.report import write_report
+from fh5.reward_audit import RewardAudit, audit_rewards
+from fh5.rewards import RewardReplay, settle_rewards
 from fh5.routes import (
     BuildRoute,
     RouteCheck,
@@ -195,6 +197,8 @@ def run_experiment(
     | NumericReplay
     | PolicyDrive
     | AttemptReplay
+    | RewardReplay
+    | RewardAudit
     | BCTrain
     | BCReplay
     | DemonstrationRecord
@@ -234,6 +238,10 @@ def run_experiment(
         return run_policy(request, policy_environment, policy_actor)
     if isinstance(request, AttemptReplay):
         return review_attempts(request)
+    if isinstance(request, RewardReplay):
+        return settle_rewards(request)
+    if isinstance(request, RewardAudit):
+        return audit_rewards(request)
     if isinstance(request, (BCTrain, BCReplay)):
         return run_bc(request)
     if isinstance(request, DemonstrationDataset):
