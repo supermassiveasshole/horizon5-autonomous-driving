@@ -45,7 +45,12 @@ def command_action(command: dict[str, Any]) -> list[float]:
     return [command["steer_i16"] / 32767, (command["throttle_u8"] - command["brake_u8"]) / 255]
 
 
-def _check_history(row: dict[str, Any], trace: dict[str, Any], samples: dict[int, Any]) -> None:
+def _check_history(
+    row: dict[str, Any],
+    trace: dict[str, Any],
+    samples: dict[int, Any],
+    boundary_ns: int | None,
+) -> None:
     offsets = trace["action_offsets_ms"]
     if offsets != [200, 100, 0]:
         raise ValueError("Synthetic SAC trace currently uses the fixed 200/100/0 ms action history")
@@ -73,6 +78,7 @@ def _check_history(row: dict[str, Any], trace: dict[str, Any], samples: dict[int
             prior
             and prior[1] is not None
             and prior[2] == row["epoch"]
+            and (boundary_ns is None or prior[0] >= boundary_ns)
             and at - prior[0] <= 200_000_000
         ):
             actions.append(prior[1])
@@ -160,21 +166,41 @@ def prepare_sac_replay(request: SACReplayPrepare) -> RunResult:
     if settled.metadata["source_kind"] != "synthetic":
         raise ValueError("Synthetic SAC adapter cannot authenticate live game actions")
     samples = {s["packet_index"]: s for s in settled.samples}
+    rewards = settled.summary["rewards"]
+    segment_bounds: dict[int, tuple[str, int | None]] = {}
+    for ordinal, segment in enumerate(rewards["segments"]):
+        if not segment["steps"]:
+            continue
+        start = segment["steps"][0]["from_packet_index"]
+        end = segment["steps"][-1]["to_packet_index"]
+        boundary = samples[start]["received_monotonic_ns"] if ordinal else None
+        for index in range(start, end + 1):
+            segment_bounds[index] = (segment["segment_id"], boundary)
+    epoch_segments: dict[str, str] = {}
     observations = {}
     seen, observation_errors = set(), []
-    for row in trace["observations"]:
+    for row in sorted(trace["observations"], key=lambda row: row["packet_index"]):
         index = row["packet_index"]
         if index in seen or index not in samples:
             raise ValueError("Duplicate or unknown SAC observation packet")
         seen.add(index)
         try:
-            _check_history(row, trace, samples)
+            if index not in segment_bounds:
+                raise ValueError("Observation outside an independent reward segment")
+            segment_id, boundary = segment_bounds[index]
+            bound_segment = epoch_segments.setdefault(row["epoch"], segment_id)
+            if bound_segment != segment_id:
+                raise ValueError("Observation epoch reused after an independent recovery boundary")
+            if boundary is not None and any(
+                frame["source_time_ns"] < boundary for frame in row["frames"]
+            ):
+                raise ValueError("Numerical history crosses an independent recovery boundary")
+            _check_history(row, trace, samples, boundary)
             observations[index] = _observation(
                 request.trace_file.parent, row, samples[index], pixels, request.output_dir
             )
         except (OSError, ValueError, TypeError, KeyError) as error:
             observation_errors.append({"packet_index": index, "error": str(error)})
-    rewards = settled.summary["rewards"]
     task = settled.summary["attempt_review"]["task"]
     route_path = request.task_file.parent / task["route_file"]
     if hashlib.sha256(read_bounded(route_path, 128 * 1024**2)).hexdigest() != task["route_sha256"]:

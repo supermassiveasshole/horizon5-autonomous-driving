@@ -14,7 +14,7 @@ from fh5.experiment import Packet, Record, run_experiment
 from fh5.numeric_images import PixelContract
 
 
-def experience(tmp_path, *, terminal=True, host_factor=1):
+def experience(tmp_path, *, terminal=True, host_factor=1, timeline=None):
     bundle = route(tmp_path)
     config = tmp_path / "record.json"
     config.write_text(
@@ -25,7 +25,8 @@ def experience(tmp_path, *, terminal=True, host_factor=1):
     images = bytes([51, 17, 34] * 64 * 36)
     (tmp_path / "frame.rgb").write_bytes(images)
     packets, observations = [], []
-    for index, (x, elapsed) in enumerate([(0, 0), (1, 100), (3 if terminal else 2, 300)]):
+    timeline = timeline or [(0, 0), (1, 100), (3 if terminal else 2, 300)]
+    for index, (x, elapsed) in enumerate(timeline):
         now = 1_000_000_000 + elapsed * host_factor * 1_000_000
         raw = bytearray(324)
         struct.pack_into("<iI", raw, 0, 1, 1000 + elapsed)
@@ -43,7 +44,7 @@ def experience(tmp_path, *, terminal=True, host_factor=1):
         issued = [(900_000_000, [0.0, 0.0])]
         issued.extend(
             (1_000_000_000 + t * host_factor * 1_000_000, [0.0, 0.2])
-            for t in (0, 100)
+            for _, t in timeline[:-1]
             if t < elapsed
         )
         history, ages = [], []
@@ -106,7 +107,7 @@ def experience(tmp_path, *, terminal=True, host_factor=1):
                         "status": "sent",
                         "sent": {"steer_i16": 0, "throttle_u8": 51, "brake_u8": 0},
                     }
-                    for i in range(2)
+                    for i in range(len(packets) - 1)
                 ],
             }
         )
@@ -195,6 +196,39 @@ def test_new_epoch_does_not_inherit_previous_sent_command_for_critic_support(tmp
     assert not result["observation_errors"]
     assert result["eligible_transitions"] == 0
     assert result["excluded"][-1] == {"action_index": 1, "reason": "unknown_previous_command"}
+
+
+@pytest.mark.parametrize("new_epoch", [False, True])
+def test_recovery_rebuilds_full_actor_history_from_independent_boundary(tmp_path, new_epoch):
+    request = experience(
+        tmp_path,
+        timeline=[(0, 0), (1, 100), (0, 200), (0, 300), (1, 400), (2, 500), (2.5, 600), (3, 700)],
+    )
+    evidence(
+        tmp_path,
+        request.recording_dir,
+        [{"packet_index": 2, "kind": "pause", "status": "confirmed", "resume_packet_index": 3}],
+    )
+    trace = json.loads(request.trace_file.read_bytes())
+    if new_epoch:
+        for action in trace["actions"][3:]:
+            action["epoch"] = "after-pause"
+        for row in trace["observations"][3:]:
+            row["epoch"] = "after-pause"
+            for frame in row["frames"]:
+                frame["epoch"] = "after-pause"
+            for slot, age in enumerate(row["actor"]["action_age_ms"]):
+                if age is not None and row["decision_ns"] - age * 1e6 < 1_300_000_000:
+                    row["actor"]["actions"][slot] = None
+                    row["actor"]["action_mask"][slot] = False
+                    row["actor"]["action_age_ms"][slot] = None
+    request.trace_file.write_text(json.dumps(trace))
+    result = run_experiment(request)
+    rows = json.loads((request.output_dir / "replay.json").read_bytes())["transitions"]
+    ranges = [row["packet_range"] for row in rows]
+    assert [4, 5] not in ranges  # Its 1.19-second image predates the recovery.
+    assert ranges == ([[0, 1], [6, 7]] if new_epoch else [[0, 1]])
+    assert result.summary["sac_replay"]["observation_errors"]
 
 
 def test_critic_warmup_updates_values_without_changing_bc_and_reloads_exactly(tmp_path):
