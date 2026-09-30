@@ -278,6 +278,56 @@ def test_registered_sac_batch_uses_the_sac_identity_and_never_promotes_synthetic
     assert snapshot["reservations"][0]["model"] == sha(sac_policy / "policy.json")
 
 
+def test_sac_review_quarantines_a_policy_send_after_its_context_was_released(tmp_path, sac_policy):
+    from copy import deepcopy
+
+    operation = sac_request(tmp_path, sac_policy)
+    run_experiment(operation, evaluation_environment=Batch())
+    root = operation.output_dir / "attempt-0000/execution"
+    report = json.loads((root / "report.json").read_bytes())
+    row = [d for d in report["decisions"] if "actor" in d][-1]
+    assert row["status"] == "accepted"
+    index = next(
+        i for i, c in enumerate(report["commands"]) if c["decision_id"] == row["decision_id"]
+    )
+    policy_send = report["commands"][index]
+    midpoint = (row["decision_ns"] + policy_send["issued_ns"]) // 2
+    release = deepcopy(report["commands"][0])
+    release.update(
+        issued_ns=midpoint, returned_ns=midpoint, owner="lease_expiry", valid_until_ns=midpoint
+    )
+    report["commands"].insert(index, release)
+    journal = root / report["journal"]["path"]
+    events = [json.loads(line) for line in journal.read_text().splitlines()]
+    insertion = next(
+        i
+        for i, e in enumerate(events)
+        if e["kind"] == "command" and e["data"]["decision_id"] == row["decision_id"]
+    )
+    events.insert(insertion, {"sequence": 0, "kind": "command", "data": release})
+    for i, event in enumerate(events):
+        event["sequence"] = i
+    journal.write_text("".join(json.dumps(e) + "\n" for e in events))
+    report["journal"].update(offered=len(events), written=len(events), sha256=sha(journal))
+    (root / "report.json").write_text(json.dumps(report))
+    manifest = root / "realtime-manifest.json"
+    manifest.write_text(json.dumps({"version": 1, "report_sha256": sha(root / "report.json")}))
+    ledger = operation.output_dir / "ledger.json"
+    entries = json.loads(ledger.read_bytes())
+    entries["entries"][0]["execution"]["manifest_sha256"] = sha(manifest)
+    ledger.write_text(json.dumps(entries))
+    reviewed = run_experiment(
+        EvaluationReview(operation.output_dir / "frozen", ledger, tmp_path / "review-again")
+    ).summary["evaluation"]
+    assert reviewed["metrics"]["all_attempts"] == 2
+    execution = reviewed["executions"][0]
+    assert execution["verified_predictions"] > 0  # Numerical replay alone still passes.
+    assert execution["status"] == "quarantined"
+    assert "context changed before send" in str(execution["reasons"])
+    assert reviewed["executions"][1]["status"] == "bound_diagnostic"
+    assert reviewed["execution_metrics"]["bound_runs"] == 1
+
+
 def test_valid_sac_model_replacement_during_driver_open_is_rejected_before_commands(
     tmp_path, sac_policy
 ):

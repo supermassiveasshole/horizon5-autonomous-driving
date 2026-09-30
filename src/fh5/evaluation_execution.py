@@ -70,6 +70,14 @@ def _bind_telemetry(root: Path, report: dict[str, Any], source: Path, recording:
     return len(packets)
 
 
+def _command_context(index: int, command: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "version": 1,
+        "command_index": index,
+        **{key: command[key] for key in ("sent", "issued_ns", "returned_ns", "owner")},
+    }
+
+
 def _verify_commands(report: dict[str, Any]) -> None:
     accepted = {d["decision_id"]: d for d in report["decisions"] if d["status"] == "accepted"}
     seen = set()
@@ -89,7 +97,7 @@ def _verify_commands(report: dict[str, Any]) -> None:
             != decision["decision_ns"] + config["action_lease_ms"] * 1_000_000
         ):
             raise ValueError("Execution command timing differs from frozen bounds")
-    for command in report["commands"]:
+    for index, command in enumerate(report["commands"]):
         if command["status"] != "sent" or command["target"] != command["sent"]:
             raise ValueError("Execution command target and successful send differ")
         if command["owner"] != "policy":
@@ -105,6 +113,12 @@ def _verify_commands(report: dict[str, Any]) -> None:
             raise ValueError("Execution policy command lacks a unique accepted decision")
         seen.add(decision_id)
         decision = accepted[decision_id]
+        if report["model"].get("command_context") and (
+            index == 0
+            or decision.get("command_context")
+            != _command_context(index - 1, report["commands"][index - 1])
+        ):
+            raise ValueError("SAC context changed before send")
         clock = [
             decision["decision_ns"],
             decision["worker_started_ns"],
@@ -148,11 +162,7 @@ def _verify_history(report: dict[str, Any]) -> None:
             if not prior:
                 raise ValueError("SAC decision lacks a successful prior command")
             index, previous = prior[-1]
-            expected = {
-                "version": 1,
-                "command_index": index,
-                **{key: previous[key] for key in ("sent", "issued_ns", "returned_ns", "owner")},
-            }
+            expected = _command_context(index, previous)
             if row.get("command_context") != expected:
                 raise ValueError("SAC context differs from successful command history")
         actions: list[list[float] | None] = []
@@ -249,8 +259,8 @@ def review_execution(
         )
         if not replay["verified"]:
             raise ValueError("Execution numerical replay failed: " + str(replay["errors"]))
-        _verify_commands(report)
         _verify_history(report)
+        _verify_commands(report)
         modes = {
             "reference_assisted" if any(d["actor"]["reference"]["mask"]) else "no_reference"
             for d in report["decisions"]
