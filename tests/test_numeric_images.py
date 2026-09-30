@@ -170,7 +170,7 @@ def test_existing_frozen_bc_uses_prepared_numbers_without_image_io_or_codecs(tmp
     contract = PixelContract(size=(64, 36), origin="legacy_offline", history_offsets_ms=(0,))
     model = FrozenNumericActor(request.output_dir, contract, legacy_diagnostic=True)
     source = PreparedNumericSource(tmp_path / "prepared")
-    read_bytes, digest = Path.read_bytes, hashlib.sha256
+    read_bytes, open_path, digest = Path.read_bytes, Path.open, hashlib.sha256
 
     def no_decode(*args, **kwargs):
         pytest.fail("Compressed image decoding reached the numerical execution phase")
@@ -184,10 +184,16 @@ def test_existing_frozen_bc_uses_prepared_numbers_without_image_io_or_codecs(tmp
         assert threading.current_thread().name in ("fh5-numeric-archive", "fh5-numeric-source")
         return digest(*args, **kwargs)
 
+    def prepared_open(path, mode="r", *args, **kwargs):
+        if "r" in mode and path.suffix in (".rgb", ".jpeg", ".png", ".jpg"):
+            assert threading.current_thread().name == "fh5-numeric-source"
+        return open_path(path, mode, *args, **kwargs)
+
     with monkeypatch.context() as guard:
         guard.setattr(Image, "open", no_decode)
         guard.setattr(Image.Image, "save", no_decode)
         guard.setattr(Path, "read_bytes", prepared_read)
+        guard.setattr(Path, "open", prepared_open)
         guard.setattr(hashlib, "sha256", background_digest)
         result = run_experiment(
             NumericInfer(tmp_path / "numeric", contract),
@@ -207,6 +213,8 @@ def test_existing_frozen_bc_uses_prepared_numbers_without_image_io_or_codecs(tmp
             and r["view"] == "no_reference"
         )
         assert row["prediction"] == pytest.approx(original["prediction"], abs=1e-6)
+        assert row["supervision"]["action"] == original["target"]
+        assert row["supervision"]["label_poll_ns"] >= row["decision_ns"]
     replay = run_experiment(
         NumericReplay(tmp_path / "numeric", tmp_path / "reloaded.html"),
         numeric_actor=model,
@@ -431,3 +439,54 @@ def test_presentation_and_archive_failures_never_change_model_inputs(tmp_path, m
     else:
         assert replay.summary["numeric"]["replay_errors"] == []
         assert all(d["prediction_max_abs_error"] == 0 for d in rows)
+
+
+@pytest.mark.parametrize("fault", ["journal", "manifest", "boundaries"])
+def test_legacy_preparation_rejects_changed_metadata_evidence(tmp_path, fault):
+    import json
+    from pathlib import Path
+
+    pytest.importorskip("torch")
+    from test_bc import setup_bc
+
+    from fh5.numeric_import import LegacyNumericImport
+
+    request = setup_bc(tmp_path)
+    run_experiment(request)
+    dataset_path = tmp_path / "data/dataset.json"
+    dataset = json.loads(dataset_path.read_text())
+    source = Path(dataset["sources"][0]["directory"])
+    if fault == "boundaries":
+        report = dataset_path.parent / "run-0-targets.json"
+        content = json.loads(report.read_text())
+        content["summary"]["observations"]["history_boundaries_ns"].append(123456789)
+        report.write_text(json.dumps(content))
+    else:
+        path = source / ("vision.jsonl" if fault == "journal" else "demonstration-session.json")
+        if fault == "journal":
+            journal = [json.loads(line) for line in path.read_text().splitlines()]
+            frame = next(row for row in journal if row.get("kind") == "frame")
+            frame["client_size"][0] += 1
+            path.write_text("\n".join(json.dumps(row) for row in journal) + "\n")
+        else:
+            path.write_bytes(path.read_bytes() + b"\n")
+    with pytest.raises(ValueError):
+        run_experiment(LegacyNumericImport(request.output_dir, dataset_path, tmp_path / "prepared"))
+
+
+def test_current_and_future_demonstration_evidence_never_enters_actor(tmp_path):
+    target = {"action": [-1, 1], "label_poll_ns": 2_000_000_000, "future_waypoints_m": [[99, 100]]}
+
+    class CheckedModel(NumericalProbe):
+        def predict(self, actor, frames):
+            assert actor == actor_state()
+            return super().predict(actor, frames)
+
+    result = run_experiment(
+        NumericInfer(tmp_path / "evidence", PixelContract(size=(2, 1))),
+        numeric_inputs=[replace(next(decisions()), supervision=target)],
+        numeric_actor=CheckedModel(),
+    )
+    row = result.summary["numeric"]["decisions"][0]
+    assert row["supervision"] == target
+    assert row["prediction"] == [0.2, -0.1]

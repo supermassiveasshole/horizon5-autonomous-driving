@@ -227,6 +227,57 @@ def _task_evidence(
     return result
 
 
+def history_timing(
+    ordered: list[dict[str, Any]],
+    events: list[dict[str, Any]],
+    vision_events: list[dict[str, Any]],
+    version: int,
+) -> tuple[list[int], list[int]]:
+    """Reconstruct history cuts from telemetry and bound source events, without pixels."""
+    boundaries = [
+        e["received_monotonic_ns"] for e in events if type(e.get("received_monotonic_ns")) is int
+    ]
+    boundaries += [
+        s["received_monotonic_ns"]
+        for a, s in zip(ordered, ordered[1:])
+        if a["segment"] != s["segment"]
+    ]
+    boundaries += [
+        e["observed_ns"]
+        for e in vision_events
+        if e.get("kind")
+        in (
+            "focus_lost",
+            "focus_restored",
+            "capture_discarded",
+            "telemetry_overflow",
+            "rewind",
+            "restart",
+            "input_boundary",
+            "intent_changed",
+        )
+        and type(e.get("observed_ns")) is int
+    ]
+    advanced = []
+    last_advance = 0
+    for index, sample in enumerate(ordered):
+        # A fresh advancing packet cannot revive pre-stall image/action history.
+        if version == 2 and index and sample["received_monotonic_ns"] - last_advance > 250_000_000:
+            boundaries.append(sample["received_monotonic_ns"])
+        if (version == 1 and sample["route"]["status"] == "discontinuity") or sample[
+            "motion"
+        ] is None:
+            boundaries.append(sample["received_monotonic_ns"])
+        if (
+            index == 0
+            or sample["segment"] != ordered[index - 1]["segment"]
+            or sample["game_timestamp_ms"] > ordered[index - 1]["game_timestamp_ms"]
+        ):
+            last_advance = sample["received_monotonic_ns"]
+        advanced.append(last_advance)
+    return sorted(set(boundaries)), advanced
+
+
 def build_observations(
     request: ObservationReplay,
     samples: list[dict[str, Any]],
@@ -280,52 +331,9 @@ def build_observations(
         except (OSError, ValueError, Image.DecompressionBombError):
             errors.append("invalid_pixels")
         image_errors.append(errors)
-    boundaries = [
-        e["received_monotonic_ns"] for e in events if type(e.get("received_monotonic_ns")) is int
-    ]
-    boundaries += [
-        s["received_monotonic_ns"]
-        for a, s in zip(ordered, ordered[1:])
-        if a["segment"] != s["segment"]
-    ]
-    boundaries += [
-        e["observed_ns"]
-        for e in (vision or {}).get("events", [])
-        if e.get("kind")
-        in (
-            "focus_lost",
-            "focus_restored",
-            "capture_discarded",
-            "telemetry_overflow",
-            "rewind",
-            "restart",
-            "input_boundary",
-            "intent_changed",
-        )
-        and type(e.get("observed_ns")) is int
-    ]
-    advanced = []
-    last_advance = 0
-    for index, sample in enumerate(ordered):
-        # A fresh advancing packet cannot revive pre-stall image/action history.
-        if (
-            config["version"] == 2
-            and index
-            and sample["received_monotonic_ns"] - last_advance > 250_000_000
-        ):
-            boundaries.append(sample["received_monotonic_ns"])
-        if (config["version"] == 1 and sample["route"]["status"] == "discontinuity") or sample[
-            "motion"
-        ] is None:
-            boundaries.append(sample["received_monotonic_ns"])
-        if (
-            index == 0
-            or sample["segment"] != ordered[index - 1]["segment"]
-            or sample["game_timestamp_ms"] > ordered[index - 1]["game_timestamp_ms"]
-        ):
-            last_advance = sample["received_monotonic_ns"]
-        advanced.append(last_advance)
-    boundaries = sorted(set(boundaries))
+    boundaries, advanced = history_timing(
+        ordered, events, (vision or {}).get("events", []), config["version"]
+    )
     decisions: list[dict[str, Any]] = []
     step = int(config["period_ms"] * 1e6)
     tick_rows = [e for e in (vision or {}).get("events", []) if e.get("kind") == "observation_tick"]

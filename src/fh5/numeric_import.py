@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import tempfile
 import threading
 from bisect import bisect_right
 from collections import OrderedDict
@@ -32,7 +33,10 @@ class LegacyNumericImport:
 def prepare_legacy(request: LegacyNumericImport) -> RunResult:
     from PIL import Image
 
+    from fh5.demonstrations import validate_demonstration
+    from fh5.experiment import Replay, run_experiment
     from fh5.numeric_recording import _encode, _result
+    from fh5.observations import history_timing, read_settings
 
     if (
         request.view not in ("no_reference", "reference_assisted")
@@ -62,6 +66,10 @@ def prepare_legacy(request: LegacyNumericImport) -> RunResult:
     for run_index in {row["run_index"] for _, row in selected}:
         source = dataset["sources"][run_index]
         directory = Path(source["directory"])
+        session_bytes = (directory / "demonstration-session.json").read_bytes()
+        if hashlib.sha256(session_bytes).hexdigest() != source["demonstration_manifest_sha256"]:
+            raise ValueError("Legacy demonstration manifest changed")
+        validate_demonstration(directory)
         if (
             hashlib.sha256((directory / "packets.jsonl").read_bytes()).hexdigest()
             != source["packets_sha256"]
@@ -71,6 +79,19 @@ def prepare_legacy(request: LegacyNumericImport) -> RunResult:
         observation = json.loads(report.read_text(encoding="utf-8"))["summary"]["observations"]
         if observation["source"]["packets_sha256"] != source["packets_sha256"]:
             raise ValueError("Legacy observation provenance mismatch")
+        settings = read_settings(directory / "observation-config.json")
+        if settings["version"] != 2:
+            raise ValueError("Legacy numerical preparation requires observation v2")
+        with tempfile.TemporaryDirectory(prefix="fh5-numeric-source-") as temporary:
+            replayed = run_experiment(Replay(directory, Path(temporary) / "source.html"))
+            verified_boundaries, _ = history_timing(
+                replayed.samples,
+                replayed.events,
+                replayed.summary["vision"]["events"],
+                2,
+            )
+        if observation["history_boundaries_ns"] != verified_boundaries:
+            raise ValueError("Legacy history boundaries differ from bound raw evidence")
         journal = [
             json.loads(line)
             for line in (directory / "vision.jsonl").read_text(encoding="utf-8").splitlines()
@@ -78,7 +99,7 @@ def prepare_legacy(request: LegacyNumericImport) -> RunResult:
         sources[run_index] = (
             directory,
             {f["path"]: f for f in journal if f.get("kind") == "frame"},
-            observation["history_boundaries_ns"],
+            verified_boundaries,
             {d["decision_ns"]: d for d in observation["decisions"]},
         )
     request.output_dir.mkdir(parents=True, exist_ok=False)
@@ -144,6 +165,7 @@ def prepare_legacy(request: LegacyNumericImport) -> RunResult:
                 "decision_ns": tick,
                 "frames": chosen,
                 "actor": actor,
+                "supervision": example["supervision"],
                 "split": example["split"],
                 "view": request.view,
                 "previews": [f"previews/{f['sha256']}.png" for f in chosen],
@@ -200,6 +222,8 @@ class PreparedNumericSource:
         return False
 
     def _read(self) -> None:
+        from fh5.numeric_recording import read_numeric_frame
+
         cache: OrderedDict[tuple[str, str], NumericFrame] = OrderedDict()
         size = 0
         try:
@@ -210,18 +234,12 @@ class PreparedNumericSource:
                 for frame in row["frames"]:
                     key = (frame["epoch"], frame["frame_id"])
                     if key not in cache:
-                        pixels = asset(self.directory, frame["path"]).read_bytes()
-                        if len(pixels) > self.max_cache_bytes:
-                            raise ValueError("Numerical frame exceeds source cache budget")
-                        if hashlib.sha256(pixels).hexdigest() != frame["sha256"]:
-                            raise ValueError("Prepared numerical pixel hash mismatch")
-                        metadata = {k: v for k, v in frame.items() if k not in ("path", "sha256")}
-                        metadata["size"] = tuple(metadata["size"])
-                        while cache and size + len(pixels) > self.max_cache_bytes:
+                        loaded = read_numeric_frame(self.directory, frame, self.max_cache_bytes)
+                        while cache and size + loaded.pixels.nbytes > self.max_cache_bytes:
                             _, previous = cache.popitem(last=False)
                             size -= previous.pixels.nbytes
-                        cache[key] = NumericFrame(pixels=memoryview(pixels), **metadata)
-                        size += len(pixels)
+                        cache[key] = loaded
+                        size += loaded.pixels.nbytes
                         self.peak_cached_bytes = max(self.peak_cached_bytes, size)
                     cache.move_to_end(key)
                     chosen.append(cache[key])
@@ -232,6 +250,7 @@ class PreparedNumericSource:
                         row["decision_ns"],
                         tuple(chosen),
                         row["actor"],
+                        row.get("supervision"),
                     )
                 ):
                     break

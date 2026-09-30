@@ -47,7 +47,7 @@ async function show(index){
   const pictures=await Promise.all(row.frames.map((_,i)=>loadImage(row.preview_urls[i])));
   if(token!==generation)return;
   text('position',`${index+1} / ${rows.length}`);
-  text('result',`${row.decision_id} · ${row.status || '离线准备'} · ${row.replay_error || row.reason || (row.exact_replay_available ? '数值存档完整' : row.archive_reason || '待推理')} · 预测 ${JSON.stringify(row.replayed_prediction || row.prediction || null)}`);
+  text('result',`${row.decision_id} · ${row.status || '离线准备'} · ${row.replay_error || row.reason || (row.exact_replay_available ? '数值存档完整' : row.archive_reason || '待推理')} · 预测 ${JSON.stringify(row.replayed_prediction || row.prediction || null)} · 示范动作 ${JSON.stringify(row.supervision?.action || null)}（仅供比较）`);
   const cards=document.getElementById('cards'), fragment=document.createDocumentFragment();
   row.frames.forEach((frame,i)=>{
     const figure=document.createElement('figure'), box=document.createElement('div'), caption=document.createElement('figcaption');box.className='image';

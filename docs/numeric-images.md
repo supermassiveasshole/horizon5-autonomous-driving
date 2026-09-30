@@ -14,6 +14,8 @@ uv run --locked fh5 numeric-replay runs/numeric-inference --model runs/t28-bc-in
 
 准备阶段核对模型绑定的数据集、原遥测、观测与压缩图像依据；每个选中的源图像只解码一次并缩放，生成 RGB 数值资产。原文件不改动。可用 `--view reference_assisted` 检查有参考视图，默认 `no_reference`。
 
+准备前还核对数据集绑定的示范 manifest 及其全部源文件哈希，重新从遥测和已绑定日志计算历史边界，拒绝被修改的时间/布局或边界。示范中的当前动作、标签时间和未来监督项单独保存为 `supervision` 证据，可与预测比较；它们从不传入 actor。
+
 `numeric-infer` 默认 CPU，可选 `--device cuda`。加载权重和准备 manifest 发生在执行前；源工作线程预读数值资产，决策线程只接收拥有独立存储的数值帧并调用模型。旧 JPEG 不进入这个阶段。`--legacy-diagnostic` 必须显式给出；这不表示权重适用于新 DXGI 分布，也不证明实时性能。
 
 ## 像素与时间契约

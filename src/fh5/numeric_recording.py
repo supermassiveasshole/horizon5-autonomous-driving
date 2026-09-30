@@ -33,6 +33,24 @@ def _encode(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2) + "\n").encode()
 
 
+def read_numeric_frame(
+    directory: Path, entry: dict[str, Any], byte_limit: int = 4096 * 4096 * 3
+) -> NumericFrame:
+    """Verify a stored RGB frame in an offline or source-worker context."""
+    path = asset(directory, entry["path"])
+    if path.stat().st_size > byte_limit:
+        raise ValueError("Numerical frame exceeds source byte budget")
+    with path.open("rb") as stream:
+        pixels = stream.read(byte_limit + 1)
+    if len(pixels) > byte_limit:
+        raise ValueError("Numerical frame exceeds source byte budget")
+    if hashlib.sha256(pixels).hexdigest() != entry["sha256"]:
+        raise ValueError("Numerical pixel hash mismatch")
+    metadata = {k: v for k, v in entry.items() if k not in ("path", "sha256")}
+    metadata["size"] = tuple(metadata["size"])
+    return NumericFrame(pixels=memoryview(pixels), **metadata)
+
+
 class NumericArchive:
     """Only this bounded consumer hashes or writes pixels, never the decision caller."""
 
@@ -201,6 +219,7 @@ def infer_numeric(
                 "epoch": decision.epoch,
                 "decision_ns": decision.decision_ns,
                 "actor": json.loads(json.dumps(decision.actor)),
+                "supervision": decision.supervision,
                 "frames": [f.metadata() for f in decision.frames],
                 "features": None,
                 "prediction": None,
@@ -288,14 +307,11 @@ def replay_numeric(request: NumericReplay, actor: NumericActor) -> RunResult:
             ):
                 if recorded[key] != row[key]:
                     raise ValueError("Numerical summary differs from archived decision")
+            if recorded.get("supervision") != row.get("supervision"):
+                raise ValueError("Numerical summary differs from archived supervision evidence")
             frames = []
             for frame in recorded["frames"]:
-                pixels = asset(directory, frame["path"]).read_bytes()
-                if hashlib.sha256(pixels).hexdigest() != frame["sha256"]:
-                    raise ValueError("Numerical pixel hash mismatch")
-                metadata = {k: v for k, v in frame.items() if k not in ("path", "sha256")}
-                metadata["size"] = tuple(metadata["size"])
-                frames.append(NumericFrame(pixels=memoryview(pixels), **metadata))
+                frames.append(read_numeric_frame(directory, frame))
             features = _numeric(recorded["actor"])
             row.update(pixels_match=True, features_match=features == recorded["features"])
             decision = NumericDecision(

@@ -132,6 +132,7 @@ class NumericDecision:
     decision_ns: int
     frames: tuple[NumericFrame, ...]
     actor: dict[str, Any]
+    supervision: dict[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -142,6 +143,9 @@ class NumericDecision:
         ):
             raise ValueError("Invalid numerical decision identity or time")
         object.__setattr__(self, "actor", json.loads(json.dumps(self.actor, allow_nan=False)))
+        object.__setattr__(
+            self, "supervision", json.loads(json.dumps(self.supervision, allow_nan=False))
+        )
 
 
 class NumericActor(Protocol):
