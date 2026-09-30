@@ -117,6 +117,12 @@ def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Record and replay FH5 Data Out experiments")
     commands = parser.add_subparsers(dest="mode", required=True)
+    candidate_compare = commands.add_parser(
+        "candidate-compare", help="Compare frozen candidates from source evidence; no activation"
+    )
+    candidate_compare.add_argument("--config", type=Path, required=True)
+    candidate_compare.add_argument("--output", type=Path, required=True)
+    candidate_compare.add_argument("--registry", type=Path)
     evaluation_prepare = commands.add_parser(
         "evaluation-prepare", help="Freeze a policy, local task and evaluation protocol; no devices"
     )
@@ -507,6 +513,21 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else CollectionDatasetReview(args.dataset, args.report)
             )
             print(json.dumps(selected.summary["collection_dataset"], ensure_ascii=False))
+            return 0
+        if args.mode == "candidate-compare":
+            from fh5.candidate_selection import CandidateCompare
+
+            compared = run_experiment(CandidateCompare(args.config, args.output, args.registry))
+            print(
+                json.dumps(
+                    {
+                        k: v
+                        for k, v in compared.summary["candidate_selection"].items()
+                        if k != "reviews"
+                    },
+                    ensure_ascii=False,
+                )
+            )
             return 0
         if args.mode in ("evaluation-prepare", "evaluation-review"):
             from fh5.evaluation import EvaluationPrepare, EvaluationReview
