@@ -303,3 +303,21 @@ def test_changed_frozen_assets_cannot_be_used_to_reinterpret_a_batch(tmp_path, p
     with pytest.raises(ValueError, match="changed|different frozen batch"):
         run_experiment(EvaluationReview(tmp_path / "frozen", frozen_ledger, tmp_path / "review"))
     assert not (tmp_path / "review").exists()
+
+
+@pytest.mark.parametrize("change", ["missing_runtime_bound", "missing_model", "bad_conditions"])
+def test_incomplete_protocol_cannot_publish_a_partly_implicit_freeze(tmp_path, policy, change):
+    from fh5.evaluation import EvaluationPrepare
+
+    _, config = prepare(tmp_path, policy)
+    options = json.loads(config.read_bytes())
+    if change == "missing_runtime_bound":
+        del options["runtime"]["action_lease_ms"]
+    elif change == "missing_model":
+        options["model"] = {}
+    else:
+        options["conditions"] = None
+    config.write_text(json.dumps(options))
+    with pytest.raises(ValueError, match="[Ee]valuation"):
+        run_experiment(EvaluationPrepare(config, tmp_path / "incomplete"))
+    assert not (tmp_path / "incomplete/batch.json").exists()

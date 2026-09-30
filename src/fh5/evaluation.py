@@ -9,7 +9,7 @@ import json
 import math
 import statistics
 from collections import Counter
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -61,8 +61,24 @@ def _config(path: Path) -> dict[str, Any]:
         raise ValueError("Unsupported frozen evaluation configuration")
     if config["purpose"] not in ("development", "final"):
         raise ValueError("Evaluation requires development or final purpose")
+    for name, required in (
+        ("model", {"directory", "manifest_sha256"}),
+        ("task", {"file", "sha256"}),
+    ):
+        binding = config[name]
+        if (
+            not isinstance(binding, dict)
+            or set(binding) != required
+            or any(not isinstance(v, str) or not v.strip() for v in binding.values())
+        ):
+            raise ValueError("Evaluation binding is incomplete: " + name)
     conditions = config["conditions"]
-    if set(conditions) != {"snapshot", "camera", "navigation", "task_basis"}:
+    if not isinstance(conditions, dict) or set(conditions) != {
+        "snapshot",
+        "camera",
+        "navigation",
+        "task_basis",
+    }:
         raise ValueError("Evaluation conditions are incomplete")
     _validate_config(
         {"schema_version": 1, "control_source": "policy", "snapshot": conditions["snapshot"]}
@@ -76,7 +92,8 @@ def _config(path: Path) -> dict[str, Any]:
     identifiers = set()
     for row in plan:
         if (
-            set(row) != {"id", "reference_mode"}
+            not isinstance(row, dict)
+            or set(row) != {"id", "reference_mode"}
             or not isinstance(row["id"], str)
             or not row["id"]
             or row["id"] in identifiers
@@ -86,7 +103,8 @@ def _config(path: Path) -> dict[str, Any]:
         identifiers.add(row["id"])
     criteria = config["criteria"]
     if (
-        set(criteria)
+        not isinstance(criteria, dict)
+        or set(criteria)
         != {
             "min_valid_attempts",
             "reliability_tolerance",
@@ -106,6 +124,10 @@ def _config(path: Path) -> dict[str, Any]:
         v = criteria[key]
         if type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= 1:
             raise ValueError("Evaluation threshold must be a finite fraction")
+    if not isinstance(config["runtime"], dict) or set(config["runtime"]) != {
+        f.name for f in fields(RealtimeConfig)
+    }:
+        raise ValueError("Evaluation runtime must specify every bound explicitly")
     runtime = dict(config["runtime"])
     runtime["pixels"] = PixelContract.from_metadata(runtime["pixels"])
     runtime["action_offsets_ms"] = tuple(runtime["action_offsets_ms"])
