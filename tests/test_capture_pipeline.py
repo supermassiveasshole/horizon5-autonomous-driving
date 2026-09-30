@@ -276,3 +276,55 @@ def test_capture_rejects_unbounded_numerical_history_before_output(tmp_path):
         )
         run_experiment(request)
     assert not (tmp_path / "oversized").exists()
+
+
+def test_interrupted_capture_preserves_result_and_releases_workers(tmp_path):
+    class Idle:
+        source_kind = "synthetic"
+
+        def capture(self):
+            return CaptureEvent(time.perf_counter_ns(), reason="idle")
+
+        def close(self):
+            pass
+
+    def interrupt():
+        raise KeyboardInterrupt
+
+    result = run_experiment(
+        CaptureRun(tmp_path / "interrupted", config(), seconds=0.5),
+        capture_source_factory=Idle,
+        capture_activity=interrupt,
+    )
+    capture = result.summary["capture"]
+    assert capture["stop_reason"] == "interrupted"
+    assert capture["resources_released"] is True
+    assert result.report_path.exists()
+
+
+def test_replay_honors_preprocess_rate_and_preserves_latest_pending(tmp_path):
+    events = []
+    for i in range(7):
+        event = frame(i, duration_ms=1)
+        assert event.frame is not None
+        events.append(
+            replace(
+                event,
+                received_ns=1_002_000_000 + i * 16_000_000,
+                frame=replace(event.frame, present_ticks=ANCHOR + i * 160_000),
+            )
+        )
+    result = run_experiment(
+        CaptureReplay(
+            tmp_path / "rate",
+            CaptureConfig(
+                pixels=PixelContract(size=(2, 1), history_offsets_ms=(64, 32, 0)), preprocess_hz=30
+            ),
+            tuple(events),
+            (1_110_000_000,),
+        )
+    )
+    capture = result.summary["capture"]
+    assert capture["preprocessed"] == 4
+    assert capture["pending_overwritten"] == 3
+    assert [f["frame_id"] for f in capture["decisions"][0]["frames"]] == ["f3", "f5", "f7"]

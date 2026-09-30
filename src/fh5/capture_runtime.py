@@ -9,7 +9,14 @@ from collections.abc import Callable
 from dataclasses import asdict, replace
 from typing import TYPE_CHECKING, Any, Protocol
 
-from fh5.capture import CaptureConfig, CaptureEvent, CaptureRun, CaptureState, preprocess
+from fh5.capture import (
+    CaptureConfig,
+    CaptureEvent,
+    CaptureRun,
+    CaptureState,
+    next_preprocess_time,
+    preprocess,
+)
 from fh5.numeric_images import NumericFrame
 from fh5.numeric_recording import NumericArchive
 from fh5.numeric_report import write_numeric_report
@@ -118,7 +125,6 @@ class LiveCapture:
 
     def _preprocess(self) -> None:
         try:
-            next_tick = time.perf_counter_ns()
             while not self.done.is_set():
                 with self.condition:
                     self.condition.wait_for(
@@ -140,8 +146,7 @@ class LiveCapture:
                     self.metrics["pending_wait_ms"].append((start - work.event.received_ns) / 1e6)
                     self.metrics["preprocess_ms"].append((ready - start) / 1e6)
                     self.metrics["source_to_ready_ms"].append((ready - frame.source_time_ns) / 1e6)
-                period = 1_000_000_000 // self.config.preprocess_hz
-                next_tick = max(next_tick + period, time.perf_counter_ns())
+                next_tick = next_preprocess_time(start, ready, self.config)
                 self.done.wait(max(0, (next_tick - time.perf_counter_ns()) / 1e9))
                 del work, frame
         except Exception as error:
@@ -215,6 +220,8 @@ def run_capture(
     deadline = started + int(request.seconds * 1e9)
     next_tick = started
     archive_bytes = 0
+    stop_reason = "duration_limit"
+    execution_error: str | None = None
     try:
         while time.perf_counter_ns() < deadline and not pipeline.done.is_set():
             if (
@@ -240,6 +247,13 @@ def run_capture(
                 next_tick + 1_000_000_000 // request.config.observation_hz, time.perf_counter_ns()
             )
             pipeline.done.wait(max(0, (next_tick - time.perf_counter_ns()) / 1e9))
+        if pipeline.fault:
+            stop_reason = pipeline.fault
+    except KeyboardInterrupt:
+        stop_reason = "interrupted"
+    except Exception as error:
+        stop_reason = "observation_error"
+        execution_error = str(error)
     finally:
         observation_ended = time.perf_counter_ns()
         stats = pipeline.close()
@@ -252,6 +266,8 @@ def run_capture(
         "contract": request.config.pixels.metadata(),
         "config": asdict(request.config),
         "model": None,
+        "stop_reason": stop_reason,
+        "execution_error": execution_error,
         "timing_kind": "measured",
         "commands_sent": False,
         "input_conditions": request.input_conditions,

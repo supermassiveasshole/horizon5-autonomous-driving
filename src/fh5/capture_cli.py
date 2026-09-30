@@ -93,6 +93,8 @@ def capture_command(args: argparse.Namespace) -> int:
     )
     return int(
         not summary["resources_released"]
+        or bool(summary["execution_error"])
+        or summary["stop_reason"] == "interrupted"
         or bool(summary["pipeline"]["fault"])
         or summary["pipeline"].get("new_frames", 0) == 0
     )

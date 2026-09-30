@@ -141,6 +141,11 @@ class Work:
     event: CaptureEvent
 
 
+def next_preprocess_time(start_ns: int, ready_ns: int, config: CaptureConfig) -> int:
+    period = (1_000_000_000 + config.preprocess_hz - 1) // config.preprocess_hz
+    return max(start_ns + period, ready_ns)
+
+
 def preprocess(work: Work, config: CaptureConfig, ready_ns: int) -> NumericFrame:
     raw = work.event.frame
     assert raw is not None
@@ -293,17 +298,32 @@ def replay_capture(request: CaptureReplay) -> RunResult:
     )
     work: Work | None = None
     ready_at: int | None = None
-    for now, _, event in actions:
-        while ready_at is not None and ready_at <= now:
-            assert work is not None
-            state.complete(work, preprocess(work, request.config, ready_at))
+    next_start = 0
+
+    def advance(now: int) -> None:
+        nonlocal work, ready_at, next_start
+        while True:
+            if work is not None:
+                assert ready_at is not None
+                if ready_at > now:
+                    return
+                state.complete(work, preprocess(work, request.config, ready_at))
+                work, ready_at = None, None
+            if state.pending is None:
+                return
+            start = max(next_start, state.pending.event.received_ns)
+            if start > now:
+                return
             work = state.take()
-            ready_at = ready_at + work.event.processing_ns if work else None
+            assert work is not None
+            ready_at = start + work.event.processing_ns
+            next_start = next_preprocess_time(start, ready_at, request.config)
+
+    for now, _, event in actions:
+        advance(now)
         if event is not None:
             state.offer(event)
-            if work is None:
-                work = state.take()
-                ready_at = now + work.event.processing_ns if work else None
+            advance(now)
         else:
             row, frames = state.select(now)
             stored, previews = [], []
