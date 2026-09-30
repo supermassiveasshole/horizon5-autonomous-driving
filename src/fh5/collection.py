@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fh5.numeric_images import NumericFrame, PixelContract
 
 if TYPE_CHECKING:
+    from fh5.capture import CaptureConfig
     from fh5.experiment import Packet
 
 
@@ -106,6 +107,14 @@ class CollectionConfig:
                 raise ValueError("Invalid collection bound: " + name)
         if self.observation_hz > self.poll_hz:
             raise ValueError("Observation rate exceeds input polling rate")
+
+    def validate_capture(self, capture: CaptureConfig) -> None:
+        if (
+            capture.pixels != self.pixels
+            or capture.observation_hz != self.observation_hz
+            or capture.max_age_ms != self.max_age_ms
+        ):
+            raise ValueError("Collection and capture input contracts differ")
 
 
 @dataclass(frozen=True)

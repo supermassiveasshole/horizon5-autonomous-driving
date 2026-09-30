@@ -13,6 +13,7 @@ from typing import Any
 
 from fh5.capture_config import parse_capture_config
 from fh5.collection import CollectionConfig, CollectionInput, CollectionRun
+from fh5.collection_host import process_identity
 from fh5.collection_process import verify_bundle
 from fh5.collection_store import atomic_json, read_bounded
 from fh5.numeric_images import NumericFrame, PixelContract
@@ -97,6 +98,7 @@ def main() -> int:
     root, expected, token = Path(sys.argv[1]).resolve(), sys.argv[2], sys.argv[3]
     state: dict[str, Any] = {
         "pid": os.getpid(),
+        "birth": process_identity(os.getpid())["birth"],
         "token": token,
         "state": "starting",
         "commands_sent": False,

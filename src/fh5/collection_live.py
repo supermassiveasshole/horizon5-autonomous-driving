@@ -40,12 +40,7 @@ class PassiveCollectionEnvironment:
         lease_path: Path,
         resources: Callable[[], dict[str, Any]] | None = None,
     ) -> None:
-        if (
-            capture_config.pixels != request.config.pixels
-            or capture_config.observation_hz != request.config.observation_hz
-            or capture_config.max_age_ms != request.config.max_age_ms
-        ):
-            raise ValueError("Collection and capture input contracts differ")
+        request.config.validate_capture(capture_config)
         self.request, self.config = request, capture_config
         self.capture_factory, self.telemetry = capture_factory, telemetry
         self.desktop, self.inputs, self.source_kind = desktop, inputs, source_kind

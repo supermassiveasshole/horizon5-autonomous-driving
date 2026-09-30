@@ -2,10 +2,12 @@
 
 import hashlib
 import json
+import os
 import struct
 import threading
 import time
 from dataclasses import replace
+from itertools import count
 
 import pytest
 from test_demonstrations import profile_file, raw_input
@@ -235,11 +237,11 @@ def test_crash_like_missing_final_and_partial_tail_keep_prior_blocks_readable(tm
 
 def test_status_and_stop_work_while_stream_is_running_and_flush_the_tail(tmp_path):
     def points():
-        for ms in range(250, 50000, 50):
+        for ms in count(250, 50):
             time.sleep(0.005)
             yield input_at(ms)
 
-    req = request(tmp_path)
+    req = request(tmp_path, seconds=30)
     results = []
     thread = threading.Thread(
         target=lambda: results.append(run_experiment(req, collection_environment=Stream(points())))
@@ -267,6 +269,51 @@ def test_status_and_stop_work_while_stream_is_running_and_flush_the_tail(tmp_pat
     assert final["stop_reason"] == "requested_stop" and final["complete"]
     status = run_experiment(CollectionControl(req.output_dir)).summary["collection"]
     assert status["final_status_present"] and status["state"] == "stopped"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows readers can briefly deny rename")
+@pytest.mark.parametrize("held_seconds", [0.08, 0.4])
+def test_index_contention_is_tolerated_briefly_but_persistent_failure_is_reported(
+    tmp_path, held_seconds
+):
+    opened, advance = threading.Event(), threading.Event()
+
+    def points():
+        for ms in count(250, 50):
+            if opened.is_set():
+                advance.set()
+            time.sleep(0.005)
+            yield input_at(ms)
+
+    req = request(tmp_path, seconds=10)
+    results = []
+    thread = threading.Thread(
+        target=lambda: results.append(run_experiment(req, collection_environment=Stream(points())))
+    )
+    thread.start()
+    try:
+        index = req.output_dir / "index.json"
+        deadline = time.monotonic() + 2
+        while not index.exists() and time.monotonic() < deadline:
+            time.sleep(0.005)
+        with index.open("rb") as reader:
+            opened.set()
+            assert advance.wait(1)
+            time.sleep(held_seconds)
+            assert json.load(reader)["blocks"]
+    finally:
+        (req.output_dir / "stop.request").touch()
+        thread.join(timeout=3)
+    assert not thread.is_alive()
+    final = results[0].summary["collection"]
+    if held_seconds < 0.25:
+        assert final["archive_error"] is None and final["complete"]
+        assert final["stop_reason"] == "requested_stop"
+    else:
+        assert final["archive_error"] and not final["complete"]
+        assert final["stop_reason"] == "archive_failure"
+    recovered = run_experiment(CollectionReview(req.output_dir, tmp_path / "read.html"))
+    assert recovered.summary["collection"]["verified_blocks"] >= 2
 
 
 def test_corrupted_sealed_pixels_are_reported_without_losing_other_blocks(tmp_path):

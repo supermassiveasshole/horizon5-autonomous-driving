@@ -62,7 +62,17 @@ def atomic_json(path: Path, value: Any) -> None:
         stream.write(encode(value))
         stream.flush()
         os.fsync(stream.fileno())
-    temporary.replace(path)
+    deadline = time.monotonic() + 0.25
+    while True:
+        try:
+            temporary.replace(path)
+            break
+        except PermissionError as error:
+            # Windows readers can briefly deny delete/rename sharing. Retry only
+            # that contention, with a fixed bound; other disk failures remain fatal.
+            if getattr(error, "winerror", None) not in (5, 32, 33) or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
 
 
 class CollectionArchive:

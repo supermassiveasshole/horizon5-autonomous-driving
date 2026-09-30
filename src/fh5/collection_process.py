@@ -98,8 +98,6 @@ def snapshot_files(project: Path) -> dict[str, str]:
     result: dict[str, str] = {}
     total = 0
     for path in sorted(project.rglob("*")):
-        if "__pycache__" in path.parts or path.suffix == ".pyc":
-            continue
         if path.is_symlink() or not path.resolve().is_relative_to(project.resolve()):
             raise ValueError("Frozen collector files must be copied, not linked")
         if path.is_dir():
@@ -126,14 +124,12 @@ def prepare_collection(
     profile = _profile(profile_bytes)
     if profile["calibration"]["status"] != "verified":
         raise ValueError("Frozen collection requires a verified input profile")
+    request.config.validate_capture(capture)
     if (
         request.source not in ("native", "synthetic")
         or (request.source == "synthetic" and request.config.seconds > 60)
         or type(request.port) is not int
         or not 1024 <= request.port <= 65535
-        or capture.pixels != request.config.pixels
-        or capture.max_age_ms != request.config.max_age_ms
-        or capture.observation_hz != request.config.observation_hz
     ):
         raise ValueError("Frozen collection configuration or source mismatch")
     root, repository = request.output_dir.resolve(), request.repository.resolve()
@@ -268,6 +264,16 @@ def start_collection(request: CollectionStart) -> RunResult:
     return RunResult({}, [], [], {"collection": value}, root / "process.json")
 
 
+def _process_liveness(process: dict[str, Any]) -> str:
+    identity = process_identity(process["pid"])
+    state = str(identity["state"])
+    if state == "running" and process.get("birth") is None:
+        return "unknown"
+    if state == "running" and identity["birth"] != process["birth"]:
+        return "exited"  # PID was reused; the original process is gone.
+    return state
+
+
 def control_bundle(request: CollectionControl) -> RunResult:
     from fh5.collection_runtime import control_collection
     from fh5.experiment import RunResult
@@ -285,21 +291,41 @@ def control_bundle(request: CollectionControl) -> RunResult:
     if (recording / "session.json").is_file():
         value.update(control_collection(CollectionControl(recording)).summary["collection"])
     process_path = root / "process.json"
+    process = None
     if process_path.is_file():
         process = json.loads(read_bounded(process_path, 16384))
-        identity = process_identity(process["pid"])
-        state = identity["state"]
-        if state == "running" and process["birth"] is None:
-            state = "unknown"
-        elif state == "running" and identity["birth"] != process["birth"]:
-            state = "exited"  # PID was reused; the original process is gone.
-        value.update(process_liveness=state, pid=process["pid"], process_birth=process["birth"])
+        state = _process_liveness(process)
+        value.update(
+            process_liveness=state,
+            pid=process["pid"],
+            process_birth=process["birth"],
+            process_role="launcher",
+            launcher_pid=process["pid"],
+            launcher_liveness=state,
+        )
     for filename in ("worker-state.json", "launch-failed.json"):
         if (root / filename).is_file():
             child = json.loads(read_bounded(root / filename, 65536))
             value[filename.removesuffix(".json")] = child
             if filename == "worker-state.json":
-                value["software_snapshot_verified"] = child.get("software_snapshot_verified", False)
+                matching = (
+                    process is not None
+                    and child.get("token") == process["token"]
+                    and child.get("manifest_sha256") == process["manifest_sha256"]
+                )
+                value["worker_identity_matches"] = matching
+                value["software_snapshot_verified"] = matching and child.get(
+                    "software_snapshot_verified", False
+                )
+                if matching:
+                    value.update(
+                        process_liveness=_process_liveness(child),
+                        pid=child["pid"],
+                        process_birth=child.get("birth"),
+                        process_role="worker",
+                    )
+                else:
+                    value["process_liveness"] = "unknown"
     value["stop_requested"] = (root / "stop.request").exists()
     value["abnormal_exit"] = (
         value["process_liveness"] == "exited" and not value["final_status_present"]

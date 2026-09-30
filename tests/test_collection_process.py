@@ -2,6 +2,7 @@
 
 import json
 import os
+import py_compile
 import shutil
 import signal
 import subprocess
@@ -140,11 +141,35 @@ def test_native_bundle_requires_explicit_live_start_and_locked_installer(tmp_pat
     assert not (bundle / "start.claim").exists()
 
 
+def test_unrecorded_executable_bytecode_is_rejected_before_start(tmp_path):
+    from fh5.collection_process import CollectionStart
+
+    bundle, _, _ = prepare(tmp_path)
+    module = bundle / "project/.venv/Lib/site-packages/fh5/collection_worker.py"
+    if os.name != "nt":
+        module = next(
+            (bundle / "project/.venv/lib").glob("*/site-packages/fh5/collection_worker.py")
+        )
+    original, stat = module.read_bytes(), module.stat()
+    module.write_bytes(b"raise RuntimeError('unverified cached worker')\n".ljust(len(original)))
+    os.utime(module, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    py_compile.compile(str(module), doraise=True)
+    module.write_bytes(original)
+    os.utime(module, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    try:
+        with pytest.raises(ValueError, match="snapshot changed"):
+            run_experiment(CollectionStart(bundle))
+        assert not (bundle / "start.claim").exists()
+    finally:
+        if (bundle / "start.claim").exists():
+            run_experiment(CollectionControl(bundle, stop=True))
+
+
 def test_terminated_worker_is_not_mistaken_for_live_heartbeat_and_seals_recover(tmp_path):
     from fh5.collection_process import CollectionStart
 
     bundle, _, _ = prepare(tmp_path, seconds=15)
-    launched = run_experiment(CollectionStart(bundle)).summary["collection"]
+    run_experiment(CollectionStart(bundle))
     try:
         deadline = time.monotonic() + 5
         while time.monotonic() < deadline:
@@ -153,10 +178,12 @@ def test_terminated_worker_is_not_mistaken_for_live_heartbeat_and_seals_recover(
                 break
             time.sleep(0.05)
         assert state["process_liveness"] == "running" and state["sealed_blocks"] >= 2
+        worker = json.loads((bundle / "worker-state.json").read_bytes())
+        assert state["pid"] == worker["pid"]
         with pytest.raises(FileExistsError):
             run_experiment(CollectionStart(bundle))
         # This is the synthetic child just created and verified by OS identity.
-        os.kill(launched["pid"], signal.SIGTERM)
+        os.kill(state["pid"], signal.SIGTERM)
         deadline = time.monotonic() + 3
         while time.monotonic() < deadline:
             state = run_experiment(CollectionControl(bundle)).summary["collection"]
