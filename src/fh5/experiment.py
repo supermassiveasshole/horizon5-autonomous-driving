@@ -52,6 +52,7 @@ from fh5.routes import (
     load_route,
     locate_route,
 )
+from fh5.tracking import TrackingDrive, read_tracking_route, run_tracking
 from fh5.vision import VisionEnvironment, VisionRecord, read_vision, run_vision
 
 FORMAT_VERSION = 1
@@ -201,6 +202,7 @@ def run_experiment(
     | RewardReplay
     | RewardAudit
     | RecoveryReplay
+    | TrackingDrive
     | BCTrain
     | BCReplay
     | DemonstrationRecord
@@ -246,6 +248,10 @@ def run_experiment(
         return audit_rewards(request)
     if isinstance(request, RecoveryReplay):
         return replay_recovery(request)
+    if isinstance(request, TrackingDrive):
+        if environment is None:
+            raise ValueError("TrackingDrive requires an external game environment")
+        return run_tracking(request, environment)
     if isinstance(request, (BCTrain, BCReplay)):
         return run_bc(request)
     if isinstance(request, DemonstrationDataset):
@@ -502,6 +508,14 @@ def run_experiment(
     if (directory / "policy.json").exists():
         summary["policy"] = read_policy(directory)
         summary["route"] = summary["policy"]["evaluation_route"]
+    if summary.get("control", {}).get("controller_kind") == "route-feedback-v1":
+        try:
+            summary["route"] = read_tracking_route(directory, summary["control"])
+            events.extend(locate_route(samples, summary["route"]))
+        except (OSError, ValueError, KeyError) as error:
+            events.append(
+                {"kind": "tracking_route_incomplete", "packet_index": None, "detail": str(error)}
+            )
     if any(
         (directory / name).exists()
         for name in ("event-run.json", "event-config.json", "event-journal.jsonl")

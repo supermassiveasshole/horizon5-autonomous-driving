@@ -8,6 +8,30 @@ from pathlib import Path
 
 from test_control import control_config
 from test_experiment import config_file, sample_packet
+from test_tracking import tracking_config
+
+
+def test_tracking_cli_defaults_to_validation_without_controller(tmp_path):
+    output = tmp_path / "drive"
+    checked = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "fh5",
+            "track",
+            "--config",
+            str(tracking_config(tmp_path)),
+            "--output",
+            str(output),
+        ],
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=10,
+    )
+    assert checked.returncode == 0, checked.stderr
+    assert json.loads(checked.stdout)["status"] == "validated_only"
+    assert not output.exists()
 
 
 def test_cli_records_udp_then_replays_without_claiming_game_validation(tmp_path: Path) -> None:

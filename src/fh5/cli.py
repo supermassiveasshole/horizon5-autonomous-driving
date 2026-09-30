@@ -27,6 +27,7 @@ from fh5.recovery import RecoveryReplay
 from fh5.reward_audit import RewardAudit
 from fh5.rewards import RewardReplay
 from fh5.routes import BuildRoute, RouteCheck
+from fh5.tracking import TrackingDrive, validate_tracking_file
 from fh5.vision import VisionRecord
 
 
@@ -150,6 +151,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     control.add_argument(
         "--live", action="store_true", help="Send actual input; F8 or Ctrl+C releases it"
     )
+    track = commands.add_parser(
+        "track", help="Validate local route feedback; --live sends bounded input"
+    )
+    track.add_argument("--config", type=Path, required=True)
+    track.add_argument("--output", type=Path, required=True)
+    track.add_argument("--port", type=int, default=5300)
+    track.add_argument("--live", action="store_true", help="Run with FH5 foreground; F8 stops")
     event = commands.add_parser("event", help="Validate event recipes; --live enables menu pulses")
     event.add_argument("--config", type=Path, required=True)
     event.add_argument("--output", type=Path, required=True)
@@ -403,14 +411,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                     Record(args.config, args.output, source_kind="udp"),
                     packets=_udp_packets(receiver, args.seconds),
                 )
-        elif args.mode == "control":
-            config = validate_control_file(args.config)
+        elif args.mode in ("control", "track"):
+            config = (
+                validate_tracking_file(args.config)[0]["tracking"]
+                if args.mode == "track"
+                else validate_control_file(args.config)
+            )
             if not args.live:
                 print(
                     json.dumps(
                         {
                             "status": "validated_only",
-                            "duration_s": sum(step["seconds"] for step in config["steps"]),
+                            "duration_s": config["max_duration_s"] + config["braking_s"]
+                            if args.mode == "track"
+                            else sum(step["seconds"] for step in config["steps"]),
                         }
                     )
                 )
@@ -435,7 +449,12 @@ def main(argv: Sequence[str] | None = None) -> int:
                     ),
                     flush=True,
                 )
-                result = run_experiment(Control(args.config, args.output), environment=environment)
+                control_request = (
+                    TrackingDrive(args.config, args.output)
+                    if args.mode == "track"
+                    else Control(args.config, args.output)
+                )
+                result = run_experiment(control_request, environment=environment)
         elif args.mode == "event":
             root = validate_event_file(args.config)
             event_config = root["event_run"]
@@ -695,6 +714,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         if not visual["frame_count"]:
             return 3
     if args.mode == "control" and result.summary["control"]["stop_reason"] != "completed":
+        return 4
+    if args.mode == "track" and (
+        result.summary["capture_status"] != "completed"
+        or result.summary["control"]["stop_reason"] != "local_end"
+        or not result.summary["control"]["release_sent"]
+    ):
         return 4
     if args.mode == "event" and (
         result.summary["event_run"]["stop_reason"] != "attempt_limit"
