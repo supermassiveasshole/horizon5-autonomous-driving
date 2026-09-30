@@ -10,7 +10,14 @@ from typing import TYPE_CHECKING, Any
 
 from fh5.collection import CollectionControl, CollectionEnvironment, CollectionRun
 from fh5.collection_state import CollectionState
-from fh5.collection_store import CollectionArchive, WriteFile, atomic_json, encode, write_file
+from fh5.collection_store import (
+    CollectionArchive,
+    WriteFile,
+    atomic_json,
+    encode,
+    read_bounded,
+    write_file,
+)
 from fh5.demonstrations import _profile
 
 if TYPE_CHECKING:
@@ -23,21 +30,13 @@ def control_collection(request: CollectionControl) -> RunResult:
     from fh5.experiment import RunResult
 
     root = request.recording_dir
-    with (root / "session.json").open("rb") as stream:
-        payload = stream.read(1024**2 + 1)
-    if len(payload) > 1024**2:
-        raise ValueError("Collection session metadata exceeds bounded limit")
-    session = json.loads(payload)
+    session = json.loads(read_bounded(root / "session.json", 1024**2))
     if session.get("kind") != "continuous-numeric-collection-v1":
         raise ValueError("Not a continuous collection session")
     final = root / "final.json"
     status = final if final.exists() else root / "status.json"
     if status.is_file():
-        with status.open("rb") as stream:
-            data = stream.read(4 * 1024**2 + 1)
-        if len(data) > 4 * 1024**2:
-            raise ValueError("Collection status exceeds bounded limit")
-        value = json.loads(data)
+        value = json.loads(read_bounded(status, 4 * 1024**2))
     else:
         value = {"state": "starting", "commands_sent": False}
     if request.stop and not final.exists():

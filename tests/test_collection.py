@@ -1,5 +1,6 @@
 """Continuous passive collection through the agreed experiment entry point."""
 
+import hashlib
 import json
 import struct
 import threading
@@ -159,6 +160,27 @@ def test_wrong_vehicle_does_not_become_valid_when_next_poll_has_no_datagram(tmp_
     assert "unexpected_vehicle" in rows[8]["reasons"]
 
 
+@pytest.mark.parametrize("clock", ["stale", "repeated", "overlapping"])
+def test_new_delivery_time_cannot_make_an_old_handset_poll_valid(tmp_path, clock):
+    points = [input_at(ms) for ms in range(250, 1251, 50)]
+    human = dict(points[7].human_input)
+    human["observed_ns"] = {
+        "stale": 1_000_000,
+        "repeated": points[6].human_input["observed_ns"],
+        "overlapping": points[6].human_input["available_ns"] - 100,
+    }[clock]
+    points[7] = replace(points[7], human_input=human)
+    req = request(tmp_path)
+    run_experiment(req, collection_environment=Stream(points))
+    rows = saved_rows(req.output_dir)
+    bad = rows[7]
+    assert not bad["input_usable"] and not bad["synchronized"] and bad["boundary"]
+    assert bad["human_input"]["observed_ns"] == human["observed_ns"]
+    assert "stale_human_input" in bad["reasons"] or "input_clock_overlap" in bad["reasons"]
+    assert rows[8]["input_usable"] and rows[8]["boundary"]
+    assert rows[-1]["synchronized"]
+
+
 def test_slow_disk_drops_visibly_without_blocking_source_and_keeps_sealed_blocks(tmp_path):
     entered = threading.Event()
     finished_reads = []
@@ -196,6 +218,10 @@ def test_crash_like_missing_final_and_partial_tail_keep_prior_blocks_readable(tm
     req = request(tmp_path)
     run_experiment(req, collection_environment=Stream(input_at(ms) for ms in range(250, 951, 50)))
     (req.output_dir / "final.json").rename(req.output_dir / "final-before-crash.json")
+    index_path = req.output_dir / "index.json"
+    index = json.loads(index_path.read_bytes())
+    index["blocks"].pop()  # Last seal reached disk just before the index update.
+    index_path.write_text(json.dumps(index))
     active = req.output_dir / ".partial/999999"
     active.mkdir()
     (active / "rows.jsonl").write_text("unfinished")
@@ -255,6 +281,64 @@ def test_corrupted_sealed_pixels_are_reported_without_losing_other_blocks(tmp_pa
     assert result["verified_blocks"] == 4
 
 
+def test_invalid_block_cannot_poison_recovery_of_later_sealed_blocks(tmp_path):
+    req = request(tmp_path)
+    run_experiment(req, collection_environment=Stream(input_at(ms) for ms in range(250, 951, 50)))
+    # Recover without a final/index, as after an interrupted index write. The block's
+    # rows remain internally hashed, but its declared sequence bounds disagree.
+    (req.output_dir / "final.json").unlink()
+    (req.output_dir / "index.json").unlink()
+    block = req.output_dir / "blocks" / "000001"
+    rows = [json.loads(line) for line in (block / "rows.jsonl").read_bytes().splitlines()]
+    for row in rows:
+        row["sequence"] += 10000
+    payload = ("\n".join(json.dumps(row) for row in rows) + "\n").encode()
+    (block / "rows.jsonl").write_bytes(payload)
+    manifest = json.loads((block / "manifest.json").read_bytes())
+    manifest["rows_sha256"] = hashlib.sha256(payload).hexdigest()
+    (block / "manifest.json").write_text(json.dumps(manifest))
+    result = run_experiment(CollectionReview(req.output_dir, tmp_path / "review.html")).summary[
+        "collection"
+    ]
+    assert len(result["errors"]) == 1 and result["errors"][0]["block"] == "000001"
+    assert result["verified_blocks"] == 4 and result["rows"] == 12
+    assert result["missing_rows"] == 3 and not result["complete"]
+
+
+@pytest.mark.parametrize("reference", ["index", "final"])
+def test_sealed_manifest_must_match_each_existing_stable_reference(tmp_path, reference):
+    req = request(tmp_path)
+    run_experiment(req, collection_environment=Stream(input_at(ms) for ms in range(250, 951, 50)))
+    if reference == "index":
+        (req.output_dir / "final.json").unlink()
+    else:
+        (req.output_dir / "index.json").unlink()
+    block = req.output_dir / "blocks" / "000001"
+    manifest = json.loads((block / "manifest.json").read_bytes())
+    manifest["bytes"] += 1
+    (block / "manifest.json").write_text(json.dumps(manifest))
+    result = run_experiment(CollectionReview(req.output_dir, tmp_path / "review.html")).summary[
+        "collection"
+    ]
+    assert not result["complete"] and result["verified_blocks"] == 4
+    assert result["rows"] == 12 and result["missing_rows"] == 3
+    assert any("manifest reference" in e["error"] for e in result["errors"])
+
+
+def test_final_cannot_claim_completeness_after_omitting_a_sealed_reference(tmp_path):
+    req = request(tmp_path)
+    run_experiment(req, collection_environment=Stream(input_at(ms) for ms in range(250, 951, 50)))
+    final_path = req.output_dir / "final.json"
+    final = json.loads(final_path.read_bytes())
+    final["blocks"].pop()
+    final_path.write_text(json.dumps(final))
+    result = run_experiment(CollectionReview(req.output_dir, tmp_path / "review.html")).summary[
+        "collection"
+    ]
+    assert not result["complete"] and result["errors"]
+    assert result["verified_blocks"] == 5 and result["rows"] == 15
+
+
 def test_disk_budget_stops_with_visible_error_and_keeps_earlier_seals(tmp_path):
     req = request(tmp_path, max_disk_bytes=15000, block_rows=1)
     result = run_experiment(
@@ -297,6 +381,8 @@ def test_input_stream_error_retains_sealed_evidence_and_marks_incomplete(tmp_pat
         "collection"
     ]
     assert review["verified_blocks"] == 6 and not review["complete"]
+    assert review["source_status"]["stop_reason"] == "source_error"
+    assert "synthetic source lost" in review["source_status"]["error"]
 
 
 def test_queue_byte_budget_limits_memory_and_reports_every_missing_row(tmp_path):
@@ -311,6 +397,33 @@ def test_queue_byte_budget_limits_memory_and_reports_every_missing_row(tmp_path)
         "collection"
     ]
     assert review["missing_rows"] == 16 and review["verified_blocks"] == 0
+
+
+@pytest.mark.parametrize("field", ["human", "frame"])
+def test_oversized_source_metadata_stops_before_it_can_bypass_queue_budget(tmp_path, field):
+    def points():
+        for ms in range(250, 851, 50):
+            yield input_at(ms)
+        point = input_at(900)
+        extra = "x" * 1024**2
+        if field == "human":
+            yield replace(point, human_input={**point.human_input, "diagnostics": extra})
+        else:
+            yield replace(
+                point,
+                frames=tuple(
+                    replace(frame, source_layout={**frame.source_layout, "diagnostics": extra})
+                    for frame in point.frames
+                ),
+            )
+
+    req = request(tmp_path, queue_bytes=70000)
+    source = Stream(points())
+    result = run_experiment(req, collection_environment=source).summary["collection"]
+    assert source.closed and result["stop_reason"] == "source_error"
+    assert "metadata" in result["error"] and not result["complete"]
+    assert result["peak_pending_bytes"] <= 70000
+    assert all("diagnostics" not in row["human_input"] for row in saved_rows(req.output_dir))
 
 
 def test_long_stream_spans_many_seals_with_bounded_pending_memory(tmp_path):

@@ -14,10 +14,18 @@ from pathlib import Path
 from queue import Empty, Full, Queue
 from typing import Any
 
-from fh5.collection import CollectionConfig
+from fh5.collection import CollectionConfig, metadata_budget
 from fh5.numeric_images import NumericFrame
 
 WriteFile = Callable[[Path, bytes], None]
+
+
+def read_bounded(path: Path, limit: int) -> bytes:
+    with path.open("rb") as stream:
+        payload = stream.read(limit + 1)
+    if len(payload) > limit:
+        raise ValueError("Collection asset exceeds bounded limit: " + path.name)
+    return payload
 
 
 def encode(value: Any) -> bytes:
@@ -71,9 +79,15 @@ class CollectionArchive:
     def submit(
         self, row: dict[str, Any], frames: tuple[NumericFrame, ...], progress: dict[str, Any]
     ) -> bool:
-        # Encoding and hashes happen only in the writer. The bound includes all raw bytes.
+        # Encoding and hashes happen only in the writer. Bound every retained field
+        # before copying, including the source frame metadata kept alongside pixels.
+        metadata = {k: v for k, v in row.items() if k != "packets"}
+        metadata["frames"] = [f.metadata() for f in frames]
         size = (
-            65536
+            4096
+            + metadata_budget(metadata)
+            + metadata_budget(metadata["frames"])
+            + metadata_budget([(p.received_monotonic_ns, p.received_utc) for p in row["packets"]])
             + sum(len(p.payload) for p in row["packets"])
             + sum(f.pixels.nbytes for f in frames)
         )
@@ -89,9 +103,8 @@ class CollectionArchive:
                 return False
             self.pending_bytes += size
             self.peak_pending_bytes = max(self.peak_pending_bytes, self.pending_bytes)
-        owned = deepcopy({k: v for k, v in row.items() if k != "packets"})
+        owned = deepcopy(metadata)
         owned["packets"] = row["packets"]
-        owned["frames"] = [deepcopy(f.metadata()) for f in frames]
         try:
             self.queue.put_nowait((owned, frames, size))
             return True

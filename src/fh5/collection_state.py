@@ -16,6 +16,7 @@ class CollectionState:
         self.config, self.profile = config, profile
         self.latest: dict[str, Any] | None = None
         self.previous_ns: int | None = None
+        self.input_available_ns: int | None = None
         self.previous_ready = False
         self.conditions: tuple[str, ...] | None = None
         self.capture_epoch: str | None = None
@@ -98,8 +99,18 @@ class CollectionState:
         if value.human_input is not None:
             try:
                 mapped = _mapped(value.human_input, self.profile)
-                if not 0 <= now - mapped["available_ns"] <= cfg.max_age_ms * 1_000_000:
+                poll, available = mapped["poll_ns"], mapped["available_ns"]
+                if not 0 <= now - poll <= cfg.max_age_ms * 1_000_000 or available > now:
                     reasons.append("stale_human_input")
+                if self.input_available_ns is not None and poll <= self.input_available_ns:
+                    reasons.append("input_clock_overlap")
+                elif available <= now:
+                    if (
+                        self.input_available_ns is not None
+                        and poll - self.input_available_ns > cfg.max_age_ms * 1_000_000
+                    ):
+                        reasons.append("input_clock_gap")
+                    self.input_available_ns = available
                 reasons += mapped["reasons"]
             except (ValueError, KeyError, TypeError):
                 reasons.append("invalid_human_input")

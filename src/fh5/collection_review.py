@@ -5,11 +5,12 @@ from __future__ import annotations
 import hashlib
 import html
 import json
+import re
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fh5.collection import CollectionReview
-from fh5.collection_store import atomic_json
+from fh5.collection_store import atomic_json, read_bounded
 from fh5.numeric_images import PixelContract, validate_frame_history
 from fh5.numeric_recording import read_numeric_frame
 
@@ -35,19 +36,34 @@ def collection_result(path: Path, result: dict[str, Any]) -> RunResult:
     return RunResult({"source_kind": "passive_collection"}, [], [], {"collection": result}, path)
 
 
-def _read(path: Path, limit: int) -> bytes:
-    with path.open("rb") as stream:
-        payload = stream.read(limit + 1)
-    if len(payload) > limit:
-        raise ValueError("Collection asset exceeds bounded limit")
-    return payload
+def _references(document: dict[str, Any], binding: str) -> dict[str, dict[str, Any]]:
+    if document["version"] != 1 or document["session_sha256"] != binding:
+        raise ValueError("Collection reference document binding differs")
+    blocks = document["blocks"]
+    if not isinstance(blocks, list) or len(blocks) > 8192:
+        raise ValueError("Invalid bounded collection reference list")
+    result = {}
+    for ref in blocks:
+        path, digest, rows = ref["path"], ref["sha256"], ref["rows"]
+        if (
+            not isinstance(path, str)
+            or re.fullmatch(r"blocks/[0-9]{6}", path) is None
+            or path in result
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+            or type(rows) is not int
+            or not 1 <= rows <= 4096
+        ):
+            raise ValueError("Invalid or repeated sealed block reference")
+        result[path] = ref
+    return result
 
 
 def review_collection(request: CollectionReview) -> RunResult:
     root = request.recording_dir
     if request.report_path.exists() or request.report_path.with_suffix(".json").exists():
         raise FileExistsError(request.report_path)
-    session_raw = _read(root / "session.json", 1024**2)
+    session_raw = read_bounded(root / "session.json", 1024**2)
     session = json.loads(session_raw)
     if (
         session["version"] != 1
@@ -57,9 +73,6 @@ def review_collection(request: CollectionReview) -> RunResult:
         raise ValueError("Unsupported collection session")
     binding = hashlib.sha256(session_raw).hexdigest()
     contract = PixelContract.from_metadata(session["configuration"]["pixels"])
-    blocks = sorted((root / "blocks").iterdir())
-    if len(blocks) > 8192:
-        raise ValueError("Too many collection blocks")
     result: dict[str, Any] = {
         "version": 1,
         "session_sha256": binding,
@@ -73,6 +86,30 @@ def review_collection(request: CollectionReview) -> RunResult:
         "complete": False,
         "active_blocks_ignored": len(list((root / ".partial").iterdir())),
     }
+    # Snapshot documents before enumerating blocks: a concurrent seal may appear
+    # after this index, and is recoverable even before its reference is published.
+    references: dict[str, dict[str, dict[str, Any]]] = {}
+    final = None
+    result["final_status_present"] = (root / "final.json").is_file()
+    for name in ("final.json", "index.json"):
+        if not (root / name).is_file():
+            continue
+        try:
+            document = json.loads(read_bounded(root / name, 4 * 1024**2))
+            references[name] = _references(document, binding)
+            if name == "final.json":
+                final = document
+        except (OSError, ValueError, KeyError, TypeError) as error:
+            result["errors"].append({"file": name, "error": str(error)})
+    blocks = sorted((root / "blocks").iterdir())
+    if len(blocks) > 8192:
+        raise ValueError("Too many collection blocks")
+    seen_paths = {"blocks/" + block.name for block in blocks}
+    for name, refs in references.items():
+        for missing_path in refs.keys() - seen_paths:
+            result["errors"].append(
+                {"file": name, "error": "Missing sealed block: " + missing_path}
+            )
     previous = -1
     for block in blocks:
         try:
@@ -83,28 +120,36 @@ def review_collection(request: CollectionReview) -> RunResult:
                 or block.is_symlink()
             ):
                 raise ValueError("Unexpected sealed block entry")
-            raw = _read(block / "manifest.json", 4096)
+            raw = read_bounded(block / "manifest.json", 4096)
             manifest = json.loads(raw)
+            digest = hashlib.sha256(raw).hexdigest()
+            for refs in references.values():
+                ref = refs.get("blocks/" + block.name)
+                if ref is not None and (
+                    digest != ref["sha256"] or manifest["row_count"] != ref["rows"]
+                ):
+                    raise ValueError("Sealed manifest reference mismatch")
             if (
                 manifest["version"] != 1
                 or manifest["session_sha256"] != binding
                 or manifest["index"] != int(block.name)
             ):
                 raise ValueError("Sealed block belongs to another session or index")
-            rows_raw = _read(block / "rows.jsonl", 256 * 1024**2)
+            rows_raw = read_bounded(block / "rows.jsonl", 256 * 1024**2)
             if hashlib.sha256(rows_raw).hexdigest() != manifest["rows_sha256"]:
                 raise ValueError("Sealed rows hash mismatch")
             rows = rows_raw.splitlines()
             if len(rows) != manifest["row_count"] or not 1 <= len(rows) <= 4096:
                 raise ValueError("Sealed row count mismatch")
             first = last = -1
+            block_previous, missing = previous, 0
             for line in rows:
                 row = json.loads(line)
                 sequence = row["sequence"]
-                if type(sequence) is not int or sequence <= previous:
+                if type(sequence) is not int or sequence <= block_previous:
                     raise ValueError("Collection sequence repeated or moved backwards")
-                result["missing_rows"] += sequence - previous - 1
-                previous = last = sequence
+                missing += sequence - block_previous - 1
+                block_previous = last = sequence
                 if first == -1:
                     first = sequence
                 if row["frames"]:
@@ -121,29 +166,41 @@ def review_collection(request: CollectionReview) -> RunResult:
                     )
                     if reason or any(f.source_time_ns < row["segment_start_ns"] for f in frames):
                         raise ValueError("Archived history crosses a segment or violates contract")
-                result["rows"] += 1
             if first != manifest["first_sequence"] or last != manifest["last_sequence"]:
                 raise ValueError("Sealed sequence bounds differ")
+            previous = block_previous
+            result["missing_rows"] += missing
+            result["rows"] += len(rows)
             result["verified_blocks"] += 1
             result["blocks"].append(
                 {
-                    "path": str(block.relative_to(root)),
-                    "manifest_sha256": hashlib.sha256(raw).hexdigest(),
+                    "path": "blocks/" + block.name,
+                    "manifest_sha256": digest,
                     "rows": len(rows),
                 }
             )
         except (OSError, ValueError, KeyError, TypeError) as error:
             result["errors"].append({"block": block.name, "error": str(error)})
-    final_path = root / "final.json"
-    result["final_status_present"] = final_path.is_file()
-    if final_path.is_file():
-        final = json.loads(_read(final_path, 4 * 1024**2))
-        if final["session_sha256"] != binding or final["seen_rows"] < previous + 1:
+    if final is not None:
+        result["source_status"] = {
+            key: final.get(key)
+            for key in ("stop_reason", "error", "archive_error", "archive_released", "environment")
+        }
+        if final.get("complete") is True and (
+            references["final.json"].keys() != seen_paths
+            or final.get("written_rows") != result["rows"]
+            or final.get("seen_rows") != result["rows"]
+            or final.get("sealed_blocks") != result["verified_blocks"]
+            or final.get("unsealed_rows") != 0
+            or final.get("dropped_rows") != 0
+        ):
+            result["errors"].append({"error": "Complete final status differs from sealed evidence"})
+        if type(final.get("seen_rows")) is not int or final["seen_rows"] < previous + 1:
             result["errors"].append({"error": "Final status binding or row count differs"})
         else:
             result["missing_rows"] += final["seen_rows"] - previous - 1
             result["complete"] = bool(
-                final["complete"]
+                final.get("complete") is True
                 and not result["errors"]
                 and not result["missing_rows"]
                 and result["verified_blocks"]

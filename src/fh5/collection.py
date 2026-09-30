@@ -14,6 +14,47 @@ if TYPE_CHECKING:
     from fh5.experiment import Packet
 
 
+def metadata_budget(value: Any, limit: int = 1024**2) -> int:
+    """Conservatively bound retained JSON-shaped metadata without encoding it."""
+    used = nodes = 0
+
+    def visit(item: Any, depth: int) -> None:
+        nonlocal used, nodes
+        nodes += 1
+        if depth > 8 or nodes > 8192:
+            raise ValueError("Collection metadata exceeds structure limit")
+        kind = type(item)
+        if item is None or kind is bool:
+            used += 64
+        elif kind is int:
+            if item.bit_length() > 64:
+                raise ValueError("Collection metadata integer exceeds 64 bits")
+            used += 64
+        elif kind is float and math.isfinite(item):
+            used += 64
+        elif kind is str:
+            # Covers Python Unicode storage and worst-case JSON character escaping.
+            used += 128 + len(item) * 6
+        elif kind in (dict, list, tuple):
+            used += 256 + 64 * len(item)
+        else:
+            raise ValueError("Unsupported collection metadata value")
+        if used > limit:
+            raise ValueError("Collection metadata exceeds byte limit")
+        if kind is dict:
+            for key, child in item.items():
+                if type(key) is not str:
+                    raise ValueError("Collection metadata keys must be strings")
+                visit(key, depth + 1)
+                visit(child, depth + 1)
+        elif kind in (list, tuple):
+            for child in item:
+                visit(child, depth + 1)
+
+    visit(value, 0)
+    return used
+
+
 @dataclass(frozen=True)
 class CollectionConfig:
     pixels: PixelContract = field(default_factory=PixelContract)
@@ -89,6 +130,17 @@ class CollectionInput:
             raise ValueError("Invalid bounded collection input")
         if any(len(p.payload) > 65535 for p in self.packets):
             raise ValueError("Collection datagram exceeds UDP size")
+        metadata_budget(
+            {
+                "human_input": self.human_input,
+                "frames": [f.metadata() for f in self.frames],
+                "capture_epoch": self.capture_epoch,
+                "boundary": self.boundary,
+                "fault": self.fault,
+                "packet_times": [[p.received_monotonic_ns, p.received_utc] for p in self.packets],
+            },
+            limit=64 * 1024,
+        )
         object.__setattr__(self, "human_input", deepcopy(self.human_input))
 
 
