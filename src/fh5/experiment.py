@@ -43,7 +43,8 @@ from fh5.perception import (
     run_perception,
 )
 from fh5.policy import PolicyActor, PolicyDrive, PolicyEnvironment, read_policy, run_policy
-from fh5.realtime import RealtimeEnvironment, RealtimeReplay, RealtimeRun
+from fh5.realtime import RealtimeEnvironment, RealtimeNumericReplay, RealtimeReplay, RealtimeRun
+from fh5.realtime_numeric_replay import replay_realtime_numeric
 from fh5.realtime_replay import replay_realtime
 from fh5.realtime_runtime import run_realtime
 from fh5.recovery import RecoveryReplay, replay_recovery
@@ -204,6 +205,7 @@ def _validate_config(config: object) -> dict[str, Any]:
 def run_experiment(
     request: RealtimeReplay
     | RealtimeRun
+    | RealtimeNumericReplay
     | CaptureReplay
     | CaptureRun
     | CaptureTraceReview
@@ -254,6 +256,10 @@ def run_experiment(
     """Run one record/replay operation; injected packets are the environment seam."""
     if isinstance(request, RealtimeReplay):
         return replay_realtime(request)
+    if isinstance(request, RealtimeNumericReplay):
+        if numeric_actor is None:
+            raise ValueError("Numerical replay requires an explicit frozen actor")
+        return replay_realtime_numeric(request, numeric_actor)
     if isinstance(request, RealtimeRun):
         if realtime_environment is None or numeric_actor_factory is None:
             raise ValueError(

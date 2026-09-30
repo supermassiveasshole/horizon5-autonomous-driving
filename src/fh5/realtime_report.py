@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import Counter
 from dataclasses import asdict
@@ -62,9 +63,28 @@ def write_realtime_result(
             [(b["decision_ns"] - a["decision_ns"]) / 1e6 for a, b in zip(decisions, decisions[1:])]
         ),
     }
-    (directory / "report.json").write_text(
-        json.dumps(result, indent=2, allow_nan=False) + "\n", encoding="utf-8"
-    )
+    for name, start, finish in (
+        ("worker_queue_ms", "decision_ns", "worker_started_ns"),
+        ("worker_features_and_inference_ms", "worker_started_ns", "worker_returned_ns"),
+        ("result_supervision_ms", "worker_returned_ns", "inference_returned_ns"),
+    ):
+        result["metrics"][name] = percentiles(
+            [
+                (row[finish] - row[start]) / 1e6
+                for row in decisions
+                if start in row and finish in row
+            ]
+        )
+    payload = (json.dumps(result, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    (directory / "report.json").write_bytes(payload)
+    if result["version"] == 2:
+        (directory / "realtime-manifest.json").write_text(
+            json.dumps(
+                {"version": 1, "report_sha256": hashlib.sha256(payload).hexdigest()}, indent=2
+            )
+            + "\n",
+            encoding="utf-8",
+        )
     display = json.loads(json.dumps(result))
     for row in display["decisions"]:
         row["preview_urls"] = [

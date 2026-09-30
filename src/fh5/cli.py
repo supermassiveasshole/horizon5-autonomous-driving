@@ -45,6 +45,15 @@ def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Record and replay FH5 Data Out experiments")
     commands = parser.add_subparsers(dest="mode", required=True)
+    realtime_replay = commands.add_parser(
+        "realtime-replay", help="Independently replay recorded numerical predictions; no devices"
+    )
+    realtime_replay.add_argument("recording", type=Path)
+    realtime_replay.add_argument("--model", type=Path, required=True)
+    realtime_replay.add_argument("--report", type=Path, required=True)
+    realtime_replay.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
+    realtime_replay.add_argument("--tolerance", type=float, default=1e-6)
+    realtime_replay.add_argument("--allow-legacy-source-diagnostic", action="store_true")
     shadow = commands.add_parser(
         "realtime-shadow", help="Validate numerical shadow; --live is read-only"
     )
@@ -263,6 +272,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     perception_replay.add_argument("--labels", type=Path)
     args = parser.parse_args(argv)
     try:
+        if args.mode == "realtime-replay":
+            from fh5.realtime_cli import replay_command
+
+            return replay_command(args)
         if args.mode == "realtime-shadow":
             from fh5.realtime_cli import shadow_command
 

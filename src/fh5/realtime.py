@@ -163,6 +163,22 @@ class RealtimeRun:
             raise ValueError("Invalid real-time image archive budget")
 
 
+@dataclass(frozen=True)
+class RealtimeNumericReplay:
+    recording_dir: Path
+    report_path: Path
+    tolerance: float = 1e-6
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.tolerance) not in (int, float)
+            or not math.isfinite(self.tolerance)
+            or not 0 <= self.tolerance <= 1e-3
+            or self.report_path.suffix.lower() != ".html"
+        ):
+            raise ValueError("Invalid real-time numerical replay report or tolerance")
+
+
 class RealtimeEnvironment(Protocol):
     """External I/O seam. Shadow send is a no-op; actual game control belongs to #9."""
 

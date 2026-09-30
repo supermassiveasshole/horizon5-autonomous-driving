@@ -85,12 +85,18 @@ def run_realtime(
                     now = time.perf_counter_ns()
                     state.supervise(now)
                     try:
-                        returned, work, prediction, error = worker.results.get_nowait()
+                        reply = worker.results.get_nowait()
                     except Empty:
                         pass
                     else:
-                        work.row["worker_returned_ns"] = returned
-                        state.complete(time.perf_counter_ns(), work, prediction, error)
+                        reply.work.row.update(
+                            worker_started_ns=reply.started_ns,
+                            worker_returned_ns=reply.returned_ns,
+                            features=reply.features,
+                        )
+                        state.complete(
+                            time.perf_counter_ns(), reply.work, reply.prediction, reply.error
+                        )
                     if worker.error:
                         state.stop(time.perf_counter_ns(), "inference_worker_error")
                     if state.stop_reason:
@@ -176,7 +182,7 @@ def run_realtime(
     for row in state.decisions:
         row["archive"] = archive.records.get(row["decision_id"])
     result: dict[str, Any] = {
-        "version": 1,
+        "version": 2,
         "evidence_kind": environment.source_kind,
         "started_ns": started,
         "ended_ns": ended,

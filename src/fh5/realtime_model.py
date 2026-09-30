@@ -69,3 +69,6 @@ class ShadowNumericActor:
         self, actor: dict[str, Any], frames: tuple[NumericFrame, ...]
     ) -> list[float]:
         return self.actor.input_features(actor, frames)
+
+    def clear_input_cache(self) -> None:
+        self.actor.clear_input_cache()

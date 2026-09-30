@@ -9,10 +9,45 @@ from dataclasses import asdict
 from typing import Any
 
 from fh5.capture_config import parse_capture_config
-from fh5.realtime import RealtimeConfig, RealtimeRun
+from fh5.numeric_images import PixelContract
+from fh5.realtime import RealtimeConfig, RealtimeNumericReplay, RealtimeRun
 from fh5.realtime_model import ShadowNumericActor, shadow_model_contract
+from fh5.realtime_numeric_replay import read_realtime_recording
 from fh5.realtime_shadow import LocalTask, ShadowEnvironment
 from fh5.realtime_udp import UDPTelemetry
+
+
+def replay_command(args: argparse.Namespace) -> int:
+    from fh5.experiment import run_experiment
+
+    recording = read_realtime_recording(args.recording)
+    if recording["actor_kind"] != ShadowNumericActor.kind:
+        raise ValueError("CLI replay requires the frozen temporal shadow actor")
+    actor = ShadowNumericActor(
+        args.model,
+        PixelContract.from_metadata(recording["configuration"]["pixels"]),
+        recording["model"]["weights_sha256"],
+        args.device,
+        allow_legacy_source_diagnostic=args.allow_legacy_source_diagnostic,
+    )
+    result = run_experiment(
+        RealtimeNumericReplay(args.recording, args.report, args.tolerance),
+        numeric_actor=actor,
+    )
+    summary = result.summary["realtime_numeric_replay"]
+    print(
+        json.dumps(
+            {
+                "verified": summary["verified"],
+                "verified_predictions": summary["verified_predictions"],
+                "errors": summary["errors"],
+                "report": str(result.report_path),
+                "commands_sent_to_game": False,
+            },
+            ensure_ascii=False,
+        )
+    )
+    return 0 if summary["verified"] else 4
 
 
 def shadow_command(args: argparse.Namespace) -> int:

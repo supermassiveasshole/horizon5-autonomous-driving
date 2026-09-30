@@ -6,19 +6,31 @@ import threading
 import time
 from collections.abc import Callable
 from copy import deepcopy
+from dataclasses import dataclass
 from queue import Empty, Queue
 from typing import Any
 
 from fh5.numeric_images import NumericActor, NumericFrame
+from fh5.numeric_recording import numeric_features
 from fh5.realtime import RealtimeConfig, RealtimeObservation, SafetyState
 from fh5.realtime_state import DecisionState, Work
+
+
+@dataclass(frozen=True)
+class WorkerResult:
+    work: Work
+    started_ns: int
+    returned_ns: int
+    features: list[float] | None
+    prediction: list[float]
+    error: str | None
 
 
 class InferenceWorker:
     def __init__(self, factory: Callable[[], NumericActor], config: RealtimeConfig) -> None:
         self.factory, self.config = factory, config
         self.requests: Queue[Work] = Queue(1)
-        self.results: Queue[tuple[int, Work, list[float], str | None]] = Queue(1)
+        self.results: Queue[WorkerResult] = Queue(1)
         self.ready, self.done = threading.Event(), threading.Event()
         self.error: str | None = None
         self.manifest: dict[str, Any] = {}
@@ -97,12 +109,19 @@ class InferenceWorker:
                 except Empty:
                     continue
                 prediction: list[float] = []
+                features = None
                 error = None
+                started = time.perf_counter_ns()
                 try:
+                    features = numeric_features(
+                        actor, deepcopy(work.actor), work.observation.frames
+                    )
                     prediction = actor.predict(deepcopy(work.actor), work.observation.frames)
                 except Exception as failure:
                     error = f"{type(failure).__name__}: {failure}"
-                self.results.put_nowait((time.perf_counter_ns(), work, prediction, error))
+                self.results.put_nowait(
+                    WorkerResult(work, started, time.perf_counter_ns(), features, prediction, error)
+                )
         except Exception as failure:
             self.error = f"{type(failure).__name__}: {failure}"
         finally:

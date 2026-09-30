@@ -169,11 +169,20 @@ def _prediction(actor: NumericActor, decision: NumericDecision) -> list[float]:
     return result
 
 
-def _features(actor: NumericActor, decision: NumericDecision) -> list[float]:
+def numeric_features(
+    actor: NumericActor, inputs: dict[str, Any], frames: tuple[NumericFrame, ...]
+) -> list[float]:
     provider = getattr(actor, "input_features", None)
     if provider is None:
-        return _numeric(decision.actor)
-    values: list[float] = provider(decision.actor, decision.frames)
+        values = _numeric(inputs)
+    else:
+        values = provider(inputs, frames)
+    if (
+        not isinstance(values, list)
+        or not 1 <= len(values) <= 4096
+        or any(type(v) not in (float, int) or not math.isfinite(v) for v in values)
+    ):
+        raise ValueError("Numerical input features must be a bounded finite vector")
     return values
 
 
@@ -236,7 +245,7 @@ def infer_numeric(
             }
             if reason is None:
                 try:
-                    row["features"] = _features(actor, decision)
+                    row["features"] = numeric_features(actor, decision.actor, decision.frames)
                     row["prediction"] = _prediction(actor, decision)
                 except Exception as error:
                     rows.append(
@@ -332,7 +341,7 @@ def replay_numeric(request: NumericReplay, actor: NumericActor) -> RunResult:
             reason = validate_decision(decision, contract)
             if reason is not None:
                 raise ValueError(f"Invalid replay observation: {reason}")
-            features = _features(actor, decision)
+            features = numeric_features(actor, decision.actor, decision.frames)
             row.update(pixels_match=True, features_match=features == recorded["features"])
             prediction = _prediction(actor, decision)
             error = max(abs(a - b) for a, b in zip(prediction, recorded["prediction"]))
