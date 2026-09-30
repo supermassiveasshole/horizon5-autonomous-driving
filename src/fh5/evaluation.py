@@ -274,6 +274,21 @@ def _verify_source(root: Path, files: dict[str, str]) -> None:
             raise ValueError("Evaluation source changed: " + name)
 
 
+def _protocol_order(batch: dict[str, Any], metadata: dict[str, Any]) -> str:
+    """Check recorded wall-clock ordering, without treating it as execution proof."""
+    try:
+        frozen = datetime.fromisoformat(batch["created_utc"])
+        started = datetime.fromisoformat(metadata["created_utc"])
+        ended = datetime.fromisoformat(metadata["ended_utc"])
+        if any(t.tzinfo is None for t in (frozen, started, ended)):
+            return "unknown"
+        if ended < started or ended > datetime.now(UTC):
+            return "unknown"
+        return "recording_predates_protocol" if started < frozen else "metadata_after_protocol"
+    except (ValueError, TypeError, KeyError):
+        return "unknown"
+
+
 def review_evaluation(request: EvaluationReview) -> RunResult:
     from fh5.experiment import RunResult, run_experiment
 
@@ -355,6 +370,8 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
                     "valid_duration_s": None,
                     "contact_count": 0,
                     "source_kind": "unknown",
+                    "protocol_order": "unknown",
+                    "diagnostic_only": True,
                     "evidence_gaps": ["recording_or_evidence_unreadable", "attempt_count_unknown"],
                     "read_error": str(error),
                     "expected_files": entry["files"],
@@ -362,6 +379,7 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
                 }
             )
             continue
+        order = _protocol_order(batch, result.metadata)
         for attempt in result.summary["attempt_review"]["attempts"]:
             times = [
                 s["duration_s"] for s in attempt["forward_segments"] if s["geometry_completed"]
@@ -371,16 +389,36 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
                 "visual_timing_not_verified",
                 "automatic_restart_not_verified",
             ]
+            outcome = attempt["outcome"]
+            reasons = list(attempt["reasons"])
+            if order != "metadata_after_protocol":
+                gaps.append("protocol_order:" + order)
+                reasons.append("protocol_order:" + order)
+                if outcome == "valid_complete":
+                    outcome = "pending_review"
             if result.metadata["snapshot"] != batch["config"]["conditions"]["snapshot"]:
                 gaps.append("conditions_mismatch")
+                reasons.append("conditions_mismatch")
+                if outcome != "interface_error":
+                    outcome = "invalid"
             rows.append(
                 {
                     **attempt,
+                    "local_outcome": attempt["outcome"],
+                    "local_record_eligible": attempt["record_eligible"],
+                    "protocol_order": order,
+                    "diagnostic_only": batch["model_diagnostic_only"]
+                    or result.metadata["source_kind"] != "udp"
+                    or order != "metadata_after_protocol"
+                    or "conditions_mismatch" in gaps,
+                    "outcome": outcome,
+                    "reasons": reasons,
+                    "record_eligible": attempt["record_eligible"] and outcome == "valid_complete",
                     "slot_id": entry["slot_id"],
                     "reference_mode": plan[entry["slot_id"]]["reference_mode"],
                     "source_hashes": result.summary["attempt_review"]["source_hashes"],
                     "valid_duration_s": times[0]
-                    if attempt["outcome"] == "valid_complete" and len(times) == 1
+                    if outcome == "valid_complete" and len(times) == 1
                     else None,
                     "evidence_gaps": gaps,
                     "source_kind": result.metadata["source_kind"],
@@ -408,7 +446,7 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
         "commands_sent": False,
         "automatic_promotion_allowed": False,
         "diagnostic_only": batch["model_diagnostic_only"]
-        or any(r["source_kind"] != "udp" for r in rows),
+        or any(r["diagnostic_only"] for r in rows),
         "closed_loop_validated": False,
         "scope": "local validity accounting; recorded policy execution, timing and autonomous restart still require evidence",
     }

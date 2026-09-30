@@ -321,3 +321,54 @@ def test_incomplete_protocol_cannot_publish_a_partly_implicit_freeze(tmp_path, p
     with pytest.raises(ValueError, match="[Ee]valuation"):
         run_experiment(EvaluationPrepare(config, tmp_path / "incomplete"))
     assert not (tmp_path / "incomplete/batch.json").exists()
+
+
+def test_other_assists_cannot_contribute_valid_times_to_frozen_conditions(tmp_path, policy):
+    from fh5.evaluation import EvaluationReview
+
+    prepare(tmp_path, policy)
+    source = record(tmp_path, "drive", [(0, 0.2), (1, 0.2), (2, 0.2), (3, 0.2)])
+    path = source / "session.json"
+    metadata = json.loads(path.read_bytes())
+    metadata["snapshot"]["assists"] = {"value": "changed ABS setting", "status": "user_reported"}
+    path.write_text(json.dumps(metadata))
+    summary = run_experiment(
+        EvaluationReview(
+            tmp_path / "frozen",
+            ledger(tmp_path, [entry("run-0", source, evidence(tmp_path, source))]),
+            tmp_path / "review",
+        )
+    ).summary["evaluation"]
+    assert summary["metrics"]["all_attempts"] == 1
+    assert summary["metrics"]["outcomes"]["invalid"] == 1
+    assert summary["metrics"]["valid_duration_s"]["count"] == 0
+    assert summary["attempts"][0]["local_outcome"] == "valid_complete"
+    assert summary["attempts"][0]["record_eligible"] is False
+
+
+@pytest.mark.parametrize("created", ["2020-01-01T00:00:00Z", "unknown", "2099-01-01T00:00:00"])
+def test_old_or_unordered_records_are_diagnostic_and_not_frozen_batch_successes(
+    tmp_path, policy, created
+):
+    from fh5.evaluation import EvaluationReview
+
+    prepare(tmp_path, policy)
+    source = record(tmp_path, "drive", [(0, 0.2), (1, 0.2), (2, 0.2), (3, 0.2)])
+    path = source / "session.json"
+    metadata = json.loads(path.read_bytes())
+    metadata["created_utc"] = created
+    path.write_text(json.dumps(metadata))
+    summary = run_experiment(
+        EvaluationReview(
+            tmp_path / "frozen",
+            ledger(tmp_path, [entry("run-0", source, evidence(tmp_path, source))]),
+            tmp_path / "review",
+        )
+    ).summary["evaluation"]
+    assert summary["metrics"]["all_attempts"] == 1
+    assert summary["metrics"]["outcomes"]["pending_review"] == 1
+    assert summary["metrics"]["valid_duration_s"]["count"] == 0
+    assert summary["attempts"][0]["local_outcome"] == "valid_complete"
+    assert summary["attempts"][0]["record_eligible"] is False
+    assert summary["attempts"][0]["diagnostic_only"] is True
+    assert summary["attempts"][0]["protocol_order"] in ("recording_predates_protocol", "unknown")
