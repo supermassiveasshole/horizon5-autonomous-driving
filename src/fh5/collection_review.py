@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fh5.collection import CollectionReview
-from fh5.collection_store import atomic_json, collection_complete, read_bounded
+from fh5.collection_store import atomic_json, collection_complete, read_bounded, write_file
 from fh5.numeric_images import PixelContract, validate_frame_history
 from fh5.numeric_recording import read_numeric_frame
 
@@ -27,17 +27,19 @@ def collection_result(
         raise FileExistsError(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     data = json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False)
-    path.write_text(
-        '<!doctype html><html lang="zh"><meta charset="utf-8"><title>'
-        + html.escape(title)
-        + "</title>"
-        "<style>body{font:16px system-ui;margin:32px;max-width:1000px}pre{white-space:pre-wrap}</style>"
-        "<h1>"
-        + html.escape(title)
-        + "</h1><p>完整封存不等于优质示范；碰撞、离路、导航和尝试边界仍需核验。</p><pre>"
-        + html.escape(data)
-        + "</pre></html>",
-        encoding="utf-8",
+    write_file(
+        path,
+        (
+            '<!doctype html><html lang="zh"><meta charset="utf-8"><title>'
+            + html.escape(title)
+            + "</title>"
+            "<style>body{font:16px system-ui;margin:32px;max-width:1000px}pre{white-space:pre-wrap}</style>"
+            "<h1>"
+            + html.escape(title)
+            + "</h1><p>完整封存不等于优质示范；碰撞、离路、导航和尝试边界仍需核验。</p><pre>"
+            + html.escape(data)
+            + "</pre></html>"
+        ).encode("utf-8"),
     )
     return RunResult({"source_kind": "passive_collection"}, [], [], {"collection": result}, path)
 

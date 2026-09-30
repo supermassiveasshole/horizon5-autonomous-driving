@@ -192,6 +192,60 @@ def test_event_coverage_counts_one_contiguous_turn_and_withholds_final_holdout(t
     assert all(c["road_kind_unknown_polls"] == 15 for c in coverage)
 
 
+@pytest.mark.parametrize("destination", ["snapshot", "source", "source_new", "existing", "json"])
+def test_review_report_never_overwrites_frozen_or_existing_evidence(tmp_path, destination):
+    from fh5.collection_dataset import CollectionDataset, CollectionDatasetReview
+
+    config = dataset_inputs(tmp_path)
+    output = tmp_path / "snapshot"
+    run_experiment(CollectionDataset(config, output))
+    source = Path(json.loads(config.read_bytes())["sources"][0]["recording"])
+    report = {
+        "snapshot": output / "dataset.html",
+        "source": source / "session.html",
+        "source_new": source / "new-report.html",
+        "existing": output / "report.html",
+        "json": tmp_path / "new-report.json",
+    }[destination]
+    before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
+    with pytest.raises((ValueError, FileExistsError)):
+        run_experiment(CollectionDatasetReview(output / "dataset.json", report))
+    assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
+
+
+@pytest.mark.parametrize("middle_quality, expected_events", [("trusted", 1), ("failed", 2)])
+def test_review_subdivision_preserves_events_unless_trust_is_interrupted(
+    tmp_path, middle_quality, expected_events
+):
+    from fh5.collection_dataset import CollectionDataset
+
+    config = dataset_inputs(tmp_path)
+    review_path = Path(json.loads(config.read_bytes())["sources"][0]["review"])
+    review = json.loads(review_path.read_bytes())
+    attempt = review["attempts"][0]
+    original = attempt["intervals"][0]
+    attempt["intervals"] = [
+        dict(original, end_sequence=7),
+        dict(
+            original,
+            start_sequence=7,
+            end_sequence=8,
+            quality=middle_quality,
+            reasons=[] if middle_quality == "trusted" else ["offroad"],
+        ),
+        dict(original, start_sequence=8),
+    ]
+    review_path.write_text(json.dumps(review))
+    result = run_experiment(CollectionDataset(config, tmp_path / "snapshot"))
+    coverage = result.summary["collection_dataset"]["development_coverage"][0]
+    assert coverage["trusted_events"]["left"] == expected_events
+    assert coverage["trusted_events"]["throttle"] == expected_events
+    assert coverage["trusted_events"]["medium_speed"] == expected_events
+    data = json.loads((tmp_path / "snapshot/dataset.json").read_bytes())
+    tail = [s for s in data["samples"] if s["attempt"] == "attempt-0" and s["sequence"] >= 8]
+    assert tail and all(s["history_floor_ns"] == 1_650_000_000 for s in tail)
+
+
 def test_invalid_packet_is_excluded_without_discarding_valid_parts_of_attempt(tmp_path):
     from fh5.collection_dataset import CollectionDataset
 

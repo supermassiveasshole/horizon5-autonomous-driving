@@ -206,6 +206,7 @@ def select_source(
         key = (identifier, interval["index"] if interval else None, row["segment"])
         if key != last_key or gap:
             history_floor = tick
+        if last_key is None or key[0] != last_key[0] or key[2] != last_key[2] or gap:
             previous_behavior, active_events = None, set()
         last_key = key
         result["sequence_gaps"] += gap

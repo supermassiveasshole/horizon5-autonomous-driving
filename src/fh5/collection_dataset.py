@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fh5.collection_review import _references, collection_result
-from fh5.collection_store import atomic_json, encode, read_bounded
+from fh5.collection_store import encode, read_bounded, write_file
 from fh5.demonstrations import _profile
 from fh5.numeric_images import PixelContract
 
@@ -309,19 +309,36 @@ def run_collection_dataset(request: CollectionDataset | CollectionDatasetReview)
         config = json.loads(read_bounded(request.config_file, 4 * 1024**2))
         _config(config)
         sources = [_freeze_source(s, request.config_file.parent) for s in config["sources"]]
+        _report_destination(request.output_dir / "report.html", sources)
         data = build_snapshot(config, sources)
+        payload = encode(data)
+        if len(payload) > 128 * 1024**2:
+            raise ValueError("Dataset exceeds 128 MiB snapshot budget; reduce sources or reviews")
         request.output_dir.mkdir(parents=True)
         path = request.output_dir / "dataset.json"
-        atomic_json(path, data)
+        temporary = path.with_suffix(".tmp")
+        write_file(temporary, payload)
+        temporary.rename(path)
         report = request.output_dir / "report.html"
     else:
         path, report = request.dataset_file, request.report_path
         data = json.loads(read_bounded(path, 128 * 1024**2))
         if data.get("kind") != "collection-dataset-snapshot-v1" or data.get("version") != 1:
             raise ValueError("Unsupported collection dataset snapshot")
+        _report_destination(report, data["sources"])
         if build_snapshot(data["config"], data["sources"]) != data:
             raise ValueError("Dataset differs from canonical frozen source reconstruction")
     summary = _summary(data, hashlib.sha256(read_bounded(path, 128 * 1024**2)).hexdigest())
     collection_result(report, summary, title="持续采集数据快照")
-    atomic_json(report.with_suffix(".json"), summary)
+    write_file(report.with_suffix(".json"), encode(summary))
     return RunResult({}, [], [], {"collection_dataset": summary}, report)
+
+
+def _report_destination(report: Path, sources: list[dict[str, Any]]) -> None:
+    if report.suffix.lower() != ".html":
+        raise ValueError("Dataset report must use an .html path distinct from JSON evidence")
+    for path in (report, report.with_suffix(".json")):
+        if path.exists() or path.is_symlink():
+            raise FileExistsError(path)
+        if any(path.resolve().is_relative_to(Path(s["recording"]).resolve()) for s in sources):
+            raise ValueError("Dataset outputs cannot be written inside source recordings")
