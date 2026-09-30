@@ -23,7 +23,7 @@ uv run --locked fh5 recovery-replay --config configs/recovery-synthetic.example.
 
 `reset_history` 列出时间、路线定位、动作、图像、循环网络及控制器状态的清除要求，带 `discard_before_s`。`allow_driving` 带新 generation 和新的起始包号；旧片段不提供前驱动作。真实运行时以后必须实际执行这些操作并提供确认，不能仅从此报告读到意图就声称已清空状态。
 
-`sample` 中的 `conditions_valid` 和 `route_valid` 是独立任务管理输入，分别表示条件及路线定位可用；`neutral` 表示用于恢复核验的输入已归零。这些字段不是本模块从画面/遥测识别的结果。`failure` 接受 `off_road`、`missed_checkpoint`、`unrecoverable_heading`、`stalled`。后三种驾驶失败判定同样不能由人工填入合成信号来验收实机检测精度。
+`sample` 中的 `conditions_valid` 和 `route_valid` 是独立任务管理输入，分别表示条件及路线定位可用；`neutral` 表示用于恢复核验的输入已归零。这些字段不是本模块从画面/遥测识别的结果。`failure` 接受 `off_road`、`missed_checkpoint`、`unrecoverable_heading`、`stalled`。这些驾驶失败分类不能由人工填入合成信号来验收实机检测精度；恢复核验期间若再次收到确认失败，会保留该失败并停止，不再许可驾驶。
 
 ## 边界、限次和结果
 
@@ -34,5 +34,7 @@ uv run --locked fh5 recovery-replay --config configs/recovery-synthetic.example.
 - `finish` 只表示外部提供到达信号。失败后到达仍为失败尝试，`no_rewind_completion=false`。未失败的合成运行也不升级正式成绩；不拼接片段进度或奖励。
 
 ## 剩余验收
+
+软件验证及审查记录见 [T11 验证记录](validation/t11-recovery.md)。
 
 需要在蓝图 `105657219` 核对倒带是否可用、按钮绑定、页面状态、恢复点与计时/检查点语义，并接入真实输入释放、历史重建及恢复后前向驾驶。还需核实失败退出或已验证重开、成功率和真实耗时。当前没有这些新实机证据，不能宣称程序已经会在游戏中自主倒带。夜间实现不启动 FH5 或 Steam。
