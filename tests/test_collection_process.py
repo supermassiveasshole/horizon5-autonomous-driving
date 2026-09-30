@@ -199,3 +199,31 @@ def test_terminated_worker_is_not_mistaken_for_live_heartbeat_and_seals_recover(
         assert not recovered.summary["collection"]["complete"]
     finally:
         run_experiment(CollectionControl(bundle, stop=True))
+
+
+def test_worker_reverification_failure_reports_the_actual_failed_process(tmp_path, monkeypatch):
+    from fh5.collection_process import CollectionStart
+
+    bundle, _, _ = prepare(tmp_path)
+    start_process = subprocess.Popen
+
+    def change_at_launch(*args, **kwargs):
+        # Real process boundary: parent verification has finished, child has not
+        # started. A second verification must reject this otherwise valid JSON.
+        with (bundle / "project/capture.json").open("a") as stream:
+            stream.write(" ")
+        return start_process(*args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", change_at_launch)
+    run_experiment(CollectionStart(bundle))
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline:
+        state = run_experiment(CollectionControl(bundle)).summary["collection"]
+        if "worker-state" in state and state["launcher_liveness"] == "exited":
+            break
+        time.sleep(0.02)
+    assert state["worker-state"]["state"] == "failed"
+    assert state["process_liveness"] == "exited"
+    assert state["state"] == "interrupted_or_start_failed" and state["abnormal_exit"]
+    assert not state["complete"] and not state["software_snapshot_verified"]
+    assert not (bundle / "recording").exists()

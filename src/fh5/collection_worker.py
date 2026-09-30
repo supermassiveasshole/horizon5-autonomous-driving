@@ -100,6 +100,7 @@ def main() -> int:
         "pid": os.getpid(),
         "birth": process_identity(os.getpid())["birth"],
         "token": token,
+        "manifest_sha256": expected,
         "state": "starting",
         "commands_sent": False,
         "software_snapshot_verified": False,
