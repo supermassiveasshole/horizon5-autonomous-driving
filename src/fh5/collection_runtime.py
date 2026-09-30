@@ -14,6 +14,7 @@ from fh5.collection_store import (
     CollectionArchive,
     WriteFile,
     atomic_json,
+    collection_complete,
     encode,
     read_bounded,
     write_file,
@@ -125,13 +126,8 @@ def collect(
         state="stopped",
         environment=released,
         training_eligible=False,
-        complete=result["unsealed_rows"] == 0
-        and not result["archive_error"]
-        and result["archive_released"]
-        and released.get("resources_released", False)
-        and sequence > 0
-        and error is None,
     )
+    result["complete"] = collection_complete(result)
     atomic_json(root / "final.json", result)
     atomic_json(root / "status.json", result)
     return collection_result(root / "report.html", result)

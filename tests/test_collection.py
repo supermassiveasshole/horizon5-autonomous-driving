@@ -339,6 +339,28 @@ def test_final_cannot_claim_completeness_after_omitting_a_sealed_reference(tmp_p
     assert result["verified_blocks"] == 5 and result["rows"] == 15
 
 
+@pytest.mark.parametrize("fault", ["source_error", "archive_error", "archive_busy", "source_busy"])
+def test_final_completeness_cannot_override_its_own_failure_evidence(tmp_path, fault):
+    req = request(tmp_path)
+    run_experiment(req, collection_environment=Stream(input_at(ms) for ms in range(250, 951, 50)))
+    final_path = req.output_dir / "final.json"
+    final = json.loads(final_path.read_bytes())
+    if fault == "source_error":
+        final.update(stop_reason="source_error", error="synthetic source lost")
+    elif fault == "archive_error":
+        final["archive_error"] = "synthetic disk error"
+    elif fault == "archive_busy":
+        final["archive_released"] = False
+    else:
+        final["environment"]["resources_released"] = False
+    final_path.write_text(json.dumps(final))
+    result = run_experiment(CollectionReview(req.output_dir, tmp_path / "review.html")).summary[
+        "collection"
+    ]
+    assert not result["complete"] and result["errors"]
+    assert result["verified_blocks"] == 5 and result["rows"] == 15
+
+
 def test_disk_budget_stops_with_visible_error_and_keeps_earlier_seals(tmp_path):
     req = request(tmp_path, max_disk_bytes=15000, block_rows=1)
     result = run_experiment(

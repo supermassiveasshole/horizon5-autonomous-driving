@@ -28,6 +28,21 @@ def read_bounded(path: Path, limit: int) -> bytes:
     return payload
 
 
+def collection_complete(status: dict[str, Any]) -> bool:
+    environment = status.get("environment")
+    return (
+        type(status.get("seen_rows")) is int
+        and status["seen_rows"] > 0
+        and status.get("unsealed_rows") == 0
+        and status.get("archive_error") is None
+        and status.get("archive_released") is True
+        and isinstance(environment, dict)
+        and environment.get("resources_released") is True
+        and status.get("error") is None
+        and status.get("stop_reason") not in ("source_error", "source_fault", "archive_failure")
+    )
+
+
 def encode(value: Any) -> bytes:
     return (
         json.dumps(value, sort_keys=True, allow_nan=False, separators=(",", ":")) + "\n"

@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fh5.collection import CollectionReview
-from fh5.collection_store import atomic_json, read_bounded
+from fh5.collection_store import atomic_json, collection_complete, read_bounded
 from fh5.numeric_images import PixelContract, validate_frame_history
 from fh5.numeric_recording import read_numeric_frame
 
@@ -187,7 +187,8 @@ def review_collection(request: CollectionReview) -> RunResult:
             for key in ("stop_reason", "error", "archive_error", "archive_released", "environment")
         }
         if final.get("complete") is True and (
-            references["final.json"].keys() != seen_paths
+            not collection_complete(final)
+            or references["final.json"].keys() != seen_paths
             or final.get("written_rows") != result["rows"]
             or final.get("seen_rows") != result["rows"]
             or final.get("sealed_blocks") != result["verified_blocks"]
