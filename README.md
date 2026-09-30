@@ -12,6 +12,8 @@ T04 局部数据验收完成：[局部路线工具](docs/routes.md) 可从连续
 
 T06 / #7 已加入 `fh5 attempt-review`：完整尝试、前向片段和恢复排除区分别留存，独立证据决定局部结论，正式全程仍单独待核验。支持已有记录离线审核，不发送控制；使用方式见 [局部尝试说明](docs/attempts.md)，真实覆盖与限制见 [T06 验证](docs/validation/t06-attempts.md)。
 
+T09 / #10 新增[冻结评估与全部尝试统计](docs/evaluation.md)：`fh5 evaluation-prepare` 固定策略、任务和批次条件，`fh5 evaluation-review` 汇总完整录制中的五类结果及未开始计划。当前验证局部有效性统计；实际策略输入、实时指标、自动重复执行和独立最终验收仍待接入，不据此晋升版本。
+
 ## 安装与运行
 
 T07 / #8 新增[物理时间奖励与终止结算](docs/rewards.md)：`fh5 reward-replay` 重算历史局部片段，`fh5 reward-audit` 生成完整合成反例与回报排序。独立有效性、奖励标签和正式成绩保持各自结论；未启动 SAC 或新的实机驾驶。

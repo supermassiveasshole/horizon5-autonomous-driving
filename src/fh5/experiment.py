@@ -43,6 +43,12 @@ from fh5.demonstrations import (
     record_demonstration,
     replay_demonstration,
 )
+from fh5.evaluation import (
+    EvaluationPrepare,
+    EvaluationReview,
+    prepare_evaluation,
+    review_evaluation,
+)
 from fh5.events import EventEnvironment, EventRun, read_event, run_event
 from fh5.learning_schedule import LearningResources, ScheduledBCTrain, run_scheduled_bc
 from fh5.numeric_images import (
@@ -223,6 +229,8 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 def run_experiment(
     request: RealtimeReplay
+    | EvaluationPrepare
+    | EvaluationReview
     | RealtimeRun
     | RealtimeNumericReplay
     | CollectionRun
@@ -287,6 +295,10 @@ def run_experiment(
     collection_installer: CollectionInstaller | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, EvaluationPrepare):
+        return prepare_evaluation(request)
+    if isinstance(request, EvaluationReview):
+        return review_evaluation(request)
     if isinstance(request, CollectionPrepare):
         return prepare_collection(request, collection_installer)
     if isinstance(request, CollectionStart):

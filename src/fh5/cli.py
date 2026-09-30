@@ -45,6 +45,17 @@ def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Record and replay FH5 Data Out experiments")
     commands = parser.add_subparsers(dest="mode", required=True)
+    evaluation_prepare = commands.add_parser(
+        "evaluation-prepare", help="Freeze a policy, local task and evaluation protocol; no devices"
+    )
+    evaluation_prepare.add_argument("--config", type=Path, required=True)
+    evaluation_prepare.add_argument("--output", type=Path, required=True)
+    evaluation_review = commands.add_parser(
+        "evaluation-review", help="Account for every recorded attempt under a frozen protocol"
+    )
+    evaluation_review.add_argument("--batch", type=Path, required=True)
+    evaluation_review.add_argument("--ledger", type=Path, required=True)
+    evaluation_review.add_argument("--output", type=Path, required=True)
     prepare = commands.add_parser(
         "collection-prepare", help="Freeze a separate passive collector; no devices"
     )
@@ -372,6 +383,21 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             print(json.dumps(selected.summary["collection_dataset"], ensure_ascii=False))
             return 0
+        if args.mode in ("evaluation-prepare", "evaluation-review"):
+            from fh5.evaluation import EvaluationPrepare, EvaluationReview
+
+            evaluation_request = (
+                EvaluationPrepare(args.config, args.output)
+                if args.mode == "evaluation-prepare"
+                else EvaluationReview(args.batch, args.ledger, args.output)
+            )
+            summary = run_experiment(evaluation_request).summary["evaluation"]
+            print(
+                json.dumps(
+                    {k: v for k, v in summary.items() if k != "attempts"}, ensure_ascii=False
+                )
+            )
+            return 2 if summary.get("unresolved_recordings") else 0
         if args.mode == "collection-bc-prepare":
             from fh5.collection_bc import CollectionBCPrepare
 

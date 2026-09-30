@@ -1,0 +1,111 @@
+{
+  "version": 1,
+  "purpose": "development",
+  "model": {
+    "directory": "../runs/candidate",
+    "manifest_sha256": "<model.json SHA-256>"
+  },
+  "task": {
+    "file": "../runs/reviewed-local-task.json",
+    "sha256": "<task file SHA-256>"
+  },
+  "conditions": {
+    "snapshot": {
+      "vehicle": {
+        "value": "2011 Lamborghini Sesto Elemento",
+        "status": "verified",
+        "evidence": "docs/validation/t03-event.md; live vehicle header"
+      },
+      "variant": {
+        "value": "Forza Edition; CarOrdinal 2941; X 999",
+        "status": "verified",
+        "evidence": "docs/validation/t02-control.md; blueprint starting grid"
+      },
+      "tune": {
+        "value": "Current BEST FOR SESTOFE by IMG BIRD (2021/11/14); unchanged",
+        "status": "user_reported"
+      },
+      "assists": {
+        "value": "Automatic shifting; simulation steering; ABS/TCS/STM off; full driving line; cosmetic damage; rewind enabled; launch control off",
+        "status": "verified",
+        "evidence": "docs/validation/t03-event.md; official-assists.jpg"
+      },
+      "event": {
+        "value": "Goliath blueprint 105657219; official route and checkpoints required; 1 lap; 54.6 km; Drivatars off; traffic off",
+        "status": "verified",
+        "evidence": "docs/validation/t03-event.md; runs/t03-fixed-environment-v2/blueprint-card.jpg and blueprint-fixed-settings.png"
+      },
+      "environment": {
+        "value": "Settings screen: dry season; custom weather/time; clear; early morning; fixed time progression. Blueprint loaded and one off-start restart observed; long-run environment consistency unverified.",
+        "status": "verified",
+        "evidence": "docs/validation/t03-event.md; runs/t03-fixed-environment-v2/blueprint-fixed-settings.png; SHA256 0ca2ad90f5540094f681d3a095e5baf11e2176c6eab2c9025064aa934fb7c28d"
+      }
+    },
+    "camera": "chase_far",
+    "navigation": "full_racing_line",
+    "task_basis": "independent reviewed local corridor and ordered gates"
+  },
+  "runtime": {
+    "pixels": {
+      "version": 1,
+      "size": [
+        480,
+        270
+      ],
+      "resize": "full-frame-pillow-bilinear-v1",
+      "origin": "direct_numeric",
+      "history_order": "oldest_first",
+      "history_offsets_ms": [
+        200,
+        100,
+        0
+      ],
+      "color": "RGB",
+      "dtype": "uint8",
+      "layout": "HWC-contiguous",
+      "normalization": "float32/255",
+      "crop": "full_frame"
+    },
+    "decision_hz": 20,
+    "inference_deadline_ms": 80,
+    "action_lease_ms": 150,
+    "max_image_age_ms": 100,
+    "max_telemetry_age_ms": 100,
+    "watchdog_ms": 250,
+    "expected_car_ordinal": 2941,
+    "expected_pi": 999,
+    "max_speed_kmh": 15,
+    "start_speed_kmh": 1,
+    "max_steer": 0.4,
+    "max_throttle": 0.25,
+    "max_brake": 0.5,
+    "action_offsets_ms": [
+      200,
+      100,
+      0
+    ],
+    "reference_count": 5
+  },
+  "plan": [
+    {
+      "id": "no-reference-1",
+      "reference_mode": "no_reference"
+    },
+    {
+      "id": "no-reference-2",
+      "reference_mode": "no_reference"
+    },
+    {
+      "id": "no-reference-3",
+      "reference_mode": "no_reference"
+    }
+  ],
+  "criteria": {
+    "min_valid_attempts": 3,
+    "reliability_tolerance": 0.05,
+    "min_time_improvement_fraction": 0.02,
+    "anomalies": "quarantine_keep_in_denominator",
+    "exploration": false,
+    "rewind": false
+  }
+}
