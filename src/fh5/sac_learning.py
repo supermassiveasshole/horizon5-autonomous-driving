@@ -360,6 +360,10 @@ def _train(request: SACTrain, torch: Any) -> RunResult:
 def run_sac_policy_replay(request: SACPolicyReplay) -> RunResult:
     from fh5.experiment import RunResult
 
+    if request.report_path.exists() or request.report_path.is_symlink():
+        raise FileExistsError(request.report_path)
+    if request.report_path.suffix.lower() != ".html":
+        raise ValueError("SAC policy replay requires a new HTML report")
     torch = importlib.import_module("torch")
     with preserve_torch_state(torch):
         torch.set_num_threads(2)
@@ -417,10 +421,12 @@ def run_sac_policy_replay(request: SACPolicyReplay) -> RunResult:
             "q_action_coordinates": manifest["q_action_coordinates"],
         }
     request.report_path.parent.mkdir(parents=True, exist_ok=True)
-    request.report_path.write_text(
-        '<!doctype html><meta charset="utf-8"><h1>SAC 冻结策略回放</h1><pre>'
-        + html.escape(json.dumps(summary, ensure_ascii=False, indent=2))
-        + "</pre>",
-        encoding="utf-8",
+    write_file(
+        request.report_path,
+        (
+            '<!doctype html><meta charset="utf-8"><h1>SAC 冻结策略回放</h1><pre>'
+            + html.escape(json.dumps(summary, ensure_ascii=False, indent=2))
+            + "</pre>"
+        ).encode("utf-8"),
     )
     return RunResult({}, [], [], {"sac_policy": summary}, request.report_path)

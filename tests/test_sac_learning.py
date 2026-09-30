@@ -157,3 +157,33 @@ def test_cli_trains_and_replays_the_updated_sac_policy(tmp_path, capsys):
     )
     restored = json.loads(capsys.readouterr().out)
     assert restored["predictions"] == trained["predictions"]
+
+
+def test_policy_replay_cannot_overwrite_candidate_experience_or_existing_reports(tmp_path):
+    from fh5.sac_learning import SACPolicyReplay, SACTrain
+
+    replay = warm_start(tmp_path)
+    candidate = tmp_path / "candidate"
+    run_experiment(SACTrain(tmp_path / "warm", replay, candidate, steps=0))
+    preserved = {
+        path: path.read_bytes()
+        for path in (
+            candidate / "policy.pt",
+            candidate / "policy.json",
+            candidate / "bc/actor.pt",
+            candidate / "report.html",
+            replay,
+            tmp_path / "frame.rgb",
+        )
+    }
+    for destination, original in preserved.items():
+        with pytest.raises(FileExistsError):
+            run_experiment(SACPolicyReplay(candidate, replay, destination))
+        assert destination.read_bytes() == original
+    with pytest.raises(ValueError, match="HTML"):
+        run_experiment(SACPolicyReplay(candidate, replay, tmp_path / "wrong.pt"))
+    assert not (tmp_path / "wrong.pt").exists()
+    report = tmp_path / "reports/fresh.html"
+    result = run_experiment(SACPolicyReplay(candidate, replay, report))
+    assert result.report_path == report
+    assert report.is_file()
