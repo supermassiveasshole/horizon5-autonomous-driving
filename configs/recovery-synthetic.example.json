@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "rewind_available": true,
+  "max_rewinds": 2,
+  "phase_timeout_s": 2.0,
+  "no_progress_timeout_s": 3.0,
+  "session_timeout_s": 20.0,
+  "max_frame_age_s": 0.25,
+  "warmup_frames": 2
+}

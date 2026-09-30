@@ -79,6 +79,8 @@ T26 / #27 从实体 XInput 手柄读取原始动作，与 RGB 和遥测同步记
 
 ## 开发检查
 
+T11 / #12 已提供[恢复监督回放](docs/recovery.md)：通过合成任务/UI 信号检查释放、倒带确认、历史隔离和限次停止，命令为 `fh5 recovery-replay`。它不操作游戏；自主倒带与恢复后实际驾驶尚未验收。
+
 ```powershell
 uv run --locked pytest
 uv run --locked mypy

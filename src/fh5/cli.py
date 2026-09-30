@@ -23,6 +23,7 @@ from fh5.experiment import Packet, Record, Replay, run_experiment
 from fh5.observations import ObservationReplay
 from fh5.perception import Perception, PerceptionReplay
 from fh5.policy import PolicyDrive, validate_policy_file
+from fh5.recovery import RecoveryReplay
 from fh5.reward_audit import RewardAudit
 from fh5.rewards import RewardReplay
 from fh5.routes import BuildRoute, RouteCheck
@@ -71,6 +72,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     audit.add_argument("--reward", type=Path, required=True)
     audit.add_argument("--output", type=Path, required=True)
+    recovery = commands.add_parser(
+        "recovery-replay", help="Replay synthetic recovery signals; never sends game input"
+    )
+    recovery.add_argument("--config", type=Path, required=True)
+    recovery.add_argument("--trace", type=Path, required=True)
+    recovery.add_argument("--output", type=Path, required=True)
     bc = commands.add_parser("bc-train", help="Train a bounded offline multimodal BC actor")
     bc.add_argument("--config", type=Path, required=True)
     bc.add_argument("--output", type=Path, required=True)
@@ -284,6 +291,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         elif args.mode == "reward-audit":
             result = run_experiment(RewardAudit(args.reward, args.output))
+        elif args.mode == "recovery-replay":
+            result = run_experiment(RecoveryReplay(args.config, args.trace, args.output))
         elif args.mode == "route-check":
             result = run_experiment(
                 RouteCheck(
@@ -519,6 +528,20 @@ def main(argv: Sequence[str] | None = None) -> int:
             if p["stop_reason"] == "local_end" and p["release_sent"] and p["resources_released"]
             else 4
         )
+    if "recovery" in result.summary:
+        print(
+            json.dumps(
+                {
+                    "status": "synthetic_replay_complete",
+                    "commands_sent": False,
+                    "reason": result.summary["recovery"]["reason"],
+                    "metrics": result.summary["recovery"]["metrics"],
+                    "report": str(result.report_path),
+                    "real_rewind_verified": False,
+                }
+            )
+        )
+        return 0
     if "bc" in result.summary:
         print(
             json.dumps(
