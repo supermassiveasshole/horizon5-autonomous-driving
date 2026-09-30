@@ -1,6 +1,6 @@
 # 歌利亚驾驶学习主方案
 
-状态：多模态学习与视觉导航方向已收敛，产品与验收基线见 [PRD v1.3](PRD.md)；接口与采集已部分验收，已有[离线 BC 初始化](validation/t27-bc.md)、[SAC 离线更新](validation/t10-sac-updates.md)、[可迁移续训](validation/t12-sac-resume.md)和[合成环境中的有界采样/学习循环](validation/t10-sac-cycle.md)。SAC 实机自主采样闭环和驾驶改善尚未验收。用户决定见 [范围记录](scope-decisions.md)，观测/示范/学习契约见 [多模态规格](multimodal-learning-spec.md)。
+状态：多模态学习与视觉导航方向已收敛，产品与验收基线见 [PRD v1.3](PRD.md)；接口与采集已部分验收，已有[离线 BC 初始化](validation/t27-bc.md)、[SAC 离线更新](validation/t10-sac-updates.md)、[可迁移续训](validation/t12-sac-resume.md)、[合成环境中的有界采样/学习循环](validation/t10-sac-cycle.md)及[冻结 SAC 的合成重复评估](validation/t09-sac-evaluation.md)。SAC 实机自主采样闭环和驾驶改善尚未验收。用户决定见 [范围记录](scope-decisions.md)，观测/示范/学习契约见 [多模态规格](multimodal-learning-spec.md)。
 
 #36 的[容错数值决策](realtime-decisions.md)已实现软件基础和只读影子适配器：短时缺图允许跳过，旁路存档缺口单独隔离，动作有绝对期限和独立监督。该契约只适用于新运行版本；旧驾驶入口与既有验收保持原语义。真实游戏的影子性能验收和闭环驾驶仍未完成。
 
