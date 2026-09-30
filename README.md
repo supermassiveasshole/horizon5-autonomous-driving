@@ -122,6 +122,8 @@ uv run --locked ruff format --check .
 
 #11 已增加 [SAC 转移、预热与离线更新](docs/sac-learning.md)：在合成数值经验上核验完整 BC 冻结预热后，`sac-train` 实际更新策略、温度、编码器和双 Q，`sac-policy-replay` 重载冻结策略。自主游戏采样循环及实机收益仍待完成。
 
+#13 已增加 [SAC 中断与续训](docs/sac-resume.md)：新快照封存数值经验、完整学习状态和训练历史，`sac-resume` 在新目录继续同一学习过程；`stop.request` 在完整更新边界保存。当前只支持 CPU 合成经验与同一冻结契约，实机重新入场和新增在线经验仍待接入。
+
 安装 `learning` 可选依赖后，通过 `fh5 bc-train --config configs/bc.example.json --output runs/bc-first` 训练固定预算的多模态 BC；`fh5 bc-replay` 重放冻结模型。两者不发送游戏输入。数据、参考遮蔽、模型与误差解释见 [BC 说明](docs/bc.md)，首轮结果见 [T27 验证](docs/validation/t27-bc.md)。
 
 #35 新增 `fh5 temporal-prepare`、`temporal-train`、`temporal-replay`：历史画面仅在导入时解码，训练与推理使用数值像素和明确的帧间 Δt。支持实际/固定时间对照及冻结输入/预测核验，见[数值 Δt BC](docs/temporal-bc.md)和[离线验证](docs/validation/t33-temporal-bc.md)。首轮结果未证明 Δt 收益或起步能力，尚未接入实时驾驶。

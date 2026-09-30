@@ -87,7 +87,13 @@ from fh5.routes import (
     locate_route,
 )
 from fh5.sac import SACCriticReplay, SACCriticWarmup, run_critic
-from fh5.sac_learning import SACPolicyReplay, SACTrain, run_sac_policy_replay, run_sac_training
+from fh5.sac_learning import (
+    SACPolicyReplay,
+    SACResume,
+    SACTrain,
+    run_sac_policy_replay,
+    run_sac_training,
+)
 from fh5.sac_replay import SACReplayPrepare, prepare_sac_replay
 from fh5.temporal_bc import TemporalBCReplay, TemporalBCTrain, run_temporal_bc
 from fh5.temporal_import import TemporalBCPrepare, prepare_temporal
@@ -266,6 +272,7 @@ def run_experiment(
     | SACCriticWarmup
     | SACCriticReplay
     | SACTrain
+    | SACResume
     | SACPolicyReplay
     | RewardAudit
     | RecoveryReplay
@@ -303,6 +310,7 @@ def run_experiment(
     realtime_journal_sink: Callable[[bytes], None] | None = None,
     collection_environment: CollectionEnvironment | None = None,
     learning_resources: LearningResources | None = None,
+    sac_stop_requested: Callable[[int], bool] | None = None,
     evaluation_environment: EvaluationEnvironment | None = None,
     collection_write: WriteFile | None = None,
     collection_installer: CollectionInstaller | None = None,
@@ -382,8 +390,8 @@ def run_experiment(
         return prepare_sac_replay(request)
     if isinstance(request, (SACCriticWarmup, SACCriticReplay)):
         return run_critic(request)
-    if isinstance(request, SACTrain):
-        return run_sac_training(request)
+    if isinstance(request, (SACTrain, SACResume)):
+        return run_sac_training(request, sac_stop_requested)
     if isinstance(request, SACPolicyReplay):
         return run_sac_policy_replay(request)
     if isinstance(request, RewardAudit):

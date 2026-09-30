@@ -1,0 +1,151 @@
+"""Frozen SAC state and the numerical experience needed to continue learning."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from io import BytesIO
+from pathlib import Path
+from typing import Any
+
+from fh5.collection_store import read_bounded, write_file
+from fh5.numeric_images import asset
+from fh5.numeric_recording import read_numeric_frame
+
+
+def resume_contract(torch: Any) -> dict[str, Any]:
+    return {
+        "stage": "sac_updates",
+        "device": "cpu",
+        "torch_version": str(torch.__version__),
+        "threads": 2,
+        "deterministic_algorithms": True,
+        "optimizer_owners": {
+            "critic": ["encoder", "critic"],
+            "actor": ["policy"],
+            "temperature": ["log_alpha"],
+        },
+        "state_digest": "canonical-cpu-tensors-v1",
+        "imitation_schedule": "not_implemented",
+        "auxiliary_components": [],
+        "environment_state": "not_restored; new attempt required",
+    }
+
+
+def read_checkpoint(torch: Any, root: Path) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+    raw = read_bounded(root / "policy.json", 1024**2)
+    manifest = json.loads(raw)
+    if manifest.get("version") not in (1, 2) or (
+        manifest.get("architecture"),
+        manifest.get("stage"),
+    ) != ("conditional-temporal-sac-v1", "sac_updates"):
+        raise ValueError("Unsupported SAC policy checkpoint")
+    payload = read_bounded(root / "policy.pt", 256 * 1024**2)
+    if hashlib.sha256(payload).hexdigest() != manifest["weights_sha256"]:
+        raise ValueError("SAC policy checkpoint changed")
+    saved: dict[str, Any] = torch.load(BytesIO(payload), map_location="cpu", weights_only=True)
+    if saved["metadata"] != {k: v for k, v in manifest.items() if k != "weights_sha256"}:
+        raise ValueError("SAC policy metadata mismatch")
+    if manifest["version"] == 2:
+        if manifest["resume_contract"] != resume_contract(torch):
+            raise ValueError("Unsupported SAC continuation contract or Torch runtime")
+        report = read_bounded(root / "training-report.json", 128 * 1024**2)
+        if hashlib.sha256(report).hexdigest() != manifest["training_report_sha256"]:
+            raise ValueError("SAC training report changed")
+        if (
+            state_digest(torch, {k: v for k, v in saved.items() if k != "metadata"})
+            != manifest["learner_state_sha256"]
+        ):
+            raise ValueError("SAC learner state mismatch")
+    return manifest, saved, raw
+
+
+def continuation_history(
+    root: Path, manifest: dict[str, Any], raw: bytes
+) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
+    history = list(manifest["history"])
+    parent_sha = hashlib.sha256(raw).hexdigest()
+    report = read_bounded(root / "training-report.json", 128 * 1024**2)
+    if hashlib.sha256(report).hexdigest() != manifest["training_report_sha256"]:
+        raise ValueError("SAC training report changed")
+    entry = {
+        "checkpoint": f"history/{parent_sha}-checkpoint.json",
+        "checkpoint_sha256": parent_sha,
+        "report": f"history/{parent_sha}-report.json",
+        "report_sha256": manifest["training_report_sha256"],
+    }
+    blobs = {entry["checkpoint"]: raw, entry["report"]: report}
+    total = sum(map(len, blobs.values()))
+    if total > 128 * 1024**2:
+        raise ValueError("SAC continuation history exceeds 128 MiB")
+    if len(history) >= 1000:
+        raise ValueError("SAC continuation history exceeds 1000 segments")
+    for prior in history:
+        for kind in ("checkpoint", "report"):
+            payload = read_bounded(asset(root, prior[kind]), 128 * 1024**2)
+            if hashlib.sha256(payload).hexdigest() != prior[kind + "_sha256"]:
+                raise ValueError("SAC continuation history changed")
+            total += len(payload)
+            if total > 128 * 1024**2:
+                raise ValueError("SAC continuation history exceeds 128 MiB")
+            blobs[prior[kind]] = payload
+    history.append(entry)
+    return history, blobs
+
+
+def state_digest(torch: Any, state: dict[str, Any]) -> str:
+    """Canonical fingerprint independent of file paths and Torch ZIP serialization."""
+    digest = hashlib.sha256()
+
+    def add(value: Any) -> None:
+        if torch.is_tensor(value):
+            tensor = value.detach().cpu().contiguous()
+            add(["tensor", str(tensor.dtype), list(tensor.shape)])
+            raw = bytes(tensor.reshape(-1).view(torch.uint8).tolist())
+            digest.update(len(raw).to_bytes(8, "little"))
+            digest.update(raw)
+        elif isinstance(value, dict):
+            digest.update(b"dict")
+            for key in sorted(value, key=lambda k: (type(k).__name__, str(k))):
+                add(key)
+                add(value[key])
+            digest.update(b"end")
+        elif isinstance(value, (list, tuple)):
+            digest.update(b"list")
+            for item in value:
+                add(item)
+            digest.update(b"end")
+        else:
+            raw = json.dumps(value, sort_keys=True, allow_nan=False).encode("utf-8")
+            digest.update(len(raw).to_bytes(8, "little"))
+            digest.update(raw)
+
+    add(state)
+    return digest.hexdigest()
+
+
+def seal_experience(raw: bytes, source: Path, output: Path) -> dict[str, Any]:
+    replay = json.loads(raw)
+    output.mkdir(parents=True)
+    seen: dict[str, str] = {}
+    total = 0
+    for row in replay["transitions"]:
+        for observation in (row["current"], row["next"]):
+            if observation is None:
+                continue
+            for entry in observation["frames"]:
+                name, sha = entry["path"], entry["sha256"]
+                if name in seen:
+                    if seen[name] != sha:
+                        raise ValueError("SAC frame path has conflicting contents")
+                    continue
+                frame = read_numeric_frame(source.parent, entry)
+                total += frame.pixels.nbytes
+                if total > 512 * 1024**2:
+                    raise ValueError("Sealed SAC experience exceeds 512 MiB")
+                target = asset(output, name)
+                target.parent.mkdir(parents=True, exist_ok=True)
+                write_file(target, bytes(frame.pixels))
+                seen[name] = sha
+    write_file(output / "replay.json", raw)
+    return {"replay": "experience/replay.json", "frame_files": len(seen), "frame_bytes": total}

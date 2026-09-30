@@ -34,9 +34,13 @@ from fh5.vision import VisionRecord
 def _sac(args: argparse.Namespace) -> int:
     from fh5.sac import SACCriticReplay, SACCriticWarmup
     from fh5.sac_actions import ActionBounds
-    from fh5.sac_learning import SACPolicyReplay, SACTrain
+    from fh5.sac_learning import SACPolicyReplay, SACResume, SACTrain
     from fh5.sac_replay import SACReplayPrepare
 
+    if args.mode == "sac-resume":
+        resumed = run_experiment(SACResume(args.checkpoint, args.output, steps=args.steps))
+        print(json.dumps(resumed.summary["sac_learning"], ensure_ascii=False))
+        return 4 if resumed.summary["sac_learning"]["stop_reason"] == "stop_requested" else 0
     if args.mode == "sac-train":
         options = json.loads(args.config.read_text(encoding="utf-8-sig"))
         if not isinstance(options, dict) or options.pop("version", None) != 1:
@@ -50,8 +54,9 @@ def _sac(args: argparse.Namespace) -> int:
             )
         except (KeyError, TypeError) as error:
             raise ValueError("Invalid SAC training fields") from error
-        print(json.dumps(run_experiment(request).summary["sac_learning"], ensure_ascii=False))
-        return 0
+        summary = run_experiment(request).summary["sac_learning"]
+        print(json.dumps(summary, ensure_ascii=False))
+        return 4 if summary["stop_reason"] == "stop_requested" else 0
     if args.mode == "sac-policy-replay":
         replayed = run_experiment(SACPolicyReplay(args.checkpoint, args.replay, args.report))
         print(json.dumps(replayed.summary["sac_policy"], ensure_ascii=False))
@@ -128,6 +133,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     sac_train = commands.add_parser("sac-train", help="Bounded synthetic SAC updates; no devices")
     sac_train.add_argument("--config", type=Path, required=True)
     sac_train.add_argument("--output", type=Path, required=True)
+    sac_resume = commands.add_parser(
+        "sac-resume", help="Continue sealed CPU SAC learning; no devices"
+    )
+    sac_resume.add_argument("--checkpoint", type=Path, required=True)
+    sac_resume.add_argument("--output", type=Path, required=True)
+    sac_resume.add_argument("--steps", type=int, default=100)
     sac_policy = commands.add_parser("sac-policy-replay", help="Replay a frozen learned SAC policy")
     for name in ("checkpoint", "replay", "report"):
         sac_policy.add_argument("--" + name, type=Path, required=True)
@@ -512,6 +523,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             "sac-warmup",
             "sac-critic-replay",
             "sac-train",
+            "sac-resume",
             "sac-policy-replay",
         ):
             return _sac(args)

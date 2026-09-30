@@ -8,6 +8,7 @@ import importlib
 import json
 import math
 import time
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from io import BytesIO
@@ -20,6 +21,13 @@ from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import PixelContract
 from fh5.sac import _q_heads, _values
 from fh5.sac_actions import ActionBounds
+from fh5.sac_checkpoint import (
+    continuation_history,
+    read_checkpoint,
+    resume_contract,
+    seal_experience,
+    state_digest,
+)
 from fh5.sac_data import LearningReplay
 from fh5.sac_policy import encode_history, make_policy, soft_update
 
@@ -52,6 +60,13 @@ class SACPolicyReplay:
     replay_file: Path
     report_path: Path
     noise: tuple[float, float] = (0.0, 0.0)
+
+
+@dataclass(frozen=True)
+class SACResume:
+    checkpoint_dir: Path
+    output_dir: Path
+    steps: int = 100
 
 
 def _difference(torch: Any, before: dict[str, Any], module: Any) -> float:
@@ -89,18 +104,52 @@ def policy_predictions(
     return result
 
 
-def run_sac_training(request: SACTrain) -> RunResult:
+def run_sac_training(
+    request: SACTrain | SACResume, stop_requested: Callable[[int], bool] | None = None
+) -> RunResult:
     torch = importlib.import_module("torch")
     with preserve_torch_state(torch):
         torch.set_num_threads(2)
-        return _train(request, torch)
+        torch.use_deterministic_algorithms(True)
+        return _train(request, torch, stop_requested)
 
 
-def _train(request: SACTrain, torch: Any) -> RunResult:
+def _train(
+    operation: SACTrain | SACResume, torch: Any, stop_requested: Callable[[int], bool] | None
+) -> RunResult:
     from fh5.experiment import RunResult
 
+    continuation = None
+    restored = None
+    history: list[dict[str, Any]] = []
+    history_blobs: dict[str, bytes] = {}
+    if isinstance(operation, SACResume):
+        manifest, restored, parent_bytes = read_checkpoint(torch, operation.checkpoint_dir)
+        if manifest["version"] != 2:
+            raise ValueError("SAC continuation requires a sealed version 2 checkpoint")
+        history, history_blobs = continuation_history(
+            operation.checkpoint_dir, manifest, parent_bytes
+        )
+        configuration = dict(manifest["configuration"], steps=operation.steps)
+        request = SACTrain(
+            operation.checkpoint_dir,
+            operation.checkpoint_dir / "experience/replay.json",
+            operation.output_dir,
+            **configuration,
+        )
+        continuation = {
+            "parent_checkpoint_sha256": hashlib.sha256(parent_bytes).hexdigest(),
+            "parent_step": restored["step"],
+        }
+    else:
+        request = operation
     if request.output_dir.exists():
         raise FileExistsError(request.output_dir)
+    if any(
+        request.output_dir.resolve().is_relative_to(source.resolve())
+        for source in (request.warmup_dir, request.replay_file.parent)
+    ):
+        raise ValueError("SAC output must be outside its frozen sources")
     if (
         type(request.steps) is not int
         or not 0 <= request.steps <= 10_000
@@ -119,33 +168,42 @@ def _train(request: SACTrain, torch: Any) -> RunResult:
     ):
         raise ValueError("Invalid bounded SAC learning configuration")
     torch.manual_seed(request.seed)
-    warm_bytes = read_bounded(request.warmup_dir / "critic.json", 1024**2)
-    warm = json.loads(warm_bytes)
-    if (warm.get("version"), warm.get("stage")) != (1, "critic_warmup"):
-        raise ValueError("SAC updates require a frozen-BC critic warm-up")
+    if restored is None:
+        warm_bytes = read_bounded(request.warmup_dir / "critic.json", 1024**2)
+        warm = json.loads(warm_bytes)
+        if (warm.get("version"), warm.get("stage")) != (1, "critic_warmup"):
+            raise ValueError("SAC updates require a frozen-BC critic warm-up")
+        warm_sha = hashlib.sha256(warm_bytes).hexdigest()
+        bc_dir = request.warmup_dir / "actor"
+    else:
+        warm = {
+            "bounds": manifest["bounds"],
+            "replay_sha256": manifest["replay_sha256"],
+            "actor_manifest_sha256": manifest["bc_manifest_sha256"],
+        }
+        warm_sha = manifest["warmup_manifest_sha256"]
+        bc_dir = request.warmup_dir / "bc"
     bounds = ActionBounds(**warm["bounds"])
-    bc_bytes = {
-        n: read_bounded(request.warmup_dir / "actor" / n, 256 * 1024**2)
-        for n in ("model.json", "actor.pt")
-    }
+    bc_bytes = {n: read_bounded(bc_dir / n, 256 * 1024**2) for n in ("model.json", "actor.pt")}
     bc_manifest = json.loads(bc_bytes["model.json"])
     pixels = PixelContract.from_metadata(bc_manifest["numeric_contract"])
-    bc = FrozenNumericActor(
-        request.warmup_dir / "actor", pixels, expected_manifest_sha256=warm["actor_manifest_sha256"]
-    )
+    bc = FrozenNumericActor(bc_dir, pixels, expected_manifest_sha256=warm["actor_manifest_sha256"])
     if (
         hashlib.sha256(bc_bytes["model.json"]).hexdigest() != warm["actor_manifest_sha256"]
         or hashlib.sha256(bc_bytes["actor.pt"]).hexdigest() != bc.manifest["weights_sha256"]
     ):
         raise ValueError("BC bytes changed while loading SAC initialization")
-    payload = read_bounded(request.warmup_dir / "critic.pt", 256 * 1024**2)
-    if hashlib.sha256(payload).hexdigest() != warm["weights_sha256"]:
-        raise ValueError("Warm-up checkpoint changed")
-    saved = torch.load(BytesIO(payload), map_location="cpu", weights_only=True)
-    if any(
-        not torch.equal(v, saved["target_encoder"][k]) for k, v in bc.model.state_dict().items()
-    ):
-        raise ValueError("Warm-up target encoder is not the frozen BC")
+    if restored is None:
+        payload = read_bounded(request.warmup_dir / "critic.pt", 256 * 1024**2)
+        if hashlib.sha256(payload).hexdigest() != warm["weights_sha256"]:
+            raise ValueError("Warm-up checkpoint changed")
+        saved = torch.load(BytesIO(payload), map_location="cpu", weights_only=True)
+        if any(
+            not torch.equal(v, saved["target_encoder"][k]) for k, v in bc.model.state_dict().items()
+        ):
+            raise ValueError("Warm-up target encoder is not the frozen BC")
+    else:
+        saved = restored
     data = LearningReplay(torch, request.replay_file, warm["replay_sha256"], bc, bounds)
     feature_width = 64 * (bc.original_contract["image_count"] + 1)
     encoder = torch.nn.ModuleDict(
@@ -155,8 +213,14 @@ def _train(request: SACTrain, torch: Any) -> RunResult:
     critic = _q_heads(torch, feature_width + 12)
     critic.load_state_dict(saved["critic"], strict=True)
     target_critic = deepcopy(critic)
-    target_critic.load_state_dict(saved["target"], strict=True)
+    target_critic.load_state_dict(
+        saved["target" if restored is None else "target_critic"], strict=True
+    )
     target_encoder = deepcopy(encoder)
+    if restored is not None:
+        encoder.load_state_dict(saved["encoder"], strict=True)
+        policy.load_state_dict(saved["policy"], strict=True)
+        target_encoder.load_state_dict(saved["target_encoder"], strict=True)
     for module in (target_critic, target_encoder):
         for parameter in module.parameters():
             parameter.requires_grad_(False)
@@ -173,19 +237,33 @@ def _train(request: SACTrain, torch: Any) -> RunResult:
     actor_optimizer = torch.optim.Adam(actor_parameters, lr=request.actor_lr)
     log_alpha = torch.tensor(math.log(request.initial_alpha), requires_grad=True)
     alpha_optimizer = torch.optim.Adam([log_alpha], lr=request.alpha_lr)
+    start_step = 0
+    if restored is not None:
+        critic_optimizer.load_state_dict(saved["critic_optimizer"])
+        actor_optimizer.load_state_dict(saved["actor_optimizer"])
+        with torch.no_grad():
+            log_alpha.copy_(saved["log_alpha"])
+        alpha_optimizer.load_state_dict(saved["alpha_optimizer"])
+        start_step = saved["step"]
+        if type(start_step) is not int or not 0 <= start_step <= 1_000_000 - request.steps:
+            raise ValueError("Invalid SAC continuation step")
+        torch.set_rng_state(saved["rng"])
+    alpha_before = float(log_alpha.exp().detach())
     initial_encoder, initial_policy, initial_critic = map(_snapshot, (encoder, policy, critic))
     initial_target = _snapshot(target_encoder)
 
     before = policy_predictions(torch, encoder, policy, data, request.normalized_target_entropy)
-    transfer_error = 0.0
+    transfer_error: float | None = None
+    if restored is None:
+        transfer_error = 0.0
     with torch.no_grad():
-        for i, row in enumerate(data.rows):
+        for i, row in enumerate(data.rows if restored is None else []):
             teacher = bc.model(*data.inputs([i]))[0].tolist()
             expected = bounds.deterministic(
                 teacher, row["previous_action"], row["action_elapsed_s"]
             )
             transfer_error = max(
-                transfer_error,
+                transfer_error or 0.0,
                 max(
                     abs(round(a * scale) - round(b * scale))
                     for a, b, scale in zip(expected, before[i]["deterministic"], (32767, 255))
@@ -193,10 +271,28 @@ def _train(request: SACTrain, torch: Any) -> RunResult:
             )
     if transfer_error:
         raise ValueError("SAC handoff changes deterministic BC commands")
+    output = request.output_dir
+    output.mkdir(parents=True)
+    experience = seal_experience(data.raw, request.replay_file, output / "experience")
+    for name, value in history_blobs.items():
+        target = output / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        write_file(target, value)
+    (output / "bc").mkdir()
+    for name, value in bc_bytes.items():
+        write_file(output / "bc" / name, value)
     updates, encoder_actor_change, actor_critic_change = 0, 0.0, 0.0
     started = time.monotonic()
     metrics = []
-    for step in range(request.steps):
+    stop_reason = "budget_completed"
+    for step in range(start_step, start_step + request.steps):
+        if (
+            (output / "stop.request").exists()
+            or stop_requested is not None
+            and stop_requested(step)
+        ):
+            stop_reason = "stop_requested"
+            break
         indices = torch.randperm(len(data.rows))[: request.batch_size].tolist()
         context, task = data.context[indices], data.task[indices]
         next_context, next_task = data.next_context[indices], data.next_task[indices]
@@ -279,13 +375,17 @@ def _train(request: SACTrain, torch: Any) -> RunResult:
         "source_kind": "synthetic",
         "device": "cpu",
         "update_duration_s": time.monotonic() - started,
-        "steps_completed": request.steps,
+        "steps_requested": request.steps,
+        "steps_completed": len(metrics),
+        "total_steps": start_step + len(metrics),
+        "stop_reason": stop_reason,
         "actor_updates": updates,
+        "actor_updates_total": (start_step + len(metrics)) // request.actor_interval,
         "encoder_change_max": _difference(torch, initial_encoder, encoder),
         "actor_change_max": _difference(torch, initial_policy, policy),
         "critic_change_max": _difference(torch, initial_critic, critic),
         "target_encoder_change_max": _difference(torch, initial_target, target_encoder),
-        "alpha_before": request.initial_alpha,
+        "alpha_before": alpha_before,
         "alpha_after": float(log_alpha.exp().detach()),
         "optimizer_parameters_disjoint": True,
         "encoder_change_during_actor_max": encoder_actor_change,
@@ -303,50 +403,52 @@ def _train(request: SACTrain, torch: Any) -> RunResult:
         "commands_sent": False,
         "real_driving_validated": False,
     }
-    output = request.output_dir
-    output.mkdir(parents=True)
-    (output / "bc").mkdir()
-    for name, value in bc_bytes.items():
-        write_file(output / "bc" / name, value)
     config = {k: v for k, v in asdict(request).items() if not isinstance(v, Path)}
     metadata = {
-        "version": 1,
+        "version": 2,
         "stage": "sac_updates",
         "architecture": "conditional-temporal-sac-v1",
         "configuration": config,
         "bounds": asdict(bounds),
         "replay_sha256": warm["replay_sha256"],
-        "warmup_manifest_sha256": hashlib.sha256(warm_bytes).hexdigest(),
+        "warmup_manifest_sha256": warm_sha,
         "bc_manifest_sha256": hashlib.sha256(bc_bytes["model.json"]).hexdigest(),
         "density_coordinates": summary["density_coordinates"],
         "q_action_coordinates": summary["q_action_coordinates"],
         "device": "cpu",
         "source_kind": "synthetic",
         "real_driving_validated": False,
+        "experience": experience,
+        "continuation": continuation,
+        "history": history,
+        "resume_contract": resume_contract(torch),
     }
+    state = {
+        "encoder": encoder.state_dict(),
+        "policy": policy.state_dict(),
+        "critic": critic.state_dict(),
+        "target_encoder": target_encoder.state_dict(),
+        "target_critic": target_critic.state_dict(),
+        "critic_optimizer": critic_optimizer.state_dict(),
+        "actor_optimizer": actor_optimizer.state_dict(),
+        "log_alpha": log_alpha.detach(),
+        "alpha_optimizer": alpha_optimizer.state_dict(),
+        "rng": torch.get_rng_state(),
+        "step": start_step + len(metrics),
+    }
+    summary["learner_state_sha256"] = state_digest(torch, state)
+    report_bytes = encode(summary)
+    metadata["training_report_sha256"] = hashlib.sha256(report_bytes).hexdigest()
+    metadata["learner_state_sha256"] = summary["learner_state_sha256"]
     torch.save(
-        {
-            "metadata": metadata,
-            "encoder": encoder.state_dict(),
-            "policy": policy.state_dict(),
-            "critic": critic.state_dict(),
-            "target_encoder": target_encoder.state_dict(),
-            "target_critic": target_critic.state_dict(),
-            "critic_optimizer": critic_optimizer.state_dict(),
-            "actor_optimizer": actor_optimizer.state_dict(),
-            "log_alpha": log_alpha.detach(),
-            "alpha_optimizer": alpha_optimizer.state_dict(),
-            "rng": torch.get_rng_state(),
-            "step": request.steps,
-        },
+        {"metadata": metadata, **state},
         output / "policy.pt",
     )
     manifest = {
         **metadata,
         "weights_sha256": hashlib.sha256((output / "policy.pt").read_bytes()).hexdigest(),
     }
-    write_file(output / "policy.json", encode(manifest))
-    write_file(output / "training-report.json", encode(summary))
+    write_file(output / "training-report.json", report_bytes)
     report = output / "report.html"
     report.write_text(
         '<!doctype html><meta charset="utf-8"><h1>SAC 软件更新</h1><pre>'
@@ -354,6 +456,7 @@ def _train(request: SACTrain, torch: Any) -> RunResult:
         + "</pre>",
         encoding="utf-8",
     )
+    write_file(output / "policy.json", encode(manifest))
     return RunResult({}, [], [], {"sac_learning": summary}, report)
 
 
@@ -367,19 +470,7 @@ def run_sac_policy_replay(request: SACPolicyReplay) -> RunResult:
     torch = importlib.import_module("torch")
     with preserve_torch_state(torch):
         torch.set_num_threads(2)
-        manifest = json.loads(read_bounded(request.checkpoint_dir / "policy.json", 1024**2))
-        if (manifest.get("version"), manifest.get("architecture"), manifest.get("stage")) != (
-            1,
-            "conditional-temporal-sac-v1",
-            "sac_updates",
-        ):
-            raise ValueError("Unsupported SAC policy checkpoint")
-        payload = read_bounded(request.checkpoint_dir / "policy.pt", 256 * 1024**2)
-        if hashlib.sha256(payload).hexdigest() != manifest["weights_sha256"]:
-            raise ValueError("SAC policy checkpoint changed")
-        saved = torch.load(BytesIO(payload), map_location="cpu", weights_only=True)
-        if saved["metadata"] != {k: v for k, v in manifest.items() if k != "weights_sha256"}:
-            raise ValueError("SAC policy metadata mismatch")
+        manifest, saved, _ = read_checkpoint(torch, request.checkpoint_dir)
         model_dir = request.checkpoint_dir / "bc"
         bc_manifest = json.loads(read_bounded(model_dir / "model.json", 1024**2))
         pixels = PixelContract.from_metadata(bc_manifest["numeric_contract"])
