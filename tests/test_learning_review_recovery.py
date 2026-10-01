@@ -46,7 +46,9 @@ def test_parent_review_survives_exit_before_its_result_is_acknowledged(tmp_path,
 
 def test_parent_evidence_is_frozen_without_changing_the_completed_child(tmp_path, seeded_loop):
     request = loop_request(tmp_path, seeded_loop, rounds=1)
-    interrupt_selection(request, seeded_loop[0], "before_parent_review_ack", parent_evidence=True)
+    interrupt_selection(
+        request, seeded_loop[0], "before_parent_review_ack", scenario="parent_evidence"
+    )
     root = request.output_dir
     state = root / "state.json"
     child = root / "round-000/evaluation"
@@ -77,7 +79,7 @@ def test_parent_evidence_is_frozen_without_changing_the_completed_child(tmp_path
 
 def test_partial_parent_report_is_preserved_while_review_resumes(tmp_path, seeded_loop):
     request = loop_request(tmp_path, seeded_loop, rounds=1)
-    interrupt_selection(request, seeded_loop[0], "before_review_report", parent_evidence=True)
+    interrupt_selection(request, seeded_loop[0], "before_review_report", scenario="parent_evidence")
     root = request.output_dir
     partial = root / "round-000/reviewed"
     assert partial.is_dir() and not (partial / "batch-report.json").exists()
@@ -97,7 +99,7 @@ def test_partial_parent_report_is_preserved_while_review_resumes(tmp_path, seede
 
 def test_frozen_parent_input_survives_exit_before_ledger_publication(tmp_path, seeded_loop):
     request = loop_request(tmp_path, seeded_loop, rounds=1)
-    interrupt_selection(request, seeded_loop[0], "before_parent_ledger", parent_evidence=True)
+    interrupt_selection(request, seeded_loop[0], "before_parent_ledger", scenario="parent_evidence")
     root = request.output_dir
     state = root / "state.json"
     interrupted = json.loads(state.read_bytes())
@@ -126,7 +128,7 @@ def test_frozen_parent_input_survives_exit_before_ledger_publication(tmp_path, s
 def test_user_stop_survives_parent_review_exit_and_resumes_remaining_rounds(tmp_path, seeded_loop):
     request = loop_request(tmp_path, seeded_loop, rounds=2)
     interrupt_selection(
-        request, seeded_loop[0], "before_parent_review_ack", stopped_evaluation=True
+        request, seeded_loop[0], "before_parent_review_ack", scenario="stopped_evaluation"
     )
     root = request.output_dir
     state = root / "state.json"

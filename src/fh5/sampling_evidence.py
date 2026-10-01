@@ -7,7 +7,7 @@ import json
 from collections.abc import Iterable
 from pathlib import Path
 
-from fh5.collection_store import read_bounded
+from fh5.collection_store import encode, read_bounded, write_file
 from fh5.numeric_images import asset
 
 
@@ -41,6 +41,16 @@ def seal_sampling_sources(root: Path, review: Path | None) -> dict[str, str]:
                 yield asset(review.parent, item["path"])
 
     return _inventory(paths())
+
+
+def seal_sampling_attempt(root: Path, review: Path | None) -> dict[str, str]:
+    """Keep the review's role even if a later summary omits original file bindings."""
+    proof = None
+    if review is not None:
+        name = str(review.resolve())
+        proof = {"path": name, "sha256": _inventory([review])[name]}
+    write_file(root / "sampling-sources.json", encode({"version": 1, "review": proof}))
+    return seal_sampling_sources(root, review)
 
 
 def verify_sampling_sources(expected: dict[str, str]) -> None:

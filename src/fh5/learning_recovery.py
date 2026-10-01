@@ -63,7 +63,9 @@ def _expected_protocol(request: SACCycle) -> dict[str, Any]:
     }
 
 
-def retryable_sampling(request: SACCycle, parent: dict[str, Any], expected_summary: str) -> bool:
+def retryable_sampling(
+    request: SACCycle, parent: dict[str, Any], expected_summary: str, *, pending: bool = False
+) -> bool:
     """Only released, sealed failures without any learner output may be resampled."""
     root = request.output_dir
     if _sha(root / "summary.json") != expected_summary:
@@ -88,6 +90,9 @@ def retryable_sampling(request: SACCycle, parent: dict[str, Any], expected_summa
     protocol = json.loads(read_bounded(root / "protocol.json", 1024**2))
     if protocol != _expected_protocol(request):
         raise ValueError("Failed sampling differs from its frozen retry protocol")
+    attempt_names = {path.name for path in root.glob("attempt-*")}
+    if attempt_names != ({"attempt-000"} if attempts else set()):
+        raise ValueError("Failed sampling summary omits or invents an original attempt")
     for attempt in attempts:
         if (
             attempt.get("sampling_checkpoint_sha256") != parent["sha256"]
@@ -105,11 +110,15 @@ def retryable_sampling(request: SACCycle, parent: dict[str, Any], expected_summa
         if type(count) is not int or count < 0:
             return False
         attempt_dir = root / "attempt-000"
+        diagnostic = json.loads(read_bounded(attempt_dir / "sampling.json", 4 * 1024**2))
+        if diagnostic.get("received_packets") != count:
+            raise ValueError("Failed sampling count differs from its original diagnostic")
         _require_originals(
             attempt_dir,
             inventory,
             None,
             trace_required=count > 0 or (attempt_dir / "trace.json").exists(),
+            review_binding_required=pending,
         )
     return True
 
@@ -124,6 +133,7 @@ def _require_originals(
     sources: dict[str, Any] | None,
     *,
     trace_required: bool = True,
+    review_binding_required: bool = False,
 ) -> None:
     def require(path: Path, digest: str | None = None) -> None:
         stored = inventory.get(str(path.resolve()))
@@ -145,6 +155,21 @@ def _require_originals(
         for observation in trace["observations"]:
             for frame in observation["frames"]:
                 require(asset(root, frame["path"]), frame["sha256"])
+    declaration = root / "sampling-sources.json"
+    if review_binding_required or declaration.exists():
+        require(declaration)
+        bindings = json.loads(read_bounded(declaration, 4 * 1024**2))
+        if bindings.get("version") != 1 or "review" not in bindings:
+            raise ValueError("Pending sampling lacks its original review declaration")
+        if bindings["review"] is not None:
+            review = bindings["review"]
+            path = Path(review["path"])
+            if not path.is_absolute():
+                raise ValueError("Pending sampling review path is not absolute")
+            require(path, review["sha256"])
+            proof = json.loads(read_bounded(path, 4 * 1024**2))
+            for item in proof["items"]:
+                require(asset(path.parent, item["path"]), item["sha256"])
     if sources is not None and sources["review"] is not None:
         proofs = [Path(name) for name, digest in inventory.items() if digest == sources["review"]]
         if not proofs:

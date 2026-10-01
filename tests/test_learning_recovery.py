@@ -22,12 +22,16 @@ def interrupt_selection(
     source,
     boundary="after_commit",
     *,
-    large_trace=False,
-    failed_evaluation=False,
-    parent_evidence=False,
-    stopped_evaluation=False,
-    failed_sampling=False,
+    scenario="normal_trace",
 ):
+    assert scenario in {
+        "normal_trace",
+        "large_trace",
+        "failed_evaluation",
+        "parent_evidence",
+        "stopped_evaluation",
+        "failed_sampling",
+    }
     repository = Path(__file__).resolve().parents[1]
     environment = dict(os.environ)
     environment["PYTHONPATH"] = os.pathsep.join(
@@ -145,17 +149,7 @@ raise SystemExit('Expected filesystem exit was not reached')
             str(request.output_dir),
             str(source),
             boundary,
-            "large_trace"
-            if large_trace
-            else "failed_evaluation"
-            if failed_evaluation
-            else "parent_evidence"
-            if parent_evidence
-            else "stopped_evaluation"
-            if stopped_evaluation
-            else "failed_sampling"
-            if failed_sampling
-            else "normal_trace",
+            scenario,
         ],
         env=environment,
         cwd=repository,
@@ -207,7 +201,7 @@ def test_sealed_evaluation_survives_exit_before_parent_acknowledgement(tmp_path,
 
 def test_sampling_recovery_accepts_the_same_trace_size_as_the_sampler(tmp_path, seeded_loop):
     request = loop_request(tmp_path, seeded_loop, rounds=1)
-    interrupt_selection(request, seeded_loop[0], "before_learned", large_trace=True)
+    interrupt_selection(request, seeded_loop[0], "before_learned", scenario="large_trace")
     root = request.output_dir
     trace = root / "round-000/learning/attempt-000/trace.json"
     assert 4 * 1024**2 < trace.stat().st_size < 32 * 1024**2
@@ -225,7 +219,9 @@ def test_completed_failed_evaluation_keeps_its_attempt_and_unstarted_slots_on_re
     tmp_path, seeded_loop
 ):
     request = loop_request(tmp_path, seeded_loop, rounds=1)
-    interrupt_selection(request, seeded_loop[0], "before_evaluation_ack", failed_evaluation=True)
+    interrupt_selection(
+        request, seeded_loop[0], "before_evaluation_ack", scenario="failed_evaluation"
+    )
     state = request.output_dir / "state.json"
     interrupted = json.loads(state.read_bytes())
     root = request.output_dir / "round-000/evaluation"

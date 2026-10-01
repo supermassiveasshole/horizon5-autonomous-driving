@@ -15,7 +15,7 @@ from fh5.learning_loop import LearningContinue
 
 def test_sealed_failed_sampling_survives_exit_before_parent_acknowledgement(tmp_path, seeded_loop):
     request = loop_request(tmp_path, seeded_loop, rounds=1, sampling_retry={"max_retries": 1})
-    interrupt_selection(request, seeded_loop[0], "before_learned", failed_sampling=True)
+    interrupt_selection(request, seeded_loop[0], "before_learned", scenario="failed_sampling")
     state = request.output_dir / "state.json"
     pending = json.loads(state.read_bytes())
     assert pending["phase"] == "updating" and "learning" not in pending["rounds"][0]
@@ -51,7 +51,7 @@ def test_sealed_failed_sampling_survives_exit_before_parent_acknowledgement(tmp_
 
 def test_pending_failure_cannot_omit_the_binding_of_a_corrupted_original(tmp_path, seeded_loop):
     request = loop_request(tmp_path, seeded_loop, rounds=1, sampling_retry={"max_retries": 1})
-    interrupt_selection(request, seeded_loop[0], "before_learned", failed_sampling=True)
+    interrupt_selection(request, seeded_loop[0], "before_learned", scenario="failed_sampling")
     state = request.output_dir / "state.json"
     before = state.read_bytes()
     child = request.output_dir / "round-000/learning"
@@ -73,7 +73,9 @@ def test_pending_failure_cannot_omit_the_binding_of_a_corrupted_original(tmp_pat
 
 def test_pending_second_failure_does_not_restore_spent_retry_credit(tmp_path, seeded_loop):
     request = loop_request(tmp_path, seeded_loop, rounds=1, sampling_retry={"max_retries": 1})
-    interrupt_selection(request, seeded_loop[0], "before_retried_failure", failed_sampling=True)
+    interrupt_selection(
+        request, seeded_loop[0], "before_retried_failure", scenario="failed_sampling"
+    )
     state = request.output_dir / "state.json"
     pending = json.loads(state.read_bytes())
     assert pending["rounds"][0]["sampling_attempt"] == 1
@@ -90,12 +92,41 @@ def test_pending_second_failure_does_not_restore_spent_retry_credit(tmp_path, se
     assert recovered["rounds"][0]["sampling_attempt"] == 1
 
 
+@pytest.mark.parametrize("fault", ["false_packet_count", "empty_attempts"])
+def test_pending_failure_cannot_hide_recorded_input_or_the_original_attempt(
+    tmp_path, seeded_loop, fault
+):
+    request = loop_request(tmp_path, seeded_loop, rounds=1, sampling_retry={"max_retries": 1})
+    interrupt_selection(request, seeded_loop[0], "before_learned", scenario="failed_sampling")
+    state = request.output_dir / "state.json"
+    before = state.read_bytes()
+    child = request.output_dir / "round-000/learning"
+    summary_file = child / "summary.json"
+    summary = json.loads(summary_file.read_bytes())
+    if fault == "false_packet_count":
+        trace = child / "attempt-000/trace.json"
+        summary["attempts"][0]["received_packets"] = 0
+        del summary["attempts"][0]["source_assets"][str(trace.resolve())]
+        trace.unlink()
+    else:
+        summary["attempts"] = []
+        summary["stop_reason"] = "stop_requested"
+    summary_file.write_text(json.dumps(summary))
+    backend = SharedBackend(seeded_loop[0])
+    backend.stop_sampling_file = request.output_dir / "stop.request"
+    with pytest.raises(ValueError, match="sampling|originals"):
+        run_experiment(
+            LearningContinue(request.output_dir, sha(state)), learning_environment=backend
+        )
+    assert state.read_bytes() == before and not backend.leases and backend.closed
+
+
 @pytest.mark.parametrize("fault", ["missing_summary", "unreleased", "wrong_seed", "partial_model"])
 def test_pending_failed_sampling_requires_complete_released_matching_originals(
     tmp_path, seeded_loop, fault
 ):
     request = loop_request(tmp_path, seeded_loop, rounds=1, sampling_retry={"max_retries": 1})
-    interrupt_selection(request, seeded_loop[0], "before_learned", failed_sampling=True)
+    interrupt_selection(request, seeded_loop[0], "before_learned", scenario="failed_sampling")
     state = request.output_dir / "state.json"
     before = state.read_bytes()
     child = request.output_dir / "round-000/learning"
@@ -118,6 +149,34 @@ def test_pending_failed_sampling_requires_complete_released_matching_originals(
     backend = SharedBackend(seeded_loop[0])
     error = FileNotFoundError if fault == "missing_summary" else ValueError
     with pytest.raises(error):
+        run_experiment(
+            LearningContinue(request.output_dir, sha(state)), learning_environment=backend
+        )
+    assert state.read_bytes() == before and not backend.leases and backend.closed
+
+
+@pytest.mark.parametrize("fault", ["attachment", "review", "declaration"])
+def test_pending_failure_cannot_omit_an_independent_review_original(tmp_path, seeded_loop, fault):
+    request = loop_request(tmp_path, seeded_loop, rounds=1, sampling_retry={"max_retries": 1})
+    interrupt_selection(request, seeded_loop[0], "before_learned", scenario="failed_sampling")
+    state = request.output_dir / "state.json"
+    before = state.read_bytes()
+    child = request.output_dir / "round-000/learning"
+    summary_file = child / "summary.json"
+    summary = json.loads(summary_file.read_bytes())
+    review = child / "attempt-000/evidence.json"
+    proof = json.loads(review.read_bytes())
+    original = {
+        "attachment": review.parent / proof["items"][0]["path"],
+        "review": review,
+        "declaration": review.parent / "sampling-sources.json",
+    }[fault]
+    del summary["attempts"][0]["source_assets"][str(original.resolve())]
+    original.unlink()
+    summary_file.write_text(json.dumps(summary))
+    backend = SharedBackend(seeded_loop[0])
+    backend.stop_sampling_file = request.output_dir / "stop.request"
+    with pytest.raises(ValueError, match="sampling|inventory|originals"):
         run_experiment(
             LearningContinue(request.output_dir, sha(state)), learning_environment=backend
         )

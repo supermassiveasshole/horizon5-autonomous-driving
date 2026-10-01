@@ -529,7 +529,9 @@ class _Loop:
         if self.config.get("sampling_retry", {}).get("max_retries", 0) and summary.get(
             "stop_reason"
         ) in ("sampling_fault", "no_eligible_experience", "stop_requested"):
-            if not retryable_sampling(request, self.state["latest_learner"], _sha(summary_path)):
+            if not retryable_sampling(
+                request, self.state["latest_learner"], _sha(summary_path), pending=True
+            ):
                 raise ValueError("Pending sampling failure is not sealed, released and update-free")
             self.accept_sampling(row, request.output_dir, summary)
             self.state.setdefault("recoveries", []).append(
