@@ -6,6 +6,8 @@ import hashlib
 import json
 import sqlite3
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -42,6 +44,35 @@ class CandidateRollback:
     registry_file: Path
 
 
+@contextmanager
+def _database(root: Path, *, writable: bool = False) -> Iterator[sqlite3.Connection]:
+    database = root / "state.sqlite"
+    try:
+        db = sqlite3.connect(
+            str(database) if writable else database.as_uri() + "?mode=ro",
+            uri=not writable,
+            timeout=5,
+        )
+    except sqlite3.Error as error:
+        raise ValueError("Candidate store unavailable: " + str(error)) from error
+    try:
+        if writable:
+            page_size = db.execute("PRAGMA page_size").fetchone()[0]
+            db.execute(f"PRAGMA max_page_count={32 * 1024**2 // page_size}")
+            db.execute("BEGIN IMMEDIATE")
+        yield db
+        if writable:
+            db.commit()
+    except sqlite3.Error as error:
+        db.rollback()
+        raise ValueError("Candidate store unavailable: " + str(error)) from error
+    except BaseException:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
+
 def _events(db: sqlite3.Connection) -> list[dict[str, Any]]:
     if db.execute("PRAGMA user_version").fetchone()[0] != 1:
         raise ValueError("Unsupported candidate store")
@@ -67,11 +98,8 @@ def _read_events(root: Path) -> list[dict[str, Any]]:
     database = root / "state.sqlite"
     if not database.is_file() or database.stat().st_size > 32 * 1024**2:
         raise ValueError("Missing or oversized candidate store")
-    db = sqlite3.connect(database.as_uri() + "?mode=ro", uri=True, timeout=5)
-    try:
+    with _database(root) as db:
         events = _events(db)
-    finally:
-        db.close()
     for event in events:
         for name, digest in event["evidence"].items():
             if hashlib.sha256(read_bounded(asset(root, name), 128 * 1024**2)).hexdigest() != digest:
@@ -80,9 +108,7 @@ def _read_events(root: Path) -> list[dict[str, Any]]:
 
 
 def _commit(root: Path, event: dict[str, Any], expected: str | None) -> str:
-    db = sqlite3.connect(root / "state.sqlite", timeout=5)
-    try:
-        db.execute("BEGIN IMMEDIATE")
+    with _database(root, writable=True) as db:
         if expected is None:
             if db.execute("PRAGMA user_version").fetchone()[0] != 0:
                 raise ValueError("Candidate store was initialized concurrently")
@@ -103,19 +129,38 @@ def _commit(root: Path, event: dict[str, Any], expected: str | None) -> str:
             raise ValueError("Candidate event exceeds capacity")
         revision = hashlib.sha256(raw).hexdigest()
         db.execute("INSERT INTO events VALUES (?, ?, ?)", (number, revision, raw))
-        db.commit()
         return revision
-    except BaseException:
-        db.rollback()
-        raise
-    finally:
-        db.close()
+
+
+def _publish(root: Path, work: Path, event: dict[str, Any]) -> RunResult:
+    from fh5.experiment import RunResult
+
+    event = {
+        **event,
+        "comparison": (work / "comparison/selection.json").relative_to(root).as_posix(),
+        "request": (work / "request.json").relative_to(root).as_posix(),
+    }
+    event["evidence"] = {
+        event[key]: hashlib.sha256(read_bounded(asset(root, event[key]), 128 * 1024**2)).hexdigest()
+        for key in ("comparison", "request")
+    }
+    revision = _commit(root, event, event["parent"])
+    return RunResult(
+        {}, [], [], {"candidate_store": {**event, "revision": revision}}, root / "state.sqlite"
+    )
 
 
 def _synthetic_gate(
-    side: str, review: dict[str, Any], criteria: dict[str, Any], checkpoint: Path
+    side: str, reviews: dict[str, Any], conditions: dict[str, Any], checkpoint: Path
 ) -> list[str]:
-    reasons = _eligibility(side, review, criteria)
+    review = reviews[side]
+    reasons = _eligibility(side, review, conditions["criteria"])
+    if any(
+        not group["valid_duration_s"]["count"] or group["valid_duration_s"]["min"] <= 0
+        for view in conditions["plan_by_reference"]
+        for group in (review["by_reference"][view],)
+    ):
+        reasons.append(side + ":insufficient_valid_reference_group")
     actual = sum(
         item["status"] == "bound_diagnostic"
         and item["verified_predictions"] > 0
@@ -141,7 +186,10 @@ def _synthetic_gate(
         for value in ([json.loads(raw) for raw in leaves.values()] if leaves else [replay])
     }
     origins = {
-        row["source_hashes"]["packets"] for row in review["attempts"] if row.get("source_hashes")
+        row["source_hashes"]["packets"]
+        for evaluation in reviews.values()
+        for row in evaluation["attempts"]
+        if row.get("source_hashes")
     }
     if origins & training:
         reasons.append(side + ":evaluation_reuses_learning_recording")
@@ -149,7 +197,7 @@ def _synthetic_gate(
 
 
 def record_candidate(request: CandidateRecord) -> RunResult:
-    from fh5.experiment import RunResult, run_experiment
+    from fh5.experiment import run_experiment
 
     root = request.store_dir.resolve()
     previous = None
@@ -202,8 +250,8 @@ def record_candidate(request: CandidateRecord) -> RunResult:
         ).summary["candidate_archive"]
         gates[side] = _synthetic_gate(
             side,
-            reviewed["reviews"][side],
-            reviewed["conditions"]["criteria"],
+            reviewed["reviews"],
+            reviewed["conditions"],
             archive / "checkpoint",
         )
         roles[side] = {
@@ -235,28 +283,19 @@ def record_candidate(request: CandidateRecord) -> RunResult:
         "aggressive_by_reference": aggressive,
         "selection": "prefer_candidate_locally" if select else "retain_incumbent",
         "reasons": reasons,
-        "comparison": folder + "/comparison/selection.json",
-        "request": folder + "/request.json",
         "qualification": {
             "comparison_file": str(comparison_file),
             "comparison_sha256": config["comparison"]["sha256"],
             "side": "candidate" if select else "incumbent",
         },
-        "evidence": {
-            folder + "/request.json": hashlib.sha256(raw).hexdigest(),
-            folder + "/comparison/selection.json": hashlib.sha256(
-                read_bounded(work / "comparison/selection.json", 128 * 1024**2)
-            ).hexdigest(),
-        },
         "default_changed": False,
         "real_driving_validated": False,
-        "synthetic_default_changed": previous is not None and select,
+        "synthetic_default_changed": previous is not None
+        and roles["candidate" if select else "incumbent"]["model_sha256"]
+        != previous["default"]["model_sha256"],
         "independence_limits": "Registered raw origins and explicitly synthetic training only; no native qualification",
     }
-    revision = _commit(root, event, request.expected_revision)
-    return RunResult(
-        {}, [], [], {"candidate_store": {**event, "revision": revision}}, root / "state.sqlite"
-    )
+    return _publish(root, work, event)
 
 
 def read_candidate_history(request: CandidateHistory) -> RunResult:
@@ -270,7 +309,7 @@ def read_candidate_history(request: CandidateHistory) -> RunResult:
 
 
 def rollback_candidate(request: CandidateRollback) -> RunResult:
-    from fh5.experiment import RunResult, run_experiment
+    from fh5.experiment import run_experiment
 
     root = request.store_dir.resolve()
     history = _read_events(root)
@@ -319,9 +358,7 @@ def rollback_candidate(request: CandidateRollback) -> RunResult:
         or reviewed["models"][side] != role["model_sha256"]
     ):
         raise ValueError("Rollback evaluation differs from retained default")
-    reasons = _synthetic_gate(
-        side, reviewed["reviews"][side], reviewed["conditions"]["criteria"], restored
-    )
+    reasons = _synthetic_gate(side, reviewed["reviews"], reviewed["conditions"], restored)
     if reasons or (
         side == "candidate" and reviewed["local_recommendation"] != "prefer_candidate_locally"
     ):
@@ -337,17 +374,6 @@ def rollback_candidate(request: CandidateRollback) -> RunResult:
         "qualification": qualification,
         "selection": "restore_retained_default",
         "reasons": [request.reason.strip()],
-        "comparison": folder + "/comparison/selection.json",
-        "request": folder + "/request.json",
-        "evidence": {
-            folder + "/request.json": hashlib.sha256(payload).hexdigest(),
-            folder + "/comparison/selection.json": hashlib.sha256(
-                read_bounded(work / "comparison/selection.json", 128 * 1024**2)
-            ).hexdigest(),
-        },
         "synthetic_default_changed": role["model_sha256"] != previous["default"]["model_sha256"],
     }
-    revision = _commit(root, event, request.expected_revision)
-    return RunResult(
-        {}, [], [], {"candidate_store": {**event, "revision": revision}}, root / "state.sqlite"
-    )
+    return _publish(root, work, event)

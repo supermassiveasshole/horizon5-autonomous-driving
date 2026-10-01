@@ -350,3 +350,16 @@ def test_failed_update_or_rollback_leaves_committed_roles_and_history_intact(
     with pytest.raises((ValueError, OSError)):
         run_experiment(operation)
     assert run_experiment(CandidateHistory(store)).summary["candidate_store"] == prior
+
+
+def test_cli_reports_unreadable_store_as_a_structured_error(tmp_path):
+    (tmp_path / "state.sqlite").write_bytes(b"interrupted external database copy")
+    process = subprocess.run(
+        [sys.executable, "-m", "fh5", "candidate-history", "--store", str(tmp_path)],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert process.returncode == 2
+    assert json.loads(process.stderr)["status"] == "error"
+    assert "Traceback" not in process.stderr
