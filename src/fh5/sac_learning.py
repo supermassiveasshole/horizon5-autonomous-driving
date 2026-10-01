@@ -14,7 +14,7 @@ from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.learning_runtime import preserve_torch_state
@@ -24,12 +24,14 @@ from fh5.sac import _q_heads, _values
 from fh5.sac_actions import ActionBounds
 from fh5.sac_actor import FrozenSAC
 from fh5.sac_checkpoint import (
+    checkpoint_history,
     continuation_history,
     publish_checkpoint,
     read_checkpoint,
     read_critic_checkpoint,
     resume_contract,
     seal_experience,
+    source_replays,
     state_digest,
 )
 from fh5.sac_data import LearningReplay
@@ -88,6 +90,153 @@ class SACResume:
     demonstration_fraction: float | None = None
     imitation_comparison: Path | None = None
     imitation_registry: Path | None = None
+
+
+class _Learner(NamedTuple):
+    encoder: Any
+    policy: Any
+    critic: Any
+    target_critic: Any
+    target_encoder: Any
+    critic_optimizer: Any
+    actor_optimizer: Any
+    log_alpha: Any
+    alpha_optimizer: Any
+    start_step: int
+
+    def state(self, torch: Any, step: int) -> dict[str, Any]:
+        return {
+            "encoder": self.encoder.state_dict(),
+            "policy": self.policy.state_dict(),
+            "critic": self.critic.state_dict(),
+            "target_encoder": self.target_encoder.state_dict(),
+            "target_critic": self.target_critic.state_dict(),
+            "critic_optimizer": self.critic_optimizer.state_dict(),
+            "actor_optimizer": self.actor_optimizer.state_dict(),
+            "log_alpha": self.log_alpha.detach(),
+            "alpha_optimizer": self.alpha_optimizer.state_dict(),
+            "rng": torch.get_rng_state(),
+            "step": step,
+        }
+
+
+def _validate_configuration(request: SACTrain) -> None:
+    if (
+        type(request.steps) is not int
+        or not 0 <= request.steps <= 10_000
+        or type(request.batch_size) is not int
+        or not 1 <= request.batch_size <= 256
+        or type(request.actor_interval) is not int
+        or not 1 <= request.actor_interval <= 10
+        or any(
+            not 0 < v <= 0.01
+            for v in (request.critic_lr, request.actor_lr, request.encoder_lr, request.alpha_lr)
+        )
+        or not 0 < request.initial_alpha <= 1
+        or not -5 <= request.initial_log_std <= -1
+        or not -10 <= request.normalized_target_entropy <= 0
+        or not 0 < request.tau <= 1
+    ):
+        raise ValueError("Invalid bounded SAC learning configuration")
+
+
+def _make_learner(
+    torch: Any, bc: FrozenNumericActor, saved: dict[str, Any], request: SACTrain, *, resume: bool
+) -> _Learner:
+    feature_width = 64 * (bc.original_contract["image_count"] + 1)
+    encoder = torch.nn.ModuleDict(
+        {"images": deepcopy(bc.model.encoder), "state": deepcopy(bc.model.state)}
+    )
+    policy = make_policy(torch, bc.model.fusion, feature_width, request.initial_log_std)
+    critic = _q_heads(torch, feature_width + 12)
+    critic.load_state_dict(saved["critic"], strict=True)
+    target_critic = deepcopy(critic)
+    target_critic.load_state_dict(saved["target_critic" if resume else "target"], strict=True)
+    target_encoder = deepcopy(encoder)
+    if resume:
+        encoder.load_state_dict(saved["encoder"], strict=True)
+        policy.load_state_dict(saved["policy"], strict=True)
+        target_encoder.load_state_dict(saved["target_encoder"], strict=True)
+    for module in (target_critic, target_encoder):
+        for parameter in module.parameters():
+            parameter.requires_grad_(False)
+    critic_parameters = list(encoder.parameters()) + list(critic.parameters())
+    actor_parameters = list(policy.parameters())
+    if set(map(id, critic_parameters)) & set(map(id, actor_parameters)):
+        raise ValueError("SAC optimizers have duplicate parameter ownership")
+    critic_optimizer = torch.optim.Adam(
+        [
+            {"params": encoder.parameters(), "lr": request.encoder_lr},
+            {"params": critic.parameters(), "lr": request.critic_lr},
+        ]
+    )
+    actor_optimizer = torch.optim.Adam(actor_parameters, lr=request.actor_lr)
+    log_alpha = torch.tensor(math.log(request.initial_alpha), requires_grad=True)
+    alpha_optimizer = torch.optim.Adam([log_alpha], lr=request.alpha_lr)
+    start_step = 0
+    if resume:
+        critic_optimizer.load_state_dict(saved["critic_optimizer"])
+        actor_optimizer.load_state_dict(saved["actor_optimizer"])
+        with torch.no_grad():
+            log_alpha.copy_(saved["log_alpha"])
+        alpha_optimizer.load_state_dict(saved["alpha_optimizer"])
+        start_step = saved["step"]
+        if type(start_step) is not int or not 0 <= start_step <= 1_000_000 - request.steps:
+            raise ValueError("Invalid SAC continuation step")
+        torch.set_rng_state(saved["rng"])
+    return _Learner(
+        encoder,
+        policy,
+        critic,
+        target_critic,
+        target_encoder,
+        critic_optimizer,
+        actor_optimizer,
+        log_alpha,
+        alpha_optimizer,
+        start_step,
+    )
+
+
+def validate_sac_candidate(root: Path, expected_sha256: str) -> dict[str, Any]:
+    """Restore and inspect all learning state without publishing or adding a stage."""
+    torch = importlib.import_module("torch")
+    with preserve_torch_state(torch):
+        torch.set_num_threads(2)
+        torch.use_deterministic_algorithms(True)
+        manifest, saved, raw = read_checkpoint(torch, root)
+        if hashlib.sha256(raw).hexdigest() != expected_sha256:
+            raise ValueError("Candidate checkpoint changed during validation")
+        if manifest["version"] not in (2, 3, 4):
+            raise ValueError("Candidate requires a sealed SAC continuation checkpoint")
+        checkpoint_history(root, manifest, raw)
+        replay_file = root / "experience/replay.json"
+        configuration = dict(manifest["configuration"], steps=0)
+        request = SACTrain(root, replay_file, root, **configuration)
+        _validate_configuration(request)
+        torch.manual_seed(request.seed)
+        bc_manifest = json.loads(read_bounded(root / "bc/model.json", 1024**2))
+        bc = FrozenNumericActor(
+            root / "bc",
+            PixelContract.from_metadata(bc_manifest["numeric_contract"]),
+            expected_manifest_sha256=manifest["bc_manifest_sha256"],
+        )
+        data = LearningReplay(
+            torch, replay_file, manifest["replay_sha256"], bc, ActionBounds(**manifest["bounds"])
+        )
+        source_replays(replay_file.parent, json.loads(data.raw))
+        ReplaySampling(data.roles, request.batch_size, request.demonstration_fraction)
+        learner = _make_learner(torch, bc, saved, request, resume=True)
+        # Exercise the actual numerical observation contract and reject non-finite output.
+        encode(
+            policy_predictions(
+                torch, learner.encoder, learner.policy, data, request.normalized_target_entropy
+            )
+        )
+        digest = state_digest(torch, learner.state(torch, learner.start_step))
+        if digest != manifest["learner_state_sha256"]:
+            raise ValueError("Restoring candidate changed its learner state")
+        return {"learner_state_sha256": digest, "total_steps": learner.start_step}
 
 
 def _difference(torch: Any, before: dict[str, Any], module: Any) -> float:
@@ -183,23 +332,7 @@ def _train(
         for source in (request.warmup_dir, request.replay_file.parent)
     ):
         raise ValueError("SAC output must be outside its frozen sources")
-    if (
-        type(request.steps) is not int
-        or not 0 <= request.steps <= 10_000
-        or type(request.batch_size) is not int
-        or not 1 <= request.batch_size <= 256
-        or type(request.actor_interval) is not int
-        or not 1 <= request.actor_interval <= 10
-        or any(
-            not 0 < v <= 0.01
-            for v in (request.critic_lr, request.actor_lr, request.encoder_lr, request.alpha_lr)
-        )
-        or not 0 < request.initial_alpha <= 1
-        or not -5 <= request.initial_log_std <= -1
-        or not -10 <= request.normalized_target_entropy <= 0
-        or not 0 < request.tau <= 1
-    ):
-        raise ValueError("Invalid bounded SAC learning configuration")
+    _validate_configuration(request)
     torch.manual_seed(request.seed)
     if restored is None:
         warm, initial_critic, warm_bytes = read_critic_checkpoint(torch, request.warmup_dir)
@@ -279,7 +412,6 @@ def _train(
     if isinstance(operation, SACResume) and operation.imitation_comparison is not None:
         if imitation is None or imitation["protocol_sha256"] is None:
             raise ValueError("Imitation exit requires a protocol frozen before training")
-        from fh5.sac_checkpoint import source_replays
         from fh5.sac_imitation_review import review_imitation
 
         root = Path(resources.enter_context(TemporaryDirectory(prefix="fh5-imitation-")))
@@ -297,53 +429,23 @@ def _train(
         )
         history_blobs.update(proof_blobs)
     sampling = ReplaySampling(data.roles, request.batch_size, request.demonstration_fraction)
-    feature_width = 64 * (bc.original_contract["image_count"] + 1)
-    encoder = torch.nn.ModuleDict(
-        {"images": deepcopy(bc.model.encoder), "state": deepcopy(bc.model.state)}
-    )
-    policy = make_policy(torch, bc.model.fusion, feature_width, request.initial_log_std)
-    critic = _q_heads(torch, feature_width + 12)
-    critic.load_state_dict(saved["critic"], strict=True)
-    target_critic = deepcopy(critic)
-    target_critic.load_state_dict(
-        saved["target" if restored is None else "target_critic"], strict=True
-    )
-    target_encoder = deepcopy(encoder)
+    learner = _make_learner(torch, bc, saved, request, resume=restored is not None)
+    (
+        encoder,
+        policy,
+        critic,
+        target_critic,
+        target_encoder,
+        critic_optimizer,
+        actor_optimizer,
+        log_alpha,
+        alpha_optimizer,
+        start_step,
+    ) = learner
     teacher_initial = _snapshot(bc.model) if imitation is not None else None
     teacher_evaluations = 0
     if imitation is not None:
         bc.model.requires_grad_(False)
-    if restored is not None:
-        encoder.load_state_dict(saved["encoder"], strict=True)
-        policy.load_state_dict(saved["policy"], strict=True)
-        target_encoder.load_state_dict(saved["target_encoder"], strict=True)
-    for module in (target_critic, target_encoder):
-        for parameter in module.parameters():
-            parameter.requires_grad_(False)
-    critic_parameters = list(encoder.parameters()) + list(critic.parameters())
-    actor_parameters = list(policy.parameters())
-    if set(map(id, critic_parameters)) & set(map(id, actor_parameters)):
-        raise ValueError("SAC optimizers have duplicate parameter ownership")
-    critic_optimizer = torch.optim.Adam(
-        [
-            {"params": encoder.parameters(), "lr": request.encoder_lr},
-            {"params": critic.parameters(), "lr": request.critic_lr},
-        ]
-    )
-    actor_optimizer = torch.optim.Adam(actor_parameters, lr=request.actor_lr)
-    log_alpha = torch.tensor(math.log(request.initial_alpha), requires_grad=True)
-    alpha_optimizer = torch.optim.Adam([log_alpha], lr=request.alpha_lr)
-    start_step = 0
-    if restored is not None:
-        critic_optimizer.load_state_dict(saved["critic_optimizer"])
-        actor_optimizer.load_state_dict(saved["actor_optimizer"])
-        with torch.no_grad():
-            log_alpha.copy_(saved["log_alpha"])
-        alpha_optimizer.load_state_dict(saved["alpha_optimizer"])
-        start_step = saved["step"]
-        if type(start_step) is not int or not 0 <= start_step <= 1_000_000 - request.steps:
-            raise ValueError("Invalid SAC continuation step")
-        torch.set_rng_state(saved["rng"])
     alpha_before = float(log_alpha.exp().detach())
     initial_encoder, initial_policy, initial_critic = map(_snapshot, (encoder, policy, critic))
     initial_target = _snapshot(target_encoder)
@@ -550,19 +652,7 @@ def _train(
     }
     if imitation is not None:
         metadata["imitation"] = imitation
-    state = {
-        "encoder": encoder.state_dict(),
-        "policy": policy.state_dict(),
-        "critic": critic.state_dict(),
-        "target_encoder": target_encoder.state_dict(),
-        "target_critic": target_critic.state_dict(),
-        "critic_optimizer": critic_optimizer.state_dict(),
-        "actor_optimizer": actor_optimizer.state_dict(),
-        "log_alpha": log_alpha.detach(),
-        "alpha_optimizer": alpha_optimizer.state_dict(),
-        "rng": torch.get_rng_state(),
-        "step": start_step + len(metrics),
-    }
+    state = learner.state(torch, start_step + len(metrics))
     summary["learner_state_sha256"] = state_digest(torch, state)
     report_bytes = encode(summary)
     metadata["training_report_sha256"] = hashlib.sha256(report_bytes).hexdigest()

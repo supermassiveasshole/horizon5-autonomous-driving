@@ -123,6 +123,39 @@ def candidate(tmp_path):
 
 
 @pytest.mark.parametrize("operation", ["archive", "restore"])
+def test_retaining_a_full_candidate_does_not_require_another_training_stage(
+    tmp_path, candidate, monkeypatch, operation
+):
+    from fh5.candidate_archive import CandidateRestore
+
+    checkpoint, identity = candidate
+    raw = (checkpoint / "policy.json").read_bytes()
+    manifest = json.loads(raw)
+    archive = tmp_path / "archive"
+    request = CandidateArchive(checkpoint, archive, identity, "Retain completed candidate")
+    retained = archive / "checkpoint"
+    if operation == "restore":
+        saved = run_experiment(request).summary["candidate_archive"]
+        retained = tmp_path / "restored"
+        request = CandidateRestore(archive, retained, saved["archive_sha256"], "Restore")
+    # Reduce the storage budget to exactly the already valid artifacts' size.
+    # Retention must not require room for a newly published training stage.
+    occupied = len(raw) + (checkpoint / "training-report.json").stat().st_size
+    occupied += sum(
+        (checkpoint / entry[field]).stat().st_size
+        for entry in manifest["history"]
+        for field in ("checkpoint", "report")
+    )
+    monkeypatch.setattr("fh5.sac_checkpoint.HISTORY_LIMIT_BYTES", occupied)
+
+    result = run_experiment(request).summary["candidate_" + operation]
+    assert result["checkpoint_sha256"] == identity
+    assert result["total_steps"] == 3
+    assert (retained / "policy.json").read_bytes() == raw
+    assert (checkpoint / "policy.json").read_bytes() == raw
+
+
+@pytest.mark.parametrize("operation", ["archive", "restore"])
 def test_storage_failure_never_publishes_a_loadable_candidate(
     tmp_path, candidate, monkeypatch, operation
 ):

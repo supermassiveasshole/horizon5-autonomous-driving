@@ -60,9 +60,16 @@ def _paths(source: Path, expected: str) -> tuple[dict[str, Any], set[str]]:
     return manifest, names
 
 
+def _publish_checkpoint(source: Path, output: Path, names: set[str]) -> None:
+    for name in sorted(names, key=lambda value: (value == "policy.json", value)):
+        target = asset(output, name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        write_file(target, read_bounded(asset(source, name), 256 * 1024**2))
+
+
 def archive_candidate(request: CandidateArchive) -> RunResult:
-    from fh5.experiment import RunResult, run_experiment
-    from fh5.sac_learning import SACResume
+    from fh5.experiment import RunResult
+    from fh5.sac_learning import validate_sac_candidate
 
     source, output = request.checkpoint_dir.resolve(), request.output_dir.resolve()
     if output.exists():
@@ -87,14 +94,7 @@ def archive_candidate(request: CandidateArchive) -> RunResult:
             target.parent.mkdir(parents=True, exist_ok=True)
             write_file(target, raw)
             inventory[name] = {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
-        verified = run_experiment(
-            SACResume(
-                frozen,
-                root / "probe",
-                steps=0,
-                expected_checkpoint_sha256=request.expected_checkpoint_sha256,
-            )
-        ).summary["sac_learning"]
+        verified = validate_sac_candidate(frozen, request.expected_checkpoint_sha256)
         summary = {
             "version": 1,
             "checkpoint_sha256": request.expected_checkpoint_sha256,
@@ -107,22 +107,19 @@ def archive_candidate(request: CandidateArchive) -> RunResult:
             "default_changed": False,
             "driving_qualification": "not_established_by_archive",
         }
-        output.mkdir()
-        for name in sorted(names, key=lambda value: (value == "policy.json", value)):
-            target = asset(output / "checkpoint", name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            write_file(target, read_bounded(asset(frozen, name), 256 * 1024**2))
         payload = encode(summary)
         if len(payload) > 16 * 1024**2:
             raise ValueError("Candidate archive manifest exceeds capacity")
+        output.mkdir()
+        _publish_checkpoint(frozen, output / "checkpoint", names)
         write_file(output / "archive.json", payload)
     result = {**summary, "archive_sha256": hashlib.sha256(payload).hexdigest()}
     return RunResult({}, [], [], {"candidate_archive": result}, output / "archive.json")
 
 
 def restore_candidate(request: CandidateRestore) -> RunResult:
-    from fh5.experiment import RunResult, run_experiment
-    from fh5.sac_learning import SACResume
+    from fh5.experiment import RunResult
+    from fh5.sac_learning import validate_sac_candidate
 
     source, output = request.archive_dir.resolve(), request.output_dir.resolve()
     if output.exists():
@@ -158,14 +155,7 @@ def restore_candidate(request: CandidateRestore) -> RunResult:
             target = asset(frozen, name)
             target.parent.mkdir(parents=True, exist_ok=True)
             write_file(target, raw)
-        verified = run_experiment(
-            SACResume(
-                frozen,
-                root / "probe",
-                steps=0,
-                expected_checkpoint_sha256=manifest["checkpoint_sha256"],
-            )
-        ).summary["sac_learning"]
+        verified = validate_sac_candidate(frozen, manifest["checkpoint_sha256"])
         if any(manifest[key] != verified[key] for key in ("learner_state_sha256", "total_steps")):
             raise ValueError("Candidate archive learner summary differs")
         receipt = {
@@ -179,9 +169,6 @@ def restore_candidate(request: CandidateRestore) -> RunResult:
             "driving_qualification": "not_established_by_archive",
         }
         output.mkdir()
-        for name in sorted(names, key=lambda value: (value == "policy.json", value)):
-            target = asset(output, name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            write_file(target, read_bounded(asset(frozen, name), 256 * 1024**2))
+        _publish_checkpoint(frozen, output, names)
         write_file(output / "restored-from.json", encode(receipt))
     return RunResult({}, [], [], {"candidate_restore": receipt}, output / "restored-from.json")

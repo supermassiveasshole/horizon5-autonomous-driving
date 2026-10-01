@@ -172,22 +172,16 @@ def publish_checkpoint(
     write_file(root / (name + ".json"), raw)
 
 
-def continuation_history(
+def checkpoint_history(
     root: Path, manifest: dict[str, Any], raw: bytes
-) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
+) -> tuple[list[dict[str, Any]], dict[str, bytes], bytes]:
+    """Validate retained history and the current stage without adding a successor."""
     history = list(manifest["history"])
-    parent_sha = hashlib.sha256(raw).hexdigest()
     report = read_bounded(root / "training-report.json", REPORT_LIMIT_BYTES)
     if hashlib.sha256(report).hexdigest() != manifest["training_report_sha256"]:
         raise ValueError("SAC training report changed")
-    entry = {
-        "checkpoint": f"history/{parent_sha}-checkpoint.json",
-        "checkpoint_sha256": parent_sha,
-        "report": f"history/{parent_sha}-report.json",
-        "report_sha256": manifest["training_report_sha256"],
-    }
-    blobs = {entry["checkpoint"]: raw, entry["report"]: report}
-    total = sum(map(len, blobs.values()))
+    blobs = {}
+    total = len(raw) + len(report)
     if total > HISTORY_LIMIT_BYTES:
         raise ValueError("SAC continuation history exceeds 128 MiB")
     if len(history) >= 1000:
@@ -201,6 +195,21 @@ def continuation_history(
             if total > HISTORY_LIMIT_BYTES:
                 raise ValueError("SAC continuation history exceeds 128 MiB")
             blobs[prior[kind]] = payload
+    return history, blobs, report
+
+
+def continuation_history(
+    root: Path, manifest: dict[str, Any], raw: bytes
+) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
+    history, blobs, report = checkpoint_history(root, manifest, raw)
+    parent_sha = hashlib.sha256(raw).hexdigest()
+    entry = {
+        "checkpoint": f"history/{parent_sha}-checkpoint.json",
+        "checkpoint_sha256": parent_sha,
+        "report": f"history/{parent_sha}-report.json",
+        "report_sha256": manifest["training_report_sha256"],
+    }
+    blobs.update({entry["checkpoint"]: raw, entry["report"]: report})
     history.append(entry)
     return history, blobs
 
