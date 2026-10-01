@@ -6,15 +6,13 @@ import math
 import threading
 import time
 from dataclasses import replace
-from typing import Any, Literal
+from typing import Any
 
 from fh5.control import Command
-from fh5.realtime import RealtimeConfig, RealtimeEnvironment, TimelineInput
+from fh5.realtime import RealtimeConfig, RealtimeEnvironment, RealtimeRun, TimelineInput
 
 
 class ReadyHandoff:
-    source_kind: Literal["synthetic"] = "synthetic"
-
     def __init__(
         self,
         environment: RealtimeEnvironment,
@@ -24,11 +22,20 @@ class ReadyHandoff:
         deadline_ns: int | None = None,
     ) -> None:
         self.environment, self.ready, self.event, self.config = environment, ready, event, config
+        self.source_kind = environment.source_kind
         self.confirmed = False
         self.deadline_ns = deadline_ns
         self.error: str | None = None
         self.started = False
         self.lock = threading.Lock()
+
+    def authorize(
+        self, request: RealtimeRun, manifest: dict[str, Any], inference_device: str | None
+    ) -> None:
+        authorize = getattr(self.environment, "authorize", None)
+        if not callable(authorize):
+            raise ValueError("Native handoff requires qualified driving authorization")
+        authorize(request, manifest, inference_device)
 
     def read(self, period_s: float) -> TimelineInput:
         from fh5.experiment import _decode

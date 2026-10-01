@@ -62,6 +62,7 @@ def read_evaluation_batch(
     if digest != expected_sha256 or (batch.get("kind"), batch.get("version")) not in (
         ("frozen-local-evaluation-v1", 1),
         ("frozen-local-evaluation-v2", 2),
+        ("frozen-local-evaluation-v3", 3),
     ):
         raise ValueError("Frozen evaluation batch changed or unsupported")
     for name, expected in batch["files"].items():
@@ -82,7 +83,7 @@ def _config(path: Path) -> dict[str, Any]:
         set(config)
         != {"version", "purpose", "model", "task", "conditions", "runtime", "plan", "criteria"}
         or type(config["version"]) is not int
-        or config["version"] not in (1, 2)
+        or config["version"] not in (1, 2, 3)
     ):
         raise ValueError("Unsupported frozen evaluation configuration")
     if config["purpose"] not in ("development", "final"):
@@ -90,7 +91,9 @@ def _config(path: Path) -> dict[str, Any]:
     for name, required in (
         (
             "model",
-            {"directory", "manifest_sha256"} | ({"kind"} if config["version"] == 2 else set()),
+            {"directory", "manifest_sha256"}
+            | ({"kind"} if config["version"] in (2, 3) else set())
+            | ({"device"} if config["version"] == 3 else set()),
         ),
         ("task", {"file", "sha256"}),
     ):
@@ -103,13 +106,17 @@ def _config(path: Path) -> dict[str, Any]:
             raise ValueError("Evaluation binding is incomplete: " + name)
     if config["version"] == 2 and config["model"]["kind"] != "sac":
         raise ValueError("Evaluation version 2 requires an explicit SAC model")
+    if config["version"] == 3 and (
+        config["model"]["kind"] != "bc" or config["model"]["device"] not in ("cpu", "cuda")
+    ):
+        raise ValueError("Native evaluation requires BC and a declared inference device")
     conditions = config["conditions"]
     if not isinstance(conditions, dict) or set(conditions) != {
         "snapshot",
         "camera",
         "navigation",
         "task_basis",
-    }:
+    } | ({"numeric_input_conditions"} if config["version"] == 3 else set()):
         raise ValueError("Evaluation conditions are incomplete")
     _validate_config(
         {"schema_version": 1, "control_source": "policy", "snapshot": conditions["snapshot"]}
@@ -177,6 +184,13 @@ def prepare_evaluation(request: EvaluationPrepare) -> RunResult:
     if request.output_dir.resolve().is_relative_to(model_dir.resolve()):
         raise ValueError("Evaluation output must be outside the model")
     model, payloads = model_payloads(model_dir, config["model"])
+    if config["version"] == 3 and (
+        model.get("provenance", {}).get("diagnostic_only") is not False
+        or config["conditions"]["numeric_input_conditions"]
+        != model.get("provenance", {}).get("input_conditions")
+        or not isinstance(config["conditions"]["numeric_input_conditions"], dict)
+    ):
+        raise ValueError("Native evaluation conditions differ from the non-diagnostic candidate")
     for view in {p["reference_mode"] for p in config["plan"]}:
         if model.get("training", {}).get("train_by_view", {}).get(view, 0) <= 0:
             raise ValueError("Evaluation view was not trained: " + view)

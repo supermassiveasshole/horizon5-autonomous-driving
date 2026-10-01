@@ -6,9 +6,34 @@ import argparse
 import json
 
 from fh5.numeric_drive_config import NumericDriveConfiguration
+from fh5.realtime import RealtimeEnvironment
+
+
+def native_driving_environment(configuration: NumericDriveConfiguration) -> RealtimeEnvironment:
+    """Construct adapters only after qualification; actual capture starts on read."""
+    configuration.require_eligible()
+    from fh5.capture_resources import WindowsResources
+    from fh5.dxgi_windows import WindowsDXGIFrames
+    from fh5.live import WindowsDesktop, XboxController
+    from fh5.realtime_driving import NumericDrivingEnvironment
+    from fh5.realtime_shadow import ShadowEnvironment
+
+    observations = ShadowEnvironment(
+        configuration.request,
+        configuration.capture,
+        lambda: WindowsDXGIFrames(configuration.target),
+        configuration.telemetry,
+        WindowsDesktop(),
+        configuration.task,
+        input_conditions=configuration.bindings,
+        resources=WindowsResources(),
+    )
+    return NumericDrivingEnvironment(observations, XboxController, configuration=configuration)
 
 
 def drive_command(args: argparse.Namespace) -> int:
+    from fh5.experiment import run_experiment
+
     configuration = NumericDriveConfiguration(args.config, args.output, args.seconds, args.live)
     if not args.live:
         print(
@@ -24,27 +49,7 @@ def drive_command(args: argparse.Namespace) -> int:
             )
         )
         return 0
-    configuration.require_eligible()
-    from fh5.capture_resources import WindowsResources
-    from fh5.dxgi_windows import WindowsDXGIFrames
-    from fh5.experiment import run_experiment
-    from fh5.live import WindowsDesktop, XboxController
-    from fh5.realtime_driving import NumericDrivingEnvironment
-    from fh5.realtime_shadow import ShadowEnvironment
-
-    observations = ShadowEnvironment(
-        configuration.request,
-        configuration.capture,
-        lambda: WindowsDXGIFrames(configuration.target),
-        configuration.telemetry,
-        WindowsDesktop(),
-        configuration.task,
-        input_conditions=configuration.bindings,
-        resources=WindowsResources(),
-    )
-    environment = NumericDrivingEnvironment(
-        observations, XboxController, configuration=configuration
-    )
+    environment = native_driving_environment(configuration)
     print("数值短段驾驶：模型预热后核对起点，再连接手柄。F8 解除输入。", flush=True)
     result = run_experiment(
         configuration.request,

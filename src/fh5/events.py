@@ -22,8 +22,11 @@ class EventRun:
     config_file: Path
     output_dir: Path
     operation: Literal["event", "start_ready", "restart_ready", "finish_ready"] = "event"
+    live: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.live) is not bool:
+            raise ValueError("Event live opt-in must be a boolean")
         if self.operation not in ("event", "start_ready", "restart_ready", "finish_ready"):
             raise ValueError("Unknown event lifecycle operation")
 
@@ -241,11 +244,13 @@ def run_event(request: EventRun, environment: EventEnvironment) -> RunResult:
     try:
         root = validate_event_file(request.config_file)
         if request.operation != "event" and (
-            environment.source_kind != "synthetic"
+            (environment.source_kind != "synthetic" and not request.live)
             or not root["event_run"]["conditions_verified"]
             or root["event_run"]["purpose"] != "event"
         ):
-            raise ValueError("Ready handoff requires verified synthetic event conditions")
+            raise ValueError(
+                "Ready handoff requires verified conditions and explicit native opt-in"
+            )
         return _run_event(request, environment, root)
     finally:
         environment.close()

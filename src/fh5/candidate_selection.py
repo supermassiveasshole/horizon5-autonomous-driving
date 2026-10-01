@@ -72,6 +72,7 @@ def evaluation_conditions(batch: dict[str, Any]) -> dict[str, Any]:
     return {
         "conditions": config["conditions"],
         "runtime": config["runtime"],
+        **({"inference_device": config["model"]["device"]} if config["version"] == 3 else {}),
         "criteria": config["criteria"],
         "plan_by_reference": dict(Counter(r["reference_mode"] for r in config["plan"])),
         "task_files": {k: v for k, v in batch["files"].items() if not k.startswith("model/")},

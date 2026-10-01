@@ -91,9 +91,12 @@ class LiveEventEnvironment:
         controller: Controller,
         desktop: DesktopState,
         frames: FrameSource,
+        *,
+        owns_receiver: bool = False,
     ) -> None:
         self.desktop = desktop
         self.frames = frames
+        self.owns_receiver = owns_receiver
         self.input = LiveEnvironment(receiver, controller, desktop, monitor_idle=True)
 
     @property
@@ -128,7 +131,11 @@ class LiveEventEnvironment:
         try:
             self.input.close()
         finally:
-            self.frames.close()
+            try:
+                self.frames.close()
+            finally:
+                if self.owns_receiver and self.input.receiver is not None:
+                    self.input.receiver.close()
 
 
 class WindowsFrames:

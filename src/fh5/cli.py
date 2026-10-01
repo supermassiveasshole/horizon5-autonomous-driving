@@ -189,6 +189,20 @@ def main(argv: Sequence[str] | None = None) -> int:
     evaluation_review.add_argument("--ledger", type=Path, required=True)
     evaluation_review.add_argument("--output", type=Path, required=True)
     evaluation_review.add_argument("--registry", type=Path)
+    evaluation_run = commands.add_parser(
+        "evaluation-run", help="Validate a native frozen batch; --live executes it"
+    )
+    evaluation_run.add_argument("--batch", type=Path, required=True)
+    evaluation_run.add_argument("--batch-sha256", required=True)
+    evaluation_run.add_argument("--event-config", type=Path, required=True)
+    evaluation_run.add_argument("--driving-config", type=Path, required=True)
+    evaluation_run.add_argument("--output", type=Path, required=True)
+    evaluation_run.add_argument("--registry", type=Path)
+    evaluation_run.add_argument("--seconds", type=float, default=15)
+    evaluation_run.add_argument(
+        "--initial-operation", choices=("start_ready", "restart_ready"), default="start_ready"
+    )
+    evaluation_run.add_argument("--live", action="store_true")
     evidence_use = commands.add_parser(
         "evidence-use", help="Register recording use for training or selection; no devices"
     )
@@ -665,6 +679,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
             )
             return 0
+        if args.mode == "evaluation-run":
+            from fh5.evaluation_cli import evaluation_command
+
+            return evaluation_command(args)
         if args.mode in ("evaluation-prepare", "evaluation-review"):
             from fh5.evaluation import EvaluationPrepare, EvaluationReview
 

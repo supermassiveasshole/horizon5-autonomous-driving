@@ -66,7 +66,7 @@ def validate_model(
 
 
 def evaluation_actor(
-    directory: Path, binding: dict[str, Any], runtime: dict[str, Any]
+    directory: Path, binding: dict[str, Any], runtime: dict[str, Any], *, device: str = "cpu"
 ) -> DecisionActor:
     pixels = PixelContract.from_metadata(runtime["pixels"])
     if binding.get("kind") == "sac":
@@ -74,5 +74,5 @@ def evaluation_actor(
 
         return SACEvaluationActor(directory, pixels, binding["manifest_sha256"])
     return FrozenNumericActor(
-        directory, pixels, expected_manifest_sha256=binding["manifest_sha256"]
+        directory, pixels, device, expected_manifest_sha256=binding["manifest_sha256"]
     )

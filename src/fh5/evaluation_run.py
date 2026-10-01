@@ -1,4 +1,4 @@
-"""Bounded repeated frozen-policy execution over explicitly synthetic external I/O."""
+"""Bounded repeated frozen-policy execution with declared external I/O sources."""
 
 from __future__ import annotations
 
@@ -35,8 +35,11 @@ class EvaluationRun:
     seconds: float = 15
     registry_file: Path | None = None
     initial_operation: Literal["start_ready", "restart_ready"] = "start_ready"
+    live: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.live) is not bool:
+            raise ValueError("Evaluation live opt-in must be a boolean")
         if self.initial_operation not in ("start_ready", "restart_ready"):
             raise ValueError("Evaluation requires a declared initial ready operation")
         if (
@@ -48,14 +51,18 @@ class EvaluationRun:
 
 
 class EvaluationEnvironment(Protocol):
-    source_kind: Literal["synthetic"]
+    @property
+    def source_kind(self) -> Literal["synthetic", "native"]: ...
 
     def event(self, slot_id: str) -> EventEnvironment: ...
     def driving(self, slot_id: str, ready_state: dict[str, Any]) -> RealtimeEnvironment: ...
     def close(self) -> dict[str, Any]: ...
 
 
-def _freeze(request: EvaluationRun) -> tuple[dict[str, Any], Path, dict[str, Any]]:
+def evaluation_inputs(
+    request: EvaluationRun,
+) -> tuple[dict[str, Any], dict[str, bytes], dict[str, Any]]:
+    """Validate all run/menu bindings without creating output or opening devices."""
     batch, _, _ = read_evaluation_batch(request.batch_dir, request.batch_sha256)
     plan = batch["config"]["plan"]
     if not 1 <= len(plan) <= 10 or any(p["reference_mode"] != "no_reference" for p in plan):
@@ -77,6 +84,21 @@ def _freeze(request: EvaluationRun) -> tuple[dict[str, Any], Path, dict[str, Any
     root = request.output_dir
     if root.resolve().is_relative_to(request.batch_dir.resolve()):
         raise ValueError("Evaluation output must be outside frozen batch")
+    task = _read(request.batch_dir / "task.json")[0]
+    if task["version"] == 2 and event_snapshot != {
+        name: read_bounded(request.batch_dir / name, 16 * 1024**2)
+        for name in batch["files"]
+        if name.startswith("start/")
+    }:
+        raise ValueError("Requested event differs from the frozen automatic start protocol")
+    return batch, event_snapshot, menu["event_run"]
+
+
+def _freeze(
+    request: EvaluationRun, native_binding: dict[str, Any] | None = None
+) -> tuple[dict[str, Any], Path, dict[str, Any]]:
+    batch, event_snapshot, event_parameters = evaluation_inputs(request)
+    root = request.output_dir
     root.mkdir(parents=True, exist_ok=False)
     for name in ["batch.json", *batch["files"]]:
         dest = root / "frozen" / name
@@ -92,31 +114,23 @@ def _freeze(request: EvaluationRun) -> tuple[dict[str, Any], Path, dict[str, Any
         event_files[relative] = hashlib.sha256(payload).hexdigest()
     event_file = root / "event.json"
     validate_event_file(event_file)
-    task = _read(root / "frozen/task.json")[0]
-    if task["version"] == 2:
-        frozen = {
-            name: read_bounded(root / "frozen" / name, 16 * 1024**2)
-            for name in batch["files"]
-            if name.startswith("start/")
-        }
-        if event_snapshot != frozen:
-            raise ValueError("Requested event differs from the frozen automatic start protocol")
     write_file(
         root / "run-protocol.json",
         encode(
             {
-                "version": 1,
+                "version": 2 if native_binding is not None else 1,
                 "batch_sha256": request.batch_sha256,
                 "seconds_per_attempt": request.seconds,
                 "event_files": event_files,
-                "source_kind": "synthetic",
+                "source_kind": "native" if native_binding is not None else "synthetic",
+                **({"native": native_binding} if native_binding is not None else {}),
                 "exploration": False,
                 "rewind": False,
                 "initial_operation": request.initial_operation,
             }
         ),
     )
-    return batch, event_file, menu["event_run"]
+    return batch, event_file, event_parameters
 
 
 def _verify_event_protocol(root: Path, expected: str) -> None:
@@ -149,9 +163,19 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
     batch: dict[str, Any] | None = None
     root = request.output_dir
     try:
-        if environment.source_kind != "synthetic":
-            raise ValueError("Repeated evaluation currently requires synthetic external I/O")
-        batch, event_file, event_parameters = _freeze(request)
+        native_binding = None
+        device = "cpu"
+        if environment.source_kind == "native":
+            from fh5.evaluation_native import NativeEvaluationEnvironment
+
+            if not isinstance(environment, NativeEvaluationEnvironment):
+                raise ValueError("Native evaluation requires its qualified environment adapter")
+            source_batch, _, _ = read_evaluation_batch(request.batch_dir, request.batch_sha256)
+            native_binding = environment.prepare(request, source_batch)
+            device = environment.device
+        elif environment.source_kind != "synthetic" or request.live:
+            raise ValueError("Evaluation source and live opt-in disagree")
+        batch, event_file, event_parameters = _freeze(request, native_binding)
         protocol_sha = _read(root / "run-protocol.json")[1]
         settings = dict(batch["config"]["runtime"])
         settings["pixels"] = PixelContract.from_metadata(settings["pixels"])
@@ -191,6 +215,7 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
                         event_file,
                         directory / "ready",
                         operation=request.initial_operation if i == 0 else "restart_ready",
+                        live=request.live,
                     ),
                     event_environment=menu_environment,
                 ).summary["event_run"]
@@ -224,14 +249,16 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
             )
             drive = environment.driving(slot["id"], deepcopy(preparation["ready_state"]))
             try:
-                if drive.source_kind != "synthetic":
-                    raise ValueError("Driving environment must be synthetic")
+                if drive.source_kind != environment.source_kind:
+                    raise ValueError("Driving environment differs from evaluation source")
                 _verify_event_protocol(root, protocol_sha)
             except (Exception, KeyboardInterrupt):
                 drive.close()
                 raise
             executed = run_experiment(
-                RealtimeRun(directory / "execution", config, seconds=request.seconds),
+                RealtimeRun(
+                    directory / "execution", config, seconds=request.seconds, live=request.live
+                ),
                 realtime_environment=ReadyHandoff(
                     drive,
                     preparation["ready_state"],
@@ -245,16 +272,22 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
                     else None,
                 ),
                 numeric_actor_factory=lambda: evaluation_actor(
-                    root / "frozen/model", batch["config"]["model"], batch["config"]["runtime"]
+                    root / "frozen/model",
+                    batch["config"]["model"],
+                    batch["config"]["runtime"],
+                    device=device,
                 ),
             ).summary["realtime"]
             attempt.update(
                 stop_reason=executed["stop_reason"],
                 resources_released=executed["resources_released"],
             )
+            summary["commands_sent_to_game"] |= executed["commands_sent_to_game"]
             packets = read_realtime_journal(directory / "execution", executed)
             run_experiment(
-                Record(record_config, directory / "recording"),
+                Record(
+                    record_config, directory / "recording", "udp" if request.live else "synthetic"
+                ),
                 packets=(
                     Packet(
                         p["received_monotonic_ns"],
@@ -319,6 +352,8 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
             and all(a["resources_released"] for a in summary["attempts"])
             and all(p["release_sent"] for p in summary["preparations"])
         )
+        if environment.source_kind == "native":
+            summary["commands_sent_to_game"] |= summary["environment"].get("menu_sends", 0) > 0
     assert batch is not None
     summary["unstarted_slots"] = [
         p["id"] for p in batch["config"]["plan"] if p["id"] not in summary["started_slots"]
@@ -341,7 +376,7 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
     atomic_json(root / "run.json", summary)
     path = root / "report.html"
     path.write_text(
-        '<!doctype html><meta charset="utf-8"><h1>合成重复评估</h1><p>非实机驾驶验收。</p>'
+        '<!doctype html><meta charset="utf-8"><h1>冻结策略重复评估</h1><p>执行记录不自动证明驾驶验收通过。</p>'
         + (
             '<a href="review/report.html">全部尝试与执行核验</a>'
             if reviewed_summary

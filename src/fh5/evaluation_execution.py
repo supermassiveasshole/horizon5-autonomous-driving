@@ -171,7 +171,7 @@ def _verify_history(report: dict[str, Any]) -> None:
             target = row["decision_ns"] - offset * 1_000_000
             index = bisect_left(returned, target) - 1
             if (
-                report["evidence_kind"] == "synthetic"
+                report["evidence_kind"] in ("synthetic", "native")
                 and index >= 0
                 and target - returned[index] <= 200_000_000
             ):
@@ -238,6 +238,13 @@ def review_execution(
         }
         if report["configuration"] != batch["config"]["runtime"]:
             raise ValueError("Execution runtime differs from frozen configuration")
+        if report["evidence_kind"] == "native" and (
+            batch["version"] != 3
+            or report["environment"].get("input_conditions", {}).get("conditions")
+            != batch["config"]["conditions"]["numeric_input_conditions"]
+            or report["inference"].get("inference_device") != batch["config"]["model"]["device"]
+        ):
+            raise ValueError("Native execution input conditions or device differ from frozen batch")
         result["linked_packets"] = _bind_telemetry(root, report, source_dir, recording)
         contract = PixelContract.from_metadata(batch["config"]["runtime"]["pixels"])
         with preserve_torch_state(importlib.import_module("torch")):
@@ -274,7 +281,8 @@ def review_execution(
         result.update(
             status="bound_diagnostic",
             actor_kind=report["actor_kind"],
-            reasons=["synthetic_or_shadow_only", "game_action_timing_unverified"],
+            reasons=(["synthetic_or_shadow_only"] if report["evidence_kind"] != "native" else [])
+            + ["game_action_timing_unverified"],
             metrics=execution_metrics(report),
         )
     except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
