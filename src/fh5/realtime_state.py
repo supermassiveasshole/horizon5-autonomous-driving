@@ -33,13 +33,13 @@ class DecisionState:
         send: Callable[[Command], None],
         *,
         clock: Callable[[], int] | None = None,
-        simulated_history: bool = True,
+        executed_history: bool = True,
         notify: Callable[[str, Any], None] | None = None,
         require_command_context: bool = False,
         command_bounds: ActionBounds | None = None,
     ) -> None:
         self.config, self.send = config, send
-        self.clock, self.simulated_history = clock, simulated_history
+        self.clock, self.executed_history = clock, executed_history
         self.notify = notify or (lambda kind, row: None)
         self.require_command_context = require_command_context
         self.command_bounds = command_bounds
@@ -183,7 +183,7 @@ class DecisionState:
                 ),
                 None,
             )
-            if not self.simulated_history:
+            if not self.executed_history:
                 prior = None
             if prior and now - offset * MS - prior["returned_ns"] <= 200 * MS:
                 sent = prior["sent"]

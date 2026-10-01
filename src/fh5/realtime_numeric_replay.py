@@ -48,8 +48,9 @@ def read_realtime_recording(root: Path) -> dict[str, Any]:
     if (
         not isinstance(report, dict)
         or report["version"] != 2
-        or report["commands_sent_to_game"] is not False
-        or report["evidence_kind"] not in ("synthetic", "shadow")
+        or type(report["commands_sent_to_game"]) is not bool
+        or (report["evidence_kind"] != "native" and report["commands_sent_to_game"])
+        or report["evidence_kind"] not in ("synthetic", "shadow", "native")
     ):
         raise ValueError("Unsupported real-time numerical recording")
     return report
@@ -219,9 +220,10 @@ def _verify_action_wait(row: dict[str, Any], report: dict[str, Any]) -> None:
     raise ValueError("Action support wait has executable policy support")
 
 
-def _decision(
-    root: Path, row: dict[str, Any], contract: PixelContract, actor: DecisionActor, tolerance: float
-) -> dict[str, Any]:
+def read_realtime_decision(
+    root: Path, row: dict[str, Any], contract: PixelContract
+) -> NumericDecision:
+    """Verify retained input metadata and RGB without loading or running a model."""
     reference = row["archive"]
     if not reference or row["archive_reason"] is not None:
         raise ValueError("Numerical input was not archived")
@@ -258,6 +260,14 @@ def _decision(
     reason = validate_decision(decision, contract)
     if reason:
         raise ValueError("Invalid recorded observation: " + reason)
+    return decision
+
+
+def _decision(
+    root: Path, row: dict[str, Any], contract: PixelContract, actor: DecisionActor, tolerance: float
+) -> dict[str, Any]:
+    decision = read_realtime_decision(root, row, contract)
+    frames = decision.frames
     if row["prediction"] is None or row.get("error"):
         raise ValueError("Inference failure has no reproducible prediction")
     if not _valid_prediction(row["prediction"]):

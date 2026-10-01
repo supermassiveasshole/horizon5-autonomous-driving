@@ -1,12 +1,40 @@
 # 容错数值决策（T34 / #36）
 
-状态：软件接入阶段。已有共享期限状态机、真实常驻推理线程、独立动作监督、有界旁路，以及 DXGI/UDP/独立任务几何与冻结 Δt 模型的只读影子适配器。**尚未获得 FH5 影子运行的实机证据，也未接入真实执行器**。#36 保持开放；#9 负责游戏中的实际发送和车辆响应。
+状态：软件接入阶段。已有共享期限状态机、真实常驻推理线程、独立动作监督、有界旁路，以及 DXGI/UDP/独立任务几何与冻结 Δt 模型的只读影子适配器。新增 #9 的数值控制适配接口，已用真实冻结模型和模拟外部设备验证；**没有完成新管线的 FH5 实机驾驶或影子性能验收**。#36、#9 继续保持开放。
 
 ## 实验接口
 
 `run_experiment(RealtimeReplay(...))` 输入带绝对时间的安全状态、数值历史和模拟推理服务返回时间，生成确定性期限/动作回放。推理挂起用 `InferenceReply(delay_ms=None)` 表示；它不加载模型、不采集屏幕、不连接手柄。
 
-`run_experiment(RealtimeRun(...), realtime_environment=..., numeric_actor_factory=...)` 启动真实线程。环境边界提供 `read`、独立 `signals`、模拟 `send` 和 `close`；生产游戏控制适配器不属于本切片。`source_kind` 只接受 `synthetic` 或 `shadow`。影子环境的 `send` 必须为空操作，候选动作不充当实际动作历史，缺少已验证真实输入时保持 action mask 为 false。
+`run_experiment(RealtimeRun(...), realtime_environment=..., numeric_actor_factory=...)` 启动真实线程。环境边界提供 `read`、独立 `signals`、`send` 和 `close`；`source_kind` 区分 `synthetic`、`shadow` 和显式控制的 `native`。影子环境的 `send` 必须为空操作，候选动作不充当实际动作历史，缺少已验证真实输入时保持 action mask 为 false。
+
+## 数值控制适配接口（#9 增量）
+
+`NumericDrivingEnvironment(observations, controller_factory, source_kind=...)` 复用 `ShadowEnvironment` 的原始像素、遥测与局部路线检查，组合既有独立手柄看门狗。模拟设备必须声明 `synthetic`。`native` 要求 `RealtimeRun(live=True)` 且最长 30 秒；不兼容、旧来源或 diagnostic-only 模型在启动采集之前拒绝。真实控制只支持匹配数值/历史维度的冻结时间特征 BC；SAC 的游戏适配留给 #11。
+
+控制器在模型加载和预热完成、观测与局部起点已就绪后才创建；创建后再次检查焦点、F8 和数据年龄，不发送创建期间过期的预测。策略命令沿用统一的时效/限幅检查，成功发送返回后才能进入后续动作历史。短时暂无完整的新图像不额外触发控制接口错误，旧预测仍须通过原有年龄与 epoch 检查。关闭时先归零和断开控制器，再关闭观测、存档；驱动断开失败必须保留为资源未释放。
+
+报告保存执行器发送次数、失败、独立看门狗与收尾事件，另增加 `source_to_send_return_ms`。原 `source_to_sendable_ms` 仍表示推理结果就绪时间。两者都不能代表游戏实际采用命令的时刻；`real_game_validation`、训练与晋升资格不会因 API 成功而置为真。原生来源的记录可以离线重放，重放始终不创建执行器。
+
+新增 `realtime-drive` CLI；旧 `policy --live` 保留为原管线入口，不自动迁移或追认旧成绩。不把接口接通当作 #9 完成。验证细节见 [数值驾驶适配记录](validation/t08-numeric-driving-adapter.md)。
+
+## 有界驾驶命令与条件绑定
+
+`configs/realtime-drive.example.json` 是需填写真实候选目录与 SHA-256 的模板，默认沿用 4K 采集配置。`model.expected_sha256` 是 `actor.pt` 哈希，`model.manifest_sha256` 是完整 `model.json` 哈希；`shadow.manifest_sha256` 是对应只读运行的 `realtime-manifest.json` 文件哈希。路径相对于配置文件。可暂填 `shadow: null` 查看其他缺项。
+
+```powershell
+uv run --locked fh5 realtime-drive --config runs/drive-config.json --output runs/numeric-drive-001 --seconds 15
+```
+
+默认只读取配置、路线、候选声明与已保存只读记录，不打开采集、UDP、GPU或手柄，也不创建运行目录。`status=validated_only` 只表示完成配置检查；是否具备接管条件须看 `qualification.eligible` 和 `reasons`。候选须来自新连续数值采集、不是诊断模型，实际 Δt/图像契约、车型/PI、动作历史（当前 200 ms 年龄预算）匹配，并训练过无参考视图。
+
+采集条件中 `status: confirmed` 表示已核对该份相机、渲染/HUD、车辆/调校等声明；不能把示例待核验状态直接改名充当实机证据。声明必须与训练来源完全相同。仍需该候选在同一采集配置、推理设备、决策配置和局部任务下的实际 DXGI 只读记录：绑定报告及原始日志，资源释放、记录完整、正常到时或到达局部终点，至少有 1 秒接受决策的时间跨度，并满足原期限/年龄与看门狗间隔。此门槛用于排除空跑或单个幸运预测，不是长期驾驶可靠性验收；不要求零丢帧或每个 tick 都有新图。
+
+准备好实机短段并完成上述核对后，才使用相同命令加 `--live`。默认 15 秒、最多 30 秒；不支持旧来源诊断豁免。资格不足时在创建原生资源前拒绝；模型 worker 加载时再检查完整清单哈希，观测适配器再次核对配置和绑定。输入来源、推理设备或运行配置改变时重新采集对应只读依据，不能复用旧配置的通过结论。该入口当前执行无参考策略；参考辅助模式、真实响应、人类对照与 #10/#11/#15 接入仍需后续工作。
+
+原生数值记录保留资格摘要和只读证据哈希。原生控制的 `commands_sent_to_game` 计入运行时、看门狗和收尾成功返回的发送；它仍不代表车辆已运动。CLI 返回零也只表示本次有接受决策、正常结束且资源释放，不会把 `real_game_validation` 改为真。
+
+只读资格检查同时逐个验证决策的输入 JSON 与数值 RGB 文件、摘要、帧元数据和因果时序，不只依赖报告中保存的完整标记。此检查不加载模型或执行预测。推理 worker 在预热后报告实际使用的 `inference_device`；它须与配置和只读依据一致，不能只核对配置里的 CPU/CUDA 字符串。设备作为执行信息保留，不并入模型身份，离线数值重放仍可在另一设备上按既定误差容差核对同一模型。
 
 `ShadowEnvironment` 组合独立 DXGI 采集/预处理、单个回环 UDP 接收器和任务几何核验。每个包都检查，不能用同批末尾的正常包覆盖中间故障。准备前的菜单、时钟异常、失焦或遥测间断会清空历史；恢复后只接受边界之后的新帧。准备完成后硬故障锁存，不自动重试接管。采集 epoch 即使暂无完整历史也会传播，使旧推理及时失效。
 

@@ -108,7 +108,7 @@ class _StopDrive:
     stopped: Callable[[], bool]
 
     @property
-    def source_kind(self) -> Literal["synthetic", "shadow"]:
+    def source_kind(self) -> Literal["synthetic", "shadow", "native"]:
         return self.source.source_kind
 
     def read(self, period_s: float) -> TimelineInput:

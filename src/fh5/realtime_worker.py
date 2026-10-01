@@ -34,6 +34,7 @@ class InferenceWorker:
         self.ready, self.done = threading.Event(), threading.Event()
         self.error: str | None = None
         self.manifest: dict[str, Any] = {}
+        self.inference_device: str | None = None
         self.kind = "not_loaded"
         self.warmup_completed = False
         self.worker = threading.Thread(
@@ -122,6 +123,8 @@ class InferenceWorker:
                 raise ValueError("Command-conditioned actor and execution contract differ")
             self.kind, self.manifest = actor.kind, deepcopy(actor.manifest)
             self._warmup(actor)
+            device = getattr(actor, "device", None)
+            self.inference_device = device if isinstance(device, str) else None
             self.warmup_completed = True
             self.ready.set()
             while not self.done.is_set():
@@ -168,4 +171,5 @@ class InferenceWorker:
             "error": self.error,
             "warmup_completed": self.warmup_completed,
             "worker_limit": 1,
+            "inference_device": self.inference_device,
         }

@@ -9,6 +9,7 @@ from dataclasses import asdict
 from typing import Any
 
 from fh5.capture_config import parse_capture_config
+from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import DecisionActor, PixelContract
 from fh5.realtime import RealtimeConfig, RealtimeNumericReplay, RealtimeRun
 from fh5.realtime_model import ShadowNumericActor, shadow_model_contract
@@ -36,8 +37,12 @@ def replay_command(args: argparse.Namespace) -> int:
             args.device,
             allow_legacy_source_diagnostic=args.allow_legacy_source_diagnostic,
         )
+    elif recording["actor_kind"] == "frozen-numeric-temporal-bc-v2":
+        if args.allow_legacy_source_diagnostic:
+            raise ValueError("Driving replay requires the exact numerical source contract")
+        actor = FrozenNumericActor(args.model, pixels, args.device)
     else:
-        raise ValueError("CLI replay requires a supported frozen shadow or SAC actor")
+        raise ValueError("CLI replay requires a supported frozen numerical actor")
     result = run_experiment(
         RealtimeNumericReplay(args.recording, args.report, args.tolerance),
         numeric_actor=actor,
@@ -97,6 +102,10 @@ def shadow_command(args: argparse.Namespace) -> int:
     metadata, trained = shadow_model_contract(
         model_dir, pixels, model["expected_sha256"], args.allow_legacy_source_diagnostic
     )
+    model_bytes = (model_dir / "model.json").read_bytes()
+    if json.loads(model_bytes) != metadata:
+        raise ValueError("Shadow model changed during configuration validation")
+    model_manifest_sha256 = hashlib.sha256(model_bytes).hexdigest()
     if metadata["contract"]["actor_shape"] != {
         "action_count": len(request.config.action_offsets_ms),
         "reference_count": request.config.reference_count,
@@ -108,6 +117,8 @@ def shadow_command(args: argparse.Namespace) -> int:
         "capture_config_sha256": hashlib.sha256(capture_bytes).hexdigest(),
         "capture_target": asdict(target),
         "conditions": conditions,
+        "inference_device": model["device"],
+        "model_manifest_sha256": model_manifest_sha256,
     }
     if not args.live:
         print(
@@ -151,6 +162,7 @@ def shadow_command(args: argparse.Namespace) -> int:
             model["expected_sha256"],
             model["device"],
             allow_legacy_source_diagnostic=args.allow_legacy_source_diagnostic,
+            expected_manifest_sha256=model_manifest_sha256,
         ),
     )
     summary = result.summary["realtime"]

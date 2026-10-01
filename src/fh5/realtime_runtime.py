@@ -28,10 +28,10 @@ def run_realtime(
     factory: Callable[[], DecisionActor],
     journal_sink: Callable[[bytes], None] | None = None,
 ) -> RunResult:
-    if environment.source_kind not in ("synthetic", "shadow"):
-        raise ValueError(
-            "Real-time foundation only accepts simulated actuators or read-only shadow"
-        )
+    if environment.source_kind not in ("synthetic", "shadow", "native"):
+        raise ValueError("Unknown real-time environment origin")
+    if environment.source_kind == "native" and not request.live:
+        raise ValueError("Native control requires explicit live opt-in")
     request.output_dir.mkdir(parents=True, exist_ok=False)
     for name in ("pixels", "inputs", "previews"):
         (request.output_dir / name).mkdir()
@@ -44,7 +44,7 @@ def run_realtime(
         request.config,
         environment.send,
         clock=time.perf_counter_ns,
-        simulated_history=environment.source_kind == "synthetic",
+        executed_history=environment.source_kind != "shadow",
         notify=journal.submit,
     )
     worker = InferenceWorker(factory, request.config)
@@ -114,6 +114,24 @@ def run_realtime(
         if not worker.ready.wait(request.startup_timeout_s) or not worker.warmup_completed:
             state.stop(time.perf_counter_ns(), "model_startup_failed")
         else:
+            if environment.source_kind == "native" and (
+                worker.kind != "frozen-numeric-temporal-bc-v2"
+                or worker.manifest.get("diagnostic_only") is not False
+                or worker.manifest.get("explicit_dt_model") is not True
+                or request.config.pixels.origin != "direct_numeric"
+                or worker.manifest.get("numeric_contract") != request.config.pixels.metadata()
+                or worker.manifest.get("model_contract", {}).get("actor_shape")
+                != {
+                    "action_count": len(request.config.action_offsets_ms),
+                    "reference_count": request.config.reference_count,
+                }
+            ):
+                raise ValueError("Native driving requires compatible non-diagnostic temporal BC")
+            if environment.source_kind == "native":
+                authorize = getattr(environment, "authorize", None)
+                if not callable(authorize):
+                    raise ValueError("Native driving requires qualified input and shadow bindings")
+                authorize(request, worker.manifest, worker.inference_device)
             state.require_command_context = bool(worker.manifest.get("command_context"))
             if state.require_command_context:
                 state.command_bounds = ActionBounds(**worker.manifest["bounds"])
@@ -198,7 +216,9 @@ def run_realtime(
         "started_ns": started,
         "ended_ns": ended,
         "finalized_ns": time.perf_counter_ns(),
-        "commands_sent_to_game": False,
+        "commands_sent_to_game": environment.source_kind == "native"
+        and environment_result.get("controller_sends", 0) > 0,
+        "game_application": "unverified",
         "decisions": state.decisions,
         "commands": state.commands,
         "stop_reason": state.stop_reason,
@@ -213,7 +233,7 @@ def run_realtime(
             "training_eligible": False,
             "exact_replay_eligible": complete,
             "promotion_eligible": False,
-            "reason": "synthetic_or_shadow_only; independent replay and validity review required"
+            "reason": "independent replay and validity review required"
             if complete
             else "recording_gap_or_writer_failure",
         },

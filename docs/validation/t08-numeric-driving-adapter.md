@@ -1,0 +1,47 @@
+# #9 数值驾驶适配：软件证据
+
+2026-10-02，基于 `8dce7af`。FH5、Steam 未启动；未打开 Windows 桌面、实际 DXGI、UDP 或虚拟手柄。#9 保持开放。
+
+## 本次已验证
+
+通过既定 `run_experiment` 边界，运行实际冻结 Δt BC、原始 BGRA 预处理、因果遥测、局部路线核验、数值调度、限幅、成功命令历史、独立控制看门狗和 RGB 原件重放。替换的是外部截图、遥测、桌面信号和手柄设备；没有替换模型或内部验证器。
+
+初次适配器原型使用已有合成训练权重 `runs/t14-parent-review-red-20261001/persistent-candidates0/bc/model`，零梯度更新。权重仍为诊断模型，未改写其来源。后续命令行增量已单独执行两步 CPU 小模型的独立 fixture，结果见下节；它不是另一次大型候选训练。
+
+- 初始空输出适配器运行到时间上限仍无手柄命令，测试失败；接入后真实模型产生有限命令、最终归零，资源释放且成功动作进入历史。证据 `runs/t08-numeric-drive-red-20261002`、`runs/t08-numeric-drive-green2-20261002`。
+- CLI 原先拒绝新冻结 actor，修复后逐个预测独立重现；最终带发送年龄统计的原型复现 22 个预测，`runs/t08-send-timing-green-20261002`。原始报告、RGB、日志及重放报告均在本地保留。
+- F8 与失焦在首个非零命令后触发，后续只有归零；延迟 150 ms 的设备创建未发出过期预测。证据 `runs/t08-f8-20261002`、`t08-focus-20261002`、`t08-device-delay-20261002`。
+- 未启用 live 在创建输出目录前拒绝；合成来源诊断模型即使启用 live，也在采集/手柄创建前拒绝。证据 `runs/t08-native-optin-20261002`、`t08-native-model-green-20261002`。
+- 模拟驱动写入和断开均失败时，原逻辑误报释放成功；RED/GREEN 修复使资源未释放和记录不完整保持可见。证据 `runs/t08-detach-red-20261002`、`t08-detach-green-20261002`。
+- 原生来源文件容器的离线重放拒绝→支持，未再次调用执行器。`runs/t08-native-replay-green-20261002` 使用明确构造的外部文件 fixture，只改容器来源标记，不能作为原生运行证据。
+
+控制与实时调度既有回归 **62 passed in 4.10s**，JUnit：`runs/t08-adapter-regression-20261002-results.xml`。Ruff 与 mypy（118 源文件）通过。主线全量任务仍运行在冻结的旧提交上，不覆盖本增量。
+
+双轴审查对 `8dce7af...dc006ee`：Standards 0；Spec 2 项发送/释放报告缺陷。均先复现失败再修正：`t08-shutdown-count-red/green-20261002` 检查仅收尾发送归零也计入总数；`t08-acquisition-red/green-20261002` 模拟设备成功取得后操作系统无法启动线程、设备断开也失败，仍须保留设备所有权并报告未释放。总发送统计包含运行时、独立看门狗和收尾，运行时计数另列。
+
+复核固定范围 `8dce7af...75eaffc`：Standards 0 项违反/0 项建议，Spec 0 项当前增量遗留缺陷。修正后的完整原型 `runs/t08-numeric-drive-reviewed-20261002` 以 `time_limit` 正常结束、全部资源释放，22 个真实模型预测通过实验入口及 CLI 独立重放；未新增梯度更新。Ruff/308 文件格式检查通过。上述复核不替代仍未运行的 fresh fixture 或完整套件。
+
+## 命令行与候选条件绑定增量
+
+基于 `fc78add` 新增 `realtime-drive`：默认不打开设备，只返回配置检查和资格缺项；`--live` 必须满足冻结候选、采集/车辆/动作历史、无参考训练视图及候选自己的原生 DXGI 只读记录绑定。配置检查后模型被替换，会在 worker 启动阶段拒绝；原生观测适配器还核对请求、采集设置和条件摘要。旧只读记录缺少模型清单/推理设备绑定时不追认为合格。
+
+- 保留真实旧权重的原型：`t08-drive-cli-red/green-20261002`、`t08-shadow-qualification-red/green-20261002`；新增命令可检查，合成只读记录不能证明原生性能。
+- `t08-live-guard-wired-20261002`、`t08-bound-model-20261002`、`t08-bound-shadow-20261002`、`t08-shadow-device-20261002`、`t08-shadow-cadence-20261002`：验证诊断候选、被换清单，以及改变推理设备/频率不能复用旧依据。此前 `t08-live-ineligible-20261002` 的失败来自测试误读 stderr，修正后的测试通过，不能把该错误算作产品缺陷。
+- 正向检查使用**明确构造的外部原生文件 fixture**，来源身份/条件只为覆盖程序分支而模拟，另用合成数据实际训练两步 CPU BC。没有修改或晋升旧模型；所有结果都不是用户候选、实际 DXGI 或驾驶证据。`t08-qualified-adapter-red/green-20261002` 发现并修正条件绑定 JSON 中列表/元组不一致导致的误拒绝；通过后实际模型命令到达模拟设备，仍报告 `real_game_validation=false`。
+- 独立测试 `tests/test_numeric_drive_cli.py tests/test_realtime_driving.py`：**21 passed in 30.11s**，JUnit `runs/t08-numeric-entry-fresh-20261002-results.xml`。包括取得资格后的适配器参数变化、模型文件替换、正常命令及异常释放。使用有界两步 CPU fixture，主线大型回归继续运行且没有修改其源码；没有另外开启大型训练/完整套件。
+
+审查固定范围 `fc78add...3d21f0f`：Standards 0 项违反、1 项候选身份映射重复的维护建议；Spec 2 项缺口：资格检查未重新读取原始图像资产，实际 worker 设备未与只读时效依据绑定。两项均先复现失败再修正，并把两处候选身份比较收敛为同一映射。
+
+- `runs/t08-shadow-assets-red/green-20261002`：外部文件缺失/损坏的 4 类情况由误判合格改为拒绝，连同数值回放共 **24 passed / 21.30 秒**。输入读取与回放共用数值完整性校验，不启动 GPU 或预测。
+- `runs/t08-worker-device-red/green-20261002`：明确模拟的 CUDA 证据文件不能授权实际 CPU 模型；修正后在观测/控制创建前拒绝。同设备正向路径仍通过，共 **2 passed / 8.57 秒**。未启动 CUDA 或真实采集。
+- 相关回归 `tests/test_numeric_drive_cli.py`、`test_realtime_driving.py`、`test_realtime.py`、`test_realtime_shadow.py`、`test_realtime_numeric_replay.py`、`test_control.py`：**123 passed / 65.92 秒**；JUnit `runs/t08-entry-reviewed-regression-20261002-results.xml`。
+
+主线 `8dce7af` 的全量任务已结束：**1117 passed / 4508.11 秒**，JUnit `runs/t14-updates-integrated-full-20261002-results.xml`；它不覆盖本分支。
+
+最终增量复审固定范围 `fc78add...cb8b4f8`：Standards **0 项违反 / 0 项可操作建议**；Spec **0 项遗留具体问题**。全部审查只读，未运行设备或替代上述测试；参考辅助、下游接入与实机验收仍按原范围保持未完成。Ruff、311 文件格式及 120 源文件严格 mypy 通过。合并后的整库结果另行记录。
+
+## 仍需推进
+
+继续完成本增量审查与合并验证，再接入 #10 重复评估、#11 采样及 #15 自主循环。参考辅助执行和全部 #9 实机对照也仍需推进。
+
+游戏关闭期间不能证明实际 4K 性能、车辆起步/转向/制动、长期驱动可靠性或学习提升。无参考局部接口不等于参考辅助试跑、过弯或全程完成。Windows/Python 看门狗不能保证处理驱动调用永久卡住或进程强杀。本次不关闭任何实机验收票。
