@@ -548,9 +548,12 @@ class _Loop:
             raise ValueError("Unsealed sampling cannot be automatically acknowledged")
         summary_path = request.output_dir / "summary.json"
         summary = json.loads(read_bounded(summary_path, 4 * 1024**2))
-        if self.config.get("sampling_retry", {}).get("max_retries", 0) and summary.get(
-            "stop_reason"
-        ) in ("sampling_fault", "no_eligible_experience", "stop_requested"):
+        if (
+            self.config.get("sampling_retry", {}).get("max_retries", 0)
+            and summary.get("stop_reason")
+            in ("sampling_fault", "no_eligible_experience", "stop_requested")
+            and not summary.get("latest_candidate")
+        ):
             if not retryable_sampling(
                 request, self.state["latest_learner"], _sha(summary_path), pending=True
             ):
@@ -565,7 +568,9 @@ class _Loop:
                 }
             )
             return
-        summary, learner = completed_sampling(request, self.state["latest_learner"])
+        summary, learner = completed_sampling(
+            request, self.state["latest_learner"], allow_stopped_updates=True
+        )
         self.accept_sampling(row, request.output_dir, summary, learner)
         self.state.setdefault("recoveries", []).append(
             {

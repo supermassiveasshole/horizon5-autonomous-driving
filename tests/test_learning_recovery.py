@@ -31,6 +31,7 @@ def interrupt_selection(
         "parent_evidence",
         "stopped_evaluation",
         "failed_sampling",
+        "stopped_updates",
     }
     repository = Path(__file__).resolve().parents[1]
     environment = dict(os.environ)
@@ -43,6 +44,7 @@ def interrupt_selection(
             "-c",
             """
 import json, os, sys
+from contextlib import nullcontext
 from dataclasses import replace as replaced
 from pathlib import Path
 from fh5.experiment import run_experiment
@@ -141,8 +143,12 @@ if sys.argv[5] == 'large_trace':
         lease.sample = sample
         return lease
     backend.sampling = sampling
-run_experiment(LearningLoop(Path(sys.argv[1]), root),
-               learning_environment=backend)
+from test_learning_update_resume import stop_on_creation
+guard = (stop_on_creation(root / 'round-000/learning/candidate-000', root / 'stop.request')
+         if sys.argv[5] == 'stopped_updates' else nullcontext())
+with guard:
+    run_experiment(LearningLoop(Path(sys.argv[1]), root),
+                   learning_environment=backend)
 raise SystemExit('Expected filesystem exit was not reached')
 """,
             str(request.config_file),
