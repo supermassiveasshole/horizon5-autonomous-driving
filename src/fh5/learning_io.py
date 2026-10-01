@@ -5,14 +5,17 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from fh5.control import Command
 from fh5.evaluation_run import EvaluationEnvironment
 from fh5.events import EventEnvironment, EventInput
 from fh5.numeric_images import PixelContract
-from fh5.realtime import RealtimeEnvironment, TimelineInput
+from fh5.realtime import RealtimeConfig, RealtimeEnvironment, TimelineInput
 from fh5.sac_sampler import SACEnvironment, SACSample, SACStart
+
+if TYPE_CHECKING:
+    from fh5.sac_realtime_sampler import SACRealtimeEnvironment
 
 
 class LearningUnavailable(RuntimeError):
@@ -29,7 +32,9 @@ class RejectedLease(ValueError):
         self.released = released
 
 
-def _require_synthetic(source: SACEnvironment | EvaluationEnvironment) -> None:
+def _require_synthetic(
+    source: SACEnvironment | SACRealtimeEnvironment | EvaluationEnvironment,
+) -> None:
     if source.source_kind != "synthetic":
         try:
             released = source.close()
@@ -38,22 +43,14 @@ def _require_synthetic(source: SACEnvironment | EvaluationEnvironment) -> None:
         raise RejectedLease(released)
 
 
-class SamplingLease:
+class _SamplingLease[Sampling: SACEnvironment | SACRealtimeEnvironment]:
     source_kind: Literal["synthetic"] = "synthetic"
 
-    def __init__(self, source: SACEnvironment, phase: Callable[[str], None]):
+    def __init__(self, source: Sampling, phase: Callable[[str], None]):
         _require_synthetic(source)
-        self.source, self.phase = source, phase
+        self.source = source
+        self.phase = phase
         self.released: dict[str, Any] | None = None
-
-    def start(self, epoch: str, pixels: PixelContract) -> SACStart:
-        self.phase("restarting_sampling")
-        result = self.source.start(epoch, pixels)
-        self.phase("driving")
-        return result
-
-    def step(self, command: Command) -> SACSample:
-        return self.source.step(command)
 
     def finish(self, recording_dir: Path) -> Path | None:
         try:
@@ -72,6 +69,25 @@ class SamplingLease:
             except Exception as error:
                 self.released["error"] = str(error)
         return self.released
+
+
+class SamplingLease(_SamplingLease[SACEnvironment]):
+    def start(self, epoch: str, pixels: PixelContract) -> SACStart:
+        self.phase("restarting_sampling")
+        result = self.source.start(epoch, pixels)
+        self.phase("driving")
+        return result
+
+    def step(self, command: Command) -> SACSample:
+        return self.source.step(command)
+
+
+class RealtimeSamplingLease(_SamplingLease["SACRealtimeEnvironment"]):
+    def start(self, identity: str, runtime: RealtimeConfig) -> RealtimeEnvironment:
+        self.phase("restarting_sampling")
+        result = self.source.start(identity, runtime)
+        self.phase("driving")
+        return result
 
 
 @dataclass

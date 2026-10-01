@@ -36,6 +36,48 @@ result = run_experiment(
 
 ## 一个外部环境，顺序交接
 
+### 版本 3：异步数值采样
+
+版本 3 保留同一学习入口、评估、版本保存及停止/接续机制，将同步的 `steps_per_attempt`
+替换为 `sampling`：
+
+```python
+from dataclasses import asdict
+from fh5.realtime import RealtimeConfig
+
+# config 是上述既有配置；像素及槽位取自要加载的模型。
+runtime = RealtimeConfig(pixels=trained_pixels, reference_count=trained_reference_count)
+config["version"] = 3
+config.pop("steps_per_attempt", None)
+config["sampling"] = {
+    "runtime": {**asdict(runtime), "pixels": runtime.pixels.metadata()},
+    "seconds": 10,
+    "max_updates": 8,
+}
+```
+
+`runtime` 是包含 `pixels` 和 `action_offsets_ms` 等运行参数的对象。
+加载时补齐并冻结运行器默认值，保存到会话配置；后续接续不得悄悄改变它们。
+采样限 0.1–600 秒，更新上限 1–1000；每轮实际更新预算取新合格转移数与 `max_updates` 的较小值。
+合格经验数量与更新预算分别记录，完成低更新比训练后不会自动补到全部经验数量。
+
+版本 3 的 `LearningEnvironment.sampling(identity)` 返回 `SACRealtimeEnvironment`，其
+`start(identity, runtime)` 返回一次异步 `RealtimeEnvironment`。图像、遥测、推理与动作监督使用
+现有数值运行器；`finish(recording_dir)` 仍提供独立任务依据。只有运行器与采样租约都确认释放，
+才进入经验准备和学习；冻结评估继续使用 `evaluation(identity)`，两类资源不同时持有。
+
+当前仍限合成外部 I/O、实际 CPU 模型；没有启用原生 SAC、游戏重置、倒带或 CUDA。
+版本 1/2 继续使用同步适配器，不能把旧记录改标签后当作异步记录。
+版本 3 可选 `storage` 和 `storage_monitor`（后者要求前者），支持既有有限获取重试和采样重试设置。
+
+恢复时核验异步执行清单、命令/遥测账本、归档的数值输入与 RGB、独立任务证据和完整 learner。
+异步运行配置、采样模型及探索种子须匹配父协议。子任务已封存而父状态尚未登记的情况，可接纳已有结果；
+停止训练后只补该轮预算内尚未执行的更新，不重采样、不重复计经验。失败重试仍须确认释放且没有模型输出。
+
+实际软件验证及限制见[异步连续学习记录](validation/t14-asynchronous-learning.md)。
+
+### 同步适配器与公共评估接口
+
 `LearningEnvironment` 提供 `source_kind="synthetic"`，以及：
 
 - `sampling(identity)`：返回一个 `SACEnvironment` 租约，负责合成重置和响应实际策略动作。

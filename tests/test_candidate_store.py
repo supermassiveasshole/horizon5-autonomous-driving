@@ -24,13 +24,17 @@ from fh5.sac_learning import SACTrain
 @pytest.fixture(scope="module")
 def candidates(tmp_path_factory):
     root = tmp_path_factory.mktemp("persistent-candidates")
+    return candidate_setup(root)
+
+
+def candidate_setup(root, *, candidate_steps=30):
     replay = warm_start(root, bounds=ActionBounds(max_steer=0.4, max_throttle=0.25, max_brake=0.5))
     setup = root / "setup"
     setup.mkdir()
     operation = automatic_request(setup, root / "warm/actor")
     registry = root / "usage.sqlite"
     bindings, checkpoints = {}, {}
-    for side, steps in (("incumbent", 0), ("candidate", 30)):
+    for side, steps in (("incumbent", 0), ("candidate", candidate_steps)):
         checkpoint = root / (side + "-model")
         run_experiment(
             SACTrain(

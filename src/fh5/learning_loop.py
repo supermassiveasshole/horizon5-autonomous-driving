@@ -8,11 +8,11 @@ import json
 import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
-from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, cast
 
 from fh5.candidate_archive import CandidateRestore
 from fh5.candidate_selection import _input, evaluation_conditions
@@ -23,7 +23,13 @@ from fh5.evaluation import EvaluationPrepare, EvaluationReview, read_evaluation_
 from fh5.evaluation_completion import completed_evaluation
 from fh5.evaluation_run import EvaluationEnvironment, EvaluationRun
 from fh5.learning_capacity import capacity_decision, validate_storage_budget
-from fh5.learning_io import EvaluationLease, LearningUnavailable, RejectedLease, SamplingLease
+from fh5.learning_io import (
+    EvaluationLease,
+    LearningUnavailable,
+    RealtimeSamplingLease,
+    RejectedLease,
+    SamplingLease,
+)
 from fh5.learning_monitor import StorageMonitor, validate_monitor
 from fh5.learning_recovery import (
     archive_failed_sampling,
@@ -33,14 +39,17 @@ from fh5.learning_recovery import (
     verify_archived_sampling,
 )
 from fh5.learning_updates import UpdateProgress, retained_update_progress
-from fh5.sac_cycle import SACCycle, SACEnvironment
+from fh5.numeric_images import PixelContract
+from fh5.realtime import RealtimeConfig
+from fh5.sac_cycle import SACCycle, SACEnvironment, SACRealtimeCycle
 from fh5.sac_learning import SACResume, validate_sac_candidate
+from fh5.sac_realtime_sampler import SACRealtimeEnvironment
 from fh5.sampling_evidence import verify_sampling_sources
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
 
-_Lease = TypeVar("_Lease", SACEnvironment, EvaluationEnvironment)
+_Lease = TypeVar("_Lease", bound=SACEnvironment | SACRealtimeEnvironment | EvaluationEnvironment)
 
 
 @dataclass(frozen=True)
@@ -60,7 +69,7 @@ class LearningEnvironment(Protocol):
 
     source_kind: Literal["synthetic"]
 
-    def sampling(self, identity: str) -> SACEnvironment: ...
+    def sampling(self, identity: str) -> SACEnvironment | SACRealtimeEnvironment: ...
     def evaluation(self, identity: str) -> EvaluationEnvironment: ...
     def review(self, recording_dir: Path) -> Path | None: ...
     def close(self) -> dict[str, Any]: ...
@@ -72,10 +81,11 @@ def _sha(path: Path, limit: int = 4 * 1024**2) -> str:
 
 def _configuration(path: Path) -> dict[str, Any]:
     config: dict[str, Any] = json.loads(read_bounded(path, 1024**2))
+    asynchronous = config.get("version") == 3
     if (
         set(config)
         - {"acquisition_retry", "sampling_retry"}
-        - ({"storage", "storage_monitor"} if config.get("version") == 2 else set())
+        - ({"storage", "storage_monitor"} if config.get("version") in (2, 3) else set())
         != {
             "version",
             "store",
@@ -84,18 +94,36 @@ def _configuration(path: Path) -> dict[str, Any]:
             "task",
             "reward",
             "rounds",
-            "steps_per_attempt",
+            "sampling" if asynchronous else "steps_per_attempt",
             "evaluation_seconds",
             "seed",
         }
         or type(config["version"]) is not int
-        or config["version"] not in (1, 2)
+        or config["version"] not in (1, 2, 3)
     ):
         raise ValueError("Unsupported learning loop configuration")
-    if config["version"] == 2:
+    if config["version"] == 2 or "storage" in config:
         config["storage"] = validate_storage_budget(config.get("storage"), path.parent)
         if "storage_monitor" in config:
             config["storage_monitor"] = validate_monitor(config["storage_monitor"])
+    elif "storage_monitor" in config:
+        raise ValueError("Learning storage monitor requires a storage budget")
+    if asynchronous:
+        sampling = config["sampling"]
+        if (
+            not isinstance(sampling, dict)
+            or set(sampling) != {"runtime", "seconds", "max_updates"}
+            or type(sampling["seconds"]) not in (int, float)
+            or not math.isfinite(sampling["seconds"])
+            or not 0.1 <= sampling["seconds"] <= 600
+            or type(sampling["max_updates"]) is not int
+            or not 1 <= sampling["max_updates"] <= 1000
+        ):
+            raise ValueError("Learning async sampling requires finite duration and updates")
+        runtime = _sampling_runtime(sampling)
+        sampling["runtime"] = json.loads(
+            encode({**asdict(runtime), "pixels": runtime.pixels.metadata()})
+        )
     if "acquisition_retry" in config:
         retry = config["acquisition_retry"]
         if (
@@ -119,8 +147,8 @@ def _configuration(path: Path) -> dict[str, Any]:
             raise ValueError("Learning sampling retries require an integer bound from 0 to 3")
     for key, low, high in (
         ("rounds", 1, 10),
-        ("steps_per_attempt", 1, 1000),
         ("seed", 0, 2**32 - 11),
+        *(() if asynchronous else (("steps_per_attempt", 1, 1000),)),
     ):
         if type(config[key]) is not int or not low <= config[key] <= high:
             raise ValueError("Invalid learning loop bound: " + key)
@@ -133,6 +161,13 @@ def _configuration(path: Path) -> dict[str, Any]:
     for key in ("registry", "recording", "task", "reward"):
         config[key] = str((path.parent / config[key]).resolve())
     return config
+
+
+def _sampling_runtime(sampling: dict[str, Any]) -> RealtimeConfig:
+    settings = dict(sampling["runtime"])
+    settings["pixels"] = PixelContract.from_metadata(settings["pixels"])
+    settings["action_offsets_ms"] = tuple(settings["action_offsets_ms"])
+    return RealtimeConfig(**settings)
 
 
 def _qualification(history: dict[str, Any]) -> dict[str, Any]:
@@ -385,7 +420,7 @@ class _Loop:
             round_dir = self.root / f"round-{number:03d}"
             if (
                 not row["complete"]
-                and row.get("learner_updates", 0) < row.get("eligible_transitions", 0)
+                and row.get("learner_updates", 0) < self.update_budget(row)
                 and (
                     any(
                         key in row
@@ -447,7 +482,15 @@ class _Loop:
             raise ValueError("Learning store changed outside this loop")
         _input(self.root, self.state["incumbent"]).verify()
 
-    def sampling_request(self, number: int) -> SACCycle:
+    def update_budget(self, row: dict[str, Any]) -> int:
+        count: int = row.get("eligible_transitions", 0)
+        return (
+            min(count, self.config["sampling"]["max_updates"])
+            if self.config["version"] == 3
+            else count
+        )
+
+    def sampling_request(self, number: int) -> SACCycle | SACRealtimeCycle:
         attempt = self.state["rounds"][number].get("sampling_attempt", 0)
         directory = (
             self.root
@@ -455,6 +498,22 @@ class _Loop:
             / ("learning" if attempt == 0 else f"learning-{attempt:03d}")
         )
         learner = self.state["latest_learner"]
+        seed = (self.config["seed"] + number + attempt * self.config["rounds"]) % 2**32
+        if self.config["version"] == 3:
+            sampling = self.config["sampling"]
+            return SACRealtimeCycle(
+                Path(learner["directory"]),
+                Path(self.config["recording"]),
+                Path(self.config["task"]),
+                Path(self.config["reward"]),
+                directory,
+                runtime=_sampling_runtime(sampling),
+                seconds_per_attempt=sampling["seconds"],
+                max_updates_per_attempt=sampling["max_updates"],
+                cycles=1,
+                seed=seed,
+                expected_checkpoint_sha256=learner["sha256"],
+            )
         return SACCycle(
             Path(learner["directory"]),
             Path(self.config["recording"]),
@@ -463,7 +522,7 @@ class _Loop:
             directory,
             cycles=1,
             steps_per_attempt=self.config["steps_per_attempt"],
-            seed=(self.config["seed"] + number + attempt * self.config["rounds"]) % 2**32,
+            seed=seed,
             expected_checkpoint_sha256=learner["sha256"],
         )
 
@@ -521,6 +580,7 @@ class _Loop:
             a.get("eligible_transitions", 0) for a in summary["attempts"]
         )
         row["learner_updates"] = sum(a.get("learner_updates", 0) for a in summary["attempts"])
+        row["update_budget"] = self.update_budget(row)
         self.state["eligible_transitions"] += row["eligible_transitions"]
         self.state["learner_updates"] += row["learner_updates"]
         if summary.get("latest_candidate"):
@@ -601,11 +661,20 @@ class _Loop:
         )
         if source is None:
             return False
-        summary = run_experiment(
-            request,
-            sac_environment=SamplingLease(source, self.save),
-            sac_stop_requested=lambda _: self.stopped(),
-        ).summary["sac_cycle"]
+        if isinstance(request, SACRealtimeCycle):
+            summary = run_experiment(
+                request,
+                sac_realtime_environment=RealtimeSamplingLease(
+                    cast(SACRealtimeEnvironment, source), self.save
+                ),
+                sac_stop_requested=lambda _: self.stopped(),
+            ).summary["sac_cycle"]
+        else:
+            summary = run_experiment(
+                request,
+                sac_environment=SamplingLease(cast(SACEnvironment, source), self.save),
+                sac_stop_requested=lambda _: self.stopped(),
+            ).summary["sac_cycle"]
         self.accept_sampling(row, request.output_dir, summary)
         self.save("learned")
         if not summary["resources_released"] or summary["stop_reason"] != "budget_completed":
@@ -631,7 +700,7 @@ class _Loop:
         )
         progress = retained_update_progress(request, parent, row.get("update_segments", []))
         if (
-            progress.earned != row["eligible_transitions"]
+            progress.earned != self.update_budget(row)
             or progress.completed != row["learner_updates"]
             or progress.learner["sha256"] != row["candidate_sha256"]
         ):
@@ -1078,7 +1147,7 @@ class _Loop:
             if self.stopped():
                 self.state["stop_reason"] = self.stopping_reason()
                 return
-            if row["learner_updates"] < row["eligible_transitions"]:
+            if row["learner_updates"] < self.update_budget(row):
                 if not self.resume_updates(number, row):
                     return
             binding = row.get("candidate_evaluation")

@@ -9,7 +9,7 @@ from typing import Any
 
 from fh5.collection_store import read_bounded
 from fh5.learning_recovery import completed_sampling
-from fh5.sac_cycle import SACCycle
+from fh5.sac_cycle import SACCycle, SACRealtimeCycle
 from fh5.sac_learning import validate_sac_candidate
 
 
@@ -21,13 +21,15 @@ class UpdateProgress:
 
 
 def retained_update_progress(
-    request: SACCycle, parent: dict[str, Any], segments: list[dict[str, Any]]
+    request: SACCycle | SACRealtimeCycle, parent: dict[str, Any], segments: list[dict[str, Any]]
 ) -> UpdateProgress:
     if len(segments) > 10:
         raise ValueError("Learning round exceeds 10 retained update continuations")
     summary, learner = completed_sampling(request, parent, allow_stopped_updates=True)
     attempt = summary["attempts"][0]
     earned, completed = attempt["eligible_transitions"], attempt["learner_updates"]
+    if isinstance(request, SACRealtimeCycle):
+        earned = min(earned, request.max_updates_per_attempt)
     for number, segment in enumerate(segments):
         path = request.output_dir.parent / f"updates-{number:03d}"
         if Path(segment["directory"]) != path or completed >= earned:

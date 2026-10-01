@@ -4,12 +4,14 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
 from fh5.collection_store import atomic_json, encode, read_bounded
 from fh5.numeric_images import asset
-from fh5.sac_cycle import SACCycle
+from fh5.realtime_numeric_replay import read_realtime_journal, read_realtime_recording
+from fh5.sac_cycle import SACCycle, SACRealtimeCycle
 from fh5.sac_learning import validate_sac_candidate
 from fh5.sampling_evidence import seal_sampling_sources, verify_sampling_sources
 
@@ -51,20 +53,34 @@ def verify_archived_sampling(binding: dict[str, Any]) -> None:
     verify_sampling_sources(json.loads(raw))
 
 
-def _expected_protocol(request: SACCycle) -> dict[str, Any]:
+def _expected_protocol(request: SACCycle | SACRealtimeCycle) -> dict[str, Any]:
     files = (request.recording_config_file, request.task_file, request.reward_file)
-    return {
+    result = {
         "source_kind": "synthetic",
         "cycles": 1,
-        "steps_per_attempt": request.steps_per_attempt,
+        **(
+            {
+                "runtime": asdict(request.runtime),
+                "seconds_per_attempt": request.seconds_per_attempt,
+                "max_updates_per_attempt": request.max_updates_per_attempt,
+            }
+            if isinstance(request, SACRealtimeCycle)
+            else {"steps_per_attempt": request.steps_per_attempt}
+        ),
         "seed": request.seed,
         "update_ratio": "at most one critic update per newly accepted transition",
         "protocol_files": {str(path): _sha(path, 1024**2) for path in files},
     }
+    canonical: dict[str, Any] = json.loads(encode(result))
+    return canonical  # Match the saved JSON tuple/list representation.
 
 
 def retryable_sampling(
-    request: SACCycle, parent: dict[str, Any], expected_summary: str, *, pending: bool = False
+    request: SACCycle | SACRealtimeCycle,
+    parent: dict[str, Any],
+    expected_summary: str,
+    *,
+    pending: bool = False,
 ) -> bool:
     """Only released, sealed failures without any learner output may be resampled."""
     root = request.output_dir
@@ -121,6 +137,7 @@ def retryable_sampling(
             None,
             trace_required=count > 0 or (attempt_dir / "trace.json").exists(),
             review_binding_required=pending,
+            asynchronous=request if isinstance(request, SACRealtimeCycle) else None,
         )
     return True
 
@@ -136,6 +153,7 @@ def _require_originals(
     *,
     trace_required: bool = True,
     review_binding_required: bool = False,
+    asynchronous: SACRealtimeCycle | None = None,
 ) -> None:
     def require(path: Path, digest: str | None = None) -> None:
         stored = inventory.get(str(path.resolve()))
@@ -149,10 +167,39 @@ def _require_originals(
         ("recording/packets.jsonl", "packets"),
         ("recording/session.json", "session"),
     ):
-        if name == "trace.json" and not trace_required:
+        if name == "trace.json" and (not trace_required or asynchronous is not None):
             continue
         require(root / name, sources[key] if sources is not None else None)
-    if trace_required:
+    if asynchronous is not None:
+        execution = root / "execution"
+        require(execution / "realtime-manifest.json", sources["execution"] if sources else None)
+        require(execution / "report.json")
+        report = read_realtime_recording(execution)
+        runtime = json.loads(
+            encode(
+                {**asdict(asynchronous.runtime), "pixels": asynchronous.runtime.pixels.metadata()}
+            )
+        )
+        if (
+            report["evidence_kind"] != "synthetic"
+            or report["actor_kind"] != "frozen-numeric-sac-sampling-v1"
+            or report["configuration"] != runtime
+            or report["model"].get("sac_manifest_sha256") != asynchronous.expected_checkpoint_sha256
+            or report["model"].get("noise", {}).get("seed") != asynchronous.seed
+            or report["resources_released"] is not True
+        ):
+            raise ValueError("Pending async execution differs from its sampling contract")
+        require(asset(execution, report["journal"]["path"]), report["journal"]["sha256"])
+        read_realtime_journal(execution, report, time_limit_s=asynchronous.seconds_per_attempt)
+        for decision in report["decisions"]:
+            archived = decision.get("archive")
+            if archived is None:
+                continue
+            path = asset(execution, archived["path"])
+            require(path, archived["sha256"])
+            for frame in json.loads(read_bounded(path, 4 * 1024**2))["frames"]:
+                require(asset(execution, frame["path"]), frame["sha256"])
+    elif trace_required:
         trace = json.loads(read_bounded(root / "trace.json", 32 * 1024**2))
         for observation in trace["observations"]:
             for frame in observation["frames"]:
@@ -185,7 +232,10 @@ def _require_originals(
 
 
 def completed_sampling(
-    request: SACCycle, parent: dict[str, Any], *, allow_stopped_updates: bool = False
+    request: SACCycle | SACRealtimeCycle,
+    parent: dict[str, Any],
+    *,
+    allow_stopped_updates: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Authenticate a sealed single attempt and its complete learner snapshot."""
     root = request.output_dir
@@ -227,13 +277,22 @@ def completed_sampling(
     originals = {
         "packets": root / "attempt-000/recording/packets.jsonl",
         "session": root / "attempt-000/recording/session.json",
-        "trace": root / "attempt-000/trace.json",
+        **(
+            {"execution": root / "attempt-000/execution/realtime-manifest.json"}
+            if isinstance(request, SACRealtimeCycle)
+            else {"trace": root / "attempt-000/trace.json"}
+        ),
         "task": request.task_file,
         "reward": request.reward_file,
     }
     if any(source_hashes[key] != _sha(path, 256 * 1024**2) for key, path in originals.items()):
         raise ValueError("Pending sampling replay differs from its original evidence")
-    _require_originals(root / "attempt-000", attempt["source_assets"], source_hashes)
+    _require_originals(
+        root / "attempt-000",
+        attempt["source_assets"],
+        source_hashes,
+        asynchronous=request if isinstance(request, SACRealtimeCycle) else None,
+    )
     candidate = root / "candidate-000"
     manifest_sha = _sha(candidate / "policy.json")
     if attempt["candidate_sha256"] != manifest_sha:
@@ -246,19 +305,29 @@ def completed_sampling(
     manifest = json.loads(read_bounded(candidate / "policy.json", 4 * 1024**2))
     report = json.loads(read_bounded(candidate / "training-report.json", 128 * 1024**2))
     count, updates = attempt["eligible_transitions"], attempt["learner_updates"]
+    maximum = (
+        int(request.seconds_per_attempt * request.runtime.decision_hz) + 1
+        if isinstance(request, SACRealtimeCycle)
+        else request.steps_per_attempt
+    )
+    budget = (
+        min(count, request.max_updates_per_attempt)
+        if isinstance(request, SACRealtimeCycle)
+        else count
+    )
     if (
         type(count) is not int
-        or not 1 <= count <= request.steps_per_attempt
+        or not 1 <= count <= maximum
         or count != len(replay["transitions"])
         or type(updates) is not int
-        or not 0 <= updates <= count
+        or not 0 <= updates <= budget
         or (
-            (updates != count or report["stop_reason"] != "budget_completed")
+            (updates != budget or report["stop_reason"] != "budget_completed")
             if summary["stop_reason"] == "budget_completed"
-            else (updates >= count or report["stop_reason"] != "stop_requested")
+            else (updates >= budget or report["stop_reason"] != "stop_requested")
         )
         or report["steps_completed"] != updates
-        or report["steps_requested"] != count
+        or report["steps_requested"] != budget
         or learner["total_steps"] != parent["total_steps"] + updates
         or attempt["total_steps"] != learner["total_steps"]
         or manifest["continuation"]

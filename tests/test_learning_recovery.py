@@ -32,6 +32,8 @@ def interrupt_selection(
         "stopped_evaluation",
         "failed_sampling",
         "stopped_updates",
+        "async_sampling",
+        "async_stopped_updates",
     }
     repository = Path(__file__).resolve().parents[1]
     environment = dict(os.environ)
@@ -84,7 +86,11 @@ def open_file(path, *args, **kwargs):
         os._exit(73)
     return original_open(path, *args, **kwargs)
 Path.open = open_file
-backend = SharedBackend(Path(sys.argv[3]))
+if sys.argv[5].startswith('async_'):
+    from test_learning_realtime import AsyncBackend
+    backend = AsyncBackend(Path(sys.argv[3]))
+else:
+    backend = SharedBackend(Path(sys.argv[3]))
 if sys.argv[5] == 'failed_sampling':
     original_sampling = backend.sampling
     def sampling(identity):
@@ -145,7 +151,7 @@ if sys.argv[5] == 'large_trace':
     backend.sampling = sampling
 from test_learning_update_resume import stop_on_creation
 guard = (stop_on_creation(root / 'round-000/learning/candidate-000', root / 'stop.request')
-         if sys.argv[5] == 'stopped_updates' else nullcontext())
+         if sys.argv[5] in ('stopped_updates', 'async_stopped_updates') else nullcontext())
 with guard:
     run_experiment(LearningLoop(Path(sys.argv[1]), root),
                    learning_environment=backend)
