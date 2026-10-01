@@ -415,6 +415,7 @@ class _Loop:
             if row.get("update_segments"):
                 self.update_progress(number, row)
         self.reconcile_sampling()
+        self.reconcile_updates()
         self.reconcile_evaluation()
         self.reconcile_commit()
         self.verify()
@@ -632,6 +633,66 @@ class _Loop:
             raise ValueError("Stopped updates differ from their retained progress")
         return progress
 
+    def accept_updates(
+        self,
+        number: int,
+        row: dict[str, Any],
+        progress: UpdateProgress,
+        output: Path,
+        kind: Literal["resumed_updates", "sealed_updates"],
+    ) -> None:
+        segments = row.get("update_segments", [])
+        learner = _learner(output, _sha(output / "policy.json"))
+        learned = json.loads(read_bounded(output / "training-report.json", 128 * 1024**2))
+        proposed = {
+            **row,
+            "sampling_parent": dict(row.get("sampling_parent", self.state["explorer"])),
+            "update_segments": [
+                *segments,
+                {"directory": str(output), "sha256": learner["sha256"]},
+            ],
+            "learner_updates": row["learner_updates"] + learned["steps_completed"],
+            "candidate_sha256": learner["sha256"],
+        }
+        checked = self.update_progress(number, proposed)
+        row.update(proposed)
+        self.state["learner_updates"] += checked.completed - progress.completed
+        self.state["latest_learner"] = checked.learner
+        self.state.setdefault("recoveries", []).append(
+            {
+                "kind": kind,
+                "round": number,
+                "completed": checked.completed - progress.completed,
+                "remaining": checked.earned - checked.completed,
+                "directory": str(output),
+            }
+        )
+
+    def reconcile_updates(self) -> None:
+        rows = self.state["rounds"]
+        if not rows or rows[-1]["complete"]:
+            return
+        row, number = rows[-1], len(rows) - 1
+        output = (
+            self.root / f"round-{number:03d}" / f"updates-{len(row.get('update_segments', [])):03d}"
+        )
+        if not output.exists():
+            return
+        phase = self.state["phase"]
+        if phase == "stopped" and len(self.state["stages"]) >= 2:
+            phase = self.state["stages"][-2]["phase"]
+        if (
+            phase != "resuming_updates"
+            or self.state["rounds_completed"] != number
+            or not all(prior["complete"] for prior in rows[:-1])
+            or not self.state["child_resources_released"]
+        ):
+            raise ValueError("Pending updates are not bound to an interrupted continuation")
+        progress = self.update_progress(number, row)
+        if progress.learner != self.state["latest_learner"]:
+            raise ValueError("Pending updates differ from the current learner")
+        self.accept_updates(number, row, progress, output, "sealed_updates")
+
     def resume_updates(self, number: int, row: dict[str, Any]) -> bool:
         from fh5.experiment import run_experiment
 
@@ -654,30 +715,7 @@ class _Loop:
             ),
             sac_stop_requested=lambda _: self.stopped(),
         ).summary["sac_learning"]
-        learner = _learner(output, _sha(output / "policy.json"))
-        proposed = {
-            **row,
-            "sampling_parent": dict(row.get("sampling_parent", self.state["explorer"])),
-            "update_segments": [
-                *segments,
-                {"directory": str(output), "sha256": learner["sha256"]},
-            ],
-            "learner_updates": row["learner_updates"] + learned["steps_completed"],
-            "candidate_sha256": learner["sha256"],
-        }
-        checked = self.update_progress(number, proposed)
-        row.update(proposed)
-        self.state["learner_updates"] += checked.completed - progress.completed
-        self.state["latest_learner"] = checked.learner
-        self.state.setdefault("recoveries", []).append(
-            {
-                "kind": "resumed_updates",
-                "round": number,
-                "completed": checked.completed - progress.completed,
-                "remaining": checked.earned - checked.completed,
-                "directory": str(output),
-            }
-        )
+        self.accept_updates(number, row, progress, output, "resumed_updates")
         self.save("learned")
         if learned["stop_reason"] == "stop_requested" or self.stopped():
             self.state["stop_reason"] = self.stopping_reason() or "stop_requested"
