@@ -65,6 +65,8 @@ uv run --locked fh5 realtime-replay runs/shadow-10hz --model runs/t35-temporal-2
 
 冻结 SAC 评估通过显式成功命令上下文使用同一运行线程和旁路，说明见[评估版本 2](evaluation.md#冻结-sac-的版本-2-批次)。首次就绪发送中立后才进行模型决策；推理期间命令改变会丢弃旧结果。该模式仅支持合成执行器，BC 和只读影子的原语义保持。`RealtimeReplay` 的 `require_command_context=True` 提供对应的确定性时序故障验证。
 
+若距离上次成功发送的间隔太短，按冻结 SAC 变化率计算并量化后的动作范围可能只有一个刻度。监督器在提交推理前记录 `skip_action_support`，保留实际命令与时间上下文；不发送新命令、不延长原动作有效期，也不虚增时间间隔或放宽变化率。后续满足条件的决策可恢复，持续缺少有效决策仍按既有看门狗停止。精确回放从冻结边界和真实发送历史重新核验这类等待，普通推理异常仍隔离。确定性故障回放可同时提供 `command_bounds=ActionBounds(...)`；其执行上限必须与 `RealtimeConfig` 一致。
+
 ## 验证与剩余工作
 
 `uv run --locked pytest tests/test_realtime.py` 覆盖 5%/10% 源帧丢失、100 ms 缺图恢复、300 ms 断图锁止、重复旧帧、源槽复用、采集边界、迟到/挂起推理、部分发送失败，以及真实线程下 400 ms 推理暂停、1 秒写盘暂停。

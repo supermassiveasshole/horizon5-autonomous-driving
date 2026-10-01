@@ -2,6 +2,7 @@
 
 import json
 import struct
+import time
 from dataclasses import replace
 
 import pytest
@@ -14,6 +15,77 @@ from fh5.evaluation import EvaluationPrepare, EvaluationReview
 from fh5.experiment import run_experiment
 from fh5.sac_actions import ActionBounds
 from fh5.sac_learning import SACPolicyReplay, SACTrain
+
+
+@pytest.mark.parametrize("forged", ["context", "executable_support"])
+def test_sac_wait_is_replayable_but_an_invented_wait_context_is_quarantined(tmp_path, forged):
+    from fh5.numeric_images import PixelContract
+    from fh5.realtime import RealtimeConfig, RealtimeNumericReplay, RealtimeRun
+    from fh5.sac_evaluation_actor import SACEvaluationActor
+
+    # At this rate the steering support needs >49 ms. Warmup's 50 ms is valid;
+    # a send's 15 ms latency leaves too little time at the following 20 Hz tick.
+    bounds = ActionBounds(max_steer=0.4, max_throttle=0.25, max_brake=0.5, steer_rate=0.00031)
+    replay = warm_start(tmp_path, bounds=bounds)
+    model = tmp_path / "candidate"
+    run_experiment(SACTrain(tmp_path / "warm", replay, model, steps=1))
+    pixels = PixelContract(size=(64, 36))
+
+    def factory():
+        return SACEvaluationActor(model, pixels, sha(model / "policy.json"))
+
+    class SlowSend(PacketGame):
+        def send(self, command):
+            time.sleep(0.015)
+            super().send(command)
+
+    root = tmp_path / "execution"
+    original = run_experiment(
+        RealtimeRun(root, RealtimeConfig(pixels=pixels, reference_count=1), seconds=0.7),
+        realtime_environment=SlowSend(),
+        numeric_actor_factory=factory,
+    ).summary["realtime"]
+    waits = [d for d in original["decisions"] if d["status"] == "skip_action_support"]
+    assert waits and original["stop_reason"] == "time_limit"
+    assert any(
+        d["status"] == "accepted" and d["index"] > waits[0]["index"] for d in original["decisions"]
+    )
+    assert not any(d.get("error") for d in original["decisions"])
+    verified = run_experiment(
+        RealtimeNumericReplay(root, tmp_path / "verified.html"), numeric_actor=factory()
+    ).summary["realtime_numeric_replay"]
+    assert verified["verified"] and verified["verified_predictions"] > 0
+    assert verified["verified_action_waits"] == len(waits)
+
+    # Rewrite both copies and hashes: independent replay must check the wait,
+    # not merely trust a self-consistent journal/report pair.
+    report = json.loads((root / "report.json").read_bytes())
+    row = next(d for d in report["decisions"] if d["status"] == "skip_action_support")
+    if forged == "context":
+        row["command_context"]["returned_ns"] -= 100_000_000
+    else:
+        executable = next(d for d in report["decisions"] if d["status"] == "accepted")
+        row["decision_ns"] = executable["decision_ns"]
+        row["command_context"] = executable["command_context"]
+    journal = root / report["journal"]["path"]
+    events = [json.loads(line) for line in journal.read_bytes().splitlines()]
+    event = next(
+        e
+        for e in events
+        if e["kind"] == "decision_skipped" and e["data"]["decision_id"] == row["decision_id"]
+    )
+    event["data"] = row
+    journal.write_text("".join(json.dumps(e) + "\n" for e in events))
+    report["journal"]["sha256"] = sha(journal)
+    (root / "report.json").write_text(json.dumps(report))
+    (root / "realtime-manifest.json").write_text(
+        json.dumps({"version": 1, "report_sha256": sha(root / "report.json")})
+    )
+    invalid = run_experiment(
+        RealtimeNumericReplay(root, tmp_path / "invalid.html"), numeric_actor=factory()
+    ).summary["realtime_numeric_replay"]
+    assert invalid["verified"] is False
+    assert "support" in str(invalid["errors"]) or "context" in str(invalid["errors"])
 
 
 class ResponsiveGame(PacketGame):

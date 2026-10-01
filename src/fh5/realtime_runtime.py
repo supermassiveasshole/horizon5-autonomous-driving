@@ -16,6 +16,7 @@ from fh5.realtime_journal import RealtimeJournal
 from fh5.realtime_report import write_realtime_result
 from fh5.realtime_state import DecisionState
 from fh5.realtime_worker import InferenceWorker
+from fh5.sac_actions import ActionBounds
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -114,6 +115,8 @@ def run_realtime(
             state.stop(time.perf_counter_ns(), "model_startup_failed")
         else:
             state.require_command_context = bool(worker.manifest.get("command_context"))
+            if state.require_command_context:
+                state.command_bounds = ActionBounds(**worker.manifest["bounds"])
             if state.require_command_context and environment.source_kind != "synthetic":
                 raise ValueError(
                     "Command-conditioned evaluation currently requires synthetic sends"

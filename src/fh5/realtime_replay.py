@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import heapq
+from dataclasses import asdict
 from typing import TYPE_CHECKING, Any
 
 from fh5.realtime import RealtimeReplay
@@ -19,6 +20,7 @@ def replay_realtime(request: RealtimeReplay) -> RunResult:
         request.config,
         lambda command: None,
         require_command_context=request.require_command_context,
+        command_bounds=request.command_bounds,
     )
     points = {p.at_ns: p for p in request.inputs}
     replies = iter(request.replies)
@@ -56,6 +58,7 @@ def replay_realtime(request: RealtimeReplay) -> RunResult:
     result: dict[str, Any] = {
         "version": 1,
         "require_command_context": request.require_command_context,
+        "command_bounds": asdict(request.command_bounds) if request.command_bounds else None,
         "evidence_kind": "synthetic_deadline_replay",
         "commands_sent_to_game": False,
         "decisions": state.decisions,

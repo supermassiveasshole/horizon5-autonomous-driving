@@ -20,6 +20,8 @@ from fh5.numeric_images import (
 )
 from fh5.numeric_recording import numeric_features, read_numeric_frame
 from fh5.realtime import MAX_REALTIME_REPORT_BYTES, RealtimeNumericReplay
+from fh5.sac_actions import ActionBounds, ActionSupportUnavailable
+from fh5.sac_replay import command_action
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -152,6 +154,51 @@ def _valid_prediction(value: Any) -> bool:
     )
 
 
+def _verify_action_wait(row: dict[str, Any], report: dict[str, Any]) -> None:
+    """Recompute a supervisor wait from the frozen bounds and actual send history."""
+    if (
+        report["model"].get("command_context") != "successful-send-return-proxy-v1"
+        or row.get("prediction") is not None
+        or any(
+            key in row for key in ("actor", "error", "inference_returned_ns", "worker_started_ns")
+        )
+        or any(c.get("decision_id") == row["decision_id"] for c in report["commands"])
+    ):
+        raise ValueError("Invalid action support wait outcome")
+    prior = [
+        (i, c)
+        for i, c in enumerate(report["commands"])
+        if c["status"] == "sent" and c["returned_ns"] < row["decision_ns"]
+    ]
+    if not prior:
+        raise ValueError("Action support wait lacks prior command context")
+    index, command = prior[-1]
+    context = {
+        "version": 1,
+        "command_index": index,
+        **{key: command[key] for key in ("sent", "issued_ns", "returned_ns", "owner")},
+    }
+    if (
+        row.get("command_context") != context
+        or command["owner"] not in ("initial_neutral", "policy", "lease_expiry")
+        or not 0 <= command["issued_ns"] <= command["returned_ns"]
+    ):
+        raise ValueError("Action support wait differs from successful command context")
+    bounds = ActionBounds(**report["model"]["bounds"])
+    if any(
+        getattr(bounds, key) != report["configuration"][key]
+        for key in ("max_steer", "max_throttle", "max_brake")
+    ):
+        raise ValueError("Action support wait bounds differ from execution contract")
+    try:
+        bounds.interval(
+            command_action(command["sent"]), (row["decision_ns"] - command["returned_ns"]) / 1e9
+        )
+    except ActionSupportUnavailable:
+        return
+    raise ValueError("Action support wait has executable policy support")
+
+
 def _decision(
     root: Path, row: dict[str, Any], contract: PixelContract, actor: DecisionActor, tolerance: float
 ) -> dict[str, Any]:
@@ -225,6 +272,7 @@ def replay_realtime_numeric(request: RealtimeNumericReplay, actor: DecisionActor
         "errors": [],
         "checks": [],
         "verified_predictions": 0,
+        "verified_action_waits": 0,
         "decisions": [],
         "commands": [],
         "tolerance": request.tolerance,
@@ -254,9 +302,13 @@ def replay_realtime_numeric(request: RealtimeNumericReplay, actor: DecisionActor
         if actor.manifest.get("numeric_contract", contract.metadata()) != contract.metadata():
             raise ValueError("Frozen replay pixel contract differs")
         for row in report["decisions"]:
-            if "actor" not in row:
-                continue
             try:
+                if row["status"] == "skip_action_support":
+                    _verify_action_wait(row, report)
+                    summary["verified_action_waits"] += 1
+                    continue
+                if "actor" not in row:
+                    continue
                 summary["checks"].append(
                     _decision(request.recording_dir, row, contract, actor, request.tolerance)
                 )

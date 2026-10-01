@@ -18,9 +18,41 @@ from fh5.realtime import (
     SafetyState,
     TimelineInput,
 )
+from fh5.sac_actions import ActionBounds
 
 BASE = 1_000_000_000
 MS = 1_000_000
+
+
+@pytest.mark.parametrize("resume", [False, True])
+def test_submillisecond_command_gap_waits_without_renewing_and_resumes(tmp_path, resume):
+    # A real failed evaluation had only 227900 ns after the last sent action.
+    # 4 units/second * that gap cannot span even one 8-bit trigger step.
+    points = [sample(250), sample(300), sample(350), sample(400), sample(450), sample(500)]
+    points[2] = replace(points[2], at_ns=BASE + 350 * MS + 227900)
+    if not resume:
+        points[3:] = [replace(p, observation=None) for p in points[3:]]
+    result = run_experiment(
+        RealtimeReplay(
+            tmp_path / "short-gap",
+            RealtimeConfig(pixels=PixelContract(size=(2, 1))),
+            tuple(points),
+            (InferenceReply(50, (2137 / 32767, 18 / 255)), InferenceReply(10)),
+            require_command_context=True,
+            command_bounds=ActionBounds(max_steer=0.4, max_throttle=0.25, max_brake=0.5),
+        )
+    ).summary["realtime"]
+    assert result["decisions"][2]["status"] == "skip_action_support"
+    assert "actor" not in result["decisions"][2]
+    assert result["decisions"][2]["command_context"]["returned_ns"] == BASE + 350 * MS
+    assert result["decisions"][3]["status"] == ("accepted" if resume else "skip_history")
+    assert [c["decision_id"] for c in result["commands"] if c["owner"] == "policy"] == (
+        ["d1", "d3"] if resume else ["d1"]
+    )
+    assert next(c for c in result["commands"] if c["owner"] == "lease_expiry")["issued_ns"] == (
+        BASE + (550 if resume else 450) * MS
+    )
+    assert result["stop_reason"] == "time_limit"
 
 
 def observation(ms, epoch="e1"):

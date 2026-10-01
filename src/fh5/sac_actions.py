@@ -4,6 +4,10 @@ from dataclasses import asdict, dataclass
 from typing import Any
 
 
+class ActionSupportUnavailable(ValueError):
+    """Current command/time has no nondegenerate policy support; wait under the lease."""
+
+
 @dataclass(frozen=True)
 class ActionBounds:
     max_steer: float = 0.5
@@ -27,14 +31,16 @@ class ActionBounds:
             lows[i] = max(lows[i], previous[i] - rate * elapsed_s)
             highs[i] = min(highs[i], previous[i] + rate * elapsed_s)
         if any(hi - lo <= 1e-8 for lo, hi in zip(lows, highs)):
-            raise ValueError("Degenerate SAC support requires a supervisor boundary")
+            raise ActionSupportUnavailable("Degenerate SAC support requires a supervisor boundary")
         # Match the sender's clamp-then-round convention. Configuration bounds
         # are before quantization; their actual command endpoints may differ
         # by half a grid unit, e.g. .5 -> 16384 / 32767 for steering.
         lows = [round(v * scale) / scale for v, scale in zip(lows, (32767, 255))]
         highs = [round(v * scale) / scale for v, scale in zip(highs, (32767, 255))]
         if any(hi - lo <= 1e-8 for lo, hi in zip(lows, highs)):
-            raise ValueError("Degenerate quantized SAC support requires a supervisor boundary")
+            raise ActionSupportUnavailable(
+                "Degenerate quantized SAC support requires a supervisor boundary"
+            )
         return lows, highs
 
     def context(self, previous: list[float], elapsed_s: float) -> list[float]:

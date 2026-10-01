@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from fh5.numeric_images import NumericFrame, PixelContract
+from fh5.sac_actions import ActionBounds
 
 if TYPE_CHECKING:
     from fh5.control import Command
@@ -129,6 +130,7 @@ class RealtimeReplay:
     inputs: tuple[TimelineInput, ...]
     replies: tuple[InferenceReply, ...]
     require_command_context: bool = False
+    command_bounds: ActionBounds | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -138,6 +140,16 @@ class RealtimeReplay:
             or self.inputs[-1].at_ns - self.inputs[0].at_ns > 600_000_000_000
             or len(self.replies) > 12_000
             or type(self.require_command_context) is not bool
+            or (
+                self.command_bounds is not None
+                and (
+                    not self.require_command_context
+                    or any(
+                        getattr(self.command_bounds, key) != getattr(self.config, key)
+                        for key in ("max_steer", "max_throttle", "max_brake")
+                    )
+                )
+            )
         ):
             raise ValueError("Replay requires a bounded forward timeline")
 

@@ -11,6 +11,7 @@ from typing import Any
 from fh5.control import Command
 from fh5.numeric_images import validate_frame_history
 from fh5.realtime import RealtimeConfig, RealtimeObservation, SafetyState
+from fh5.sac_actions import ActionBounds, ActionSupportUnavailable
 
 NEUTRAL = Command(0, 0, 0)
 MS = 1_000_000
@@ -35,11 +36,13 @@ class DecisionState:
         simulated_history: bool = True,
         notify: Callable[[str, Any], None] | None = None,
         require_command_context: bool = False,
+        command_bounds: ActionBounds | None = None,
     ) -> None:
         self.config, self.send = config, send
         self.clock, self.simulated_history = clock, simulated_history
         self.notify = notify or (lambda kind, row: None)
         self.require_command_context = require_command_context
+        self.command_bounds = command_bounds
         self.safety: SafetyState | None = None
         self.decisions: list[dict[str, Any]] = []
         self.commands: list[dict[str, Any]] = []
@@ -315,6 +318,19 @@ class DecisionState:
         ):
             row["status"] = "skip_command_context_time"
         else:
+            context = self.command_context() if self.require_command_context else None
+            if context is not None and self.command_bounds is not None:
+                sent = context["sent"]
+                previous = [
+                    sent["steer_i16"] / 32767,
+                    (sent["throttle_u8"] - sent["brake_u8"]) / 255,
+                ]
+                try:
+                    self.command_bounds.interval(previous, (now - context["returned_ns"]) / 1e9)
+                except ActionSupportUnavailable:
+                    row.update(status="skip_action_support", command_context=context)
+                    self.notify("decision_skipped", dict(row))
+                    return None
             actor = self._actor(now, observation)
             row.update(
                 epoch=observation.epoch,
@@ -323,8 +339,8 @@ class DecisionState:
                 safety_at_decision=asdict(self.safety) if self.safety else None,
                 telemetry_received_ns=observation.telemetry_received_ns,
             )
-            if self.require_command_context:
-                row["command_context"] = self.command_context()
+            if context is not None:
+                row["command_context"] = context
             work = Work(row, observation, actor)
             self.pending = work
             self.submitted_source = observation.epoch, observation.frames[-1].source_time_ns
