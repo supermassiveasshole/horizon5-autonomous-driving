@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import importlib
 import json
 import math
@@ -20,6 +19,7 @@ from fh5.collection_store import encode, read_bounded, write_file
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import PixelContract
+from fh5.presentation import optional_report
 from fh5.sac import _q_heads, _values
 from fh5.sac_actions import ActionBounds
 from fh5.sac_actor import FrozenSAC
@@ -682,22 +682,23 @@ def _train(
     report_bytes = encode(summary)
     metadata["training_report_sha256"] = hashlib.sha256(report_bytes).hexdigest()
     metadata["learner_state_sha256"] = summary["learner_state_sha256"]
-    report = output / "report.html"
-    report.write_text(
-        '<!doctype html><meta charset="utf-8"><h1>SAC 软件更新</h1><pre>'
-        + html.escape(json.dumps(summary, ensure_ascii=False, indent=2))
-        + "</pre>",
-        encoding="utf-8",
-    )
     imitation_evidence(output, imitation)
     publish_checkpoint(torch, output, metadata, state, report_bytes)
+    report = optional_report(
+        output / "report.html", "SAC 软件更新", summary, fallback=output / "training-report.json"
+    )
     return RunResult({}, [], [], {"sac_learning": summary}, report)
 
 
 def run_sac_policy_replay(request: SACPolicyReplay) -> RunResult:
     from fh5.experiment import RunResult
 
-    if request.report_path.exists() or request.report_path.is_symlink():
+    if (
+        request.report_path.exists()
+        or request.report_path.is_symlink()
+        or request.report_path.with_suffix(".json").exists()
+        or request.report_path.with_suffix(".json").is_symlink()
+    ):
         raise FileExistsError(request.report_path)
     if request.report_path.suffix.lower() != ".html":
         raise ValueError("SAC policy replay requires a new HTML report")
@@ -732,12 +733,7 @@ def run_sac_policy_replay(request: SACPolicyReplay) -> RunResult:
             "raw_frame_cache": data.cache_summary(),
         }
     request.report_path.parent.mkdir(parents=True, exist_ok=True)
-    write_file(
-        request.report_path,
-        (
-            '<!doctype html><meta charset="utf-8"><h1>SAC 冻结策略回放</h1><pre>'
-            + html.escape(json.dumps(summary, ensure_ascii=False, indent=2))
-            + "</pre>"
-        ).encode("utf-8"),
-    )
-    return RunResult({}, [], [], {"sac_policy": summary}, request.report_path)
+    diagnostic = request.report_path.with_suffix(".json")
+    write_file(diagnostic, encode(summary))
+    report = optional_report(request.report_path, "SAC 冻结策略回放", summary, fallback=diagnostic)
+    return RunResult({}, [], [], {"sac_policy": summary}, report)

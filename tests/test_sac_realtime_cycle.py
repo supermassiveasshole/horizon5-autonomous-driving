@@ -141,6 +141,34 @@ def test_async_results_reference_originals_without_repeating_frame_diagnostics(
     assert attempt["learner_updates"] == 2
 
 
+def test_cycle_html_failure_keeps_actual_updates_and_sealed_candidate(
+    tmp_path, sac_policy, monkeypatch
+):
+    settings = replace(request(tmp_path, sac_policy), cycles=1)
+    environment = AsyncEnvironment(settings.output_dir)
+    original_open = Path.open
+
+    def failed_display(path, mode="r", *args, **kwargs):
+        if (
+            path.parent == settings.output_dir
+            and path.suffix == ".html"
+            and any(flag in mode for flag in "wx")
+        ):
+            raise OSError("display target unavailable")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", failed_display)
+    outcome = run_experiment(settings, sac_realtime_environment=environment)
+    result = outcome.summary["sac_cycle"]
+    assert result["stop_reason"] == "budget_completed", result
+    assert result["resources_released"] and environment.closed
+    assert result["attempts"][0]["learner_updates"] == 2
+    assert result["latest_candidate"] == "candidate-000"
+    assert result["presentation"]["status"] == "unavailable"
+    assert outcome.report_path == settings.output_dir / "summary.json"
+    assert outcome.report_path.is_file()
+
+
 @pytest.mark.parametrize(
     "change",
     [{"max_steer": 0.3}, {"reference_count": 2}, {"action_offsets_ms": (180, 80, 0)}],

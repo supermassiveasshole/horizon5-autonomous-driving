@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import importlib
 import json
 from collections.abc import Callable
@@ -13,6 +12,7 @@ from typing import TYPE_CHECKING, Any, cast
 
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.learning_runtime import preserve_torch_state
+from fh5.presentation import optional_report
 from fh5.realtime import RealtimeConfig, RealtimeRun
 from fh5.sac_actor import FrozenSAC
 from fh5.sac_learning import SACResume
@@ -309,8 +309,10 @@ def run_sac_cycle(
                         candidate / "experience/replay.json",
                         root / f"reload-{number}.html",
                     )
-                ).summary["sac_policy"]["predictions"]
-                if checked != learned["predictions"]:
+                ).summary["sac_policy"]
+                if "presentation" in checked:
+                    result["reload_presentation"] = checked["presentation"]
+                if checked["predictions"] != learned["predictions"]:
                     raise ValueError("Candidate reload differs from the complete learner snapshot")
                 result["inference_reload_max_error"] = 0
                 checkpoint = candidate
@@ -337,13 +339,10 @@ def run_sac_cycle(
         if not summary["resources_released"] and summary["stop_reason"] == "budget_completed":
             summary["stop_reason"] = "release_fault"
         write_file(root / "summary.json", encode(summary))
-    report = root / "report.html"
-    write_file(
-        report,
-        (
-            '<!doctype html><meta charset="utf-8"><h1>SAC 合成采样与学习循环</h1><pre>'
-            + html.escape(json.dumps(summary, ensure_ascii=False, indent=2))
-            + "</pre>"
-        ).encode("utf-8"),
+    report = optional_report(
+        root / "report.html",
+        "SAC 合成采样与学习循环",
+        summary,
+        fallback=root / "summary.json",
     )
     return RunResult({}, [], [], {"sac_cycle": summary}, report)

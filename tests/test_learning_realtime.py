@@ -79,7 +79,7 @@ class LargeMetadataBackend(AsyncBackend):
                     observation=replace(
                         point.observation,
                         frames=tuple(
-                            replace(frame, frame_id=frame.frame_id + "x" * 180000)
+                            replace(frame, frame_id=frame.frame_id + "x" * 750000)
                             for frame in point.observation.frames
                         ),
                     ),
@@ -90,9 +90,19 @@ class LargeMetadataBackend(AsyncBackend):
         return lease
 
 
-def test_async_loop_samples_learns_evaluates_and_retains_each_round(tmp_path, async_seed):
+def test_async_loop_samples_learns_evaluates_and_retains_each_round(
+    tmp_path, async_seed, monkeypatch
+):
     operation = async_request(tmp_path, async_seed)
     backend = AsyncBackend(async_seed[0])
+    original_open = Path.open
+
+    def unavailable_parent_html(path, mode="r", *args, **kwargs):
+        if path == operation.output_dir / "report.html" and any(flag in mode for flag in "wx"):
+            raise OSError("parent presentation unavailable")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", unavailable_parent_html)
     result = run_experiment(operation, learning_environment=backend).summary["learning_loop"]
     assert result["stop_reason"] == "budget_completed", result
     assert result["rounds_completed"] == 2 and result["learner_updates"] == 4
@@ -105,6 +115,7 @@ def test_async_loop_samples_learns_evaluates_and_retains_each_round(tmp_path, as
     assert result["default"]["sha256"] == async_seed[2]["default"]["model_sha256"]
     assert result["resources_released"] and backend.closed
     assert len(backend.leases) == 4 and all(lease.closed for lease in backend.leases)
+    assert result["presentation"]["status"] == "unavailable"
 
 
 def test_async_stopped_child_recovers_only_its_update_budget_without_resampling(
@@ -241,6 +252,11 @@ def test_large_async_result_can_be_acknowledged_and_resumed(tmp_path, async_seed
     child = root / "round-000/learning"
     execution = child / "attempt-000/execution/report.json"
     assert execution.stat().st_size > 4 * 1024**2  # Cross the old refusal threshold.
+    recorded = json.loads(execution.read_bytes())
+    inputs = [row["archive"] for row in recorded["decisions"] if row.get("archive")]
+    assert inputs and all(
+        (execution.parent / item["path"]).stat().st_size > 4 * 1024**2 for item in inputs
+    )
     assert (child / "summary.json").stat().st_size < execution.stat().st_size
     attempt = json.loads((child / "summary.json").read_bytes())["attempts"][0]
     assert "decisions" not in attempt

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import json
 import math
 import time
@@ -41,6 +40,7 @@ from fh5.learning_recovery import (
 )
 from fh5.learning_updates import UpdateProgress, retained_update_progress
 from fh5.numeric_images import PixelContract
+from fh5.presentation import optional_report
 from fh5.realtime import RealtimeConfig
 from fh5.sac_cycle import SACCycle, SACEnvironment, SACRealtimeCycle, sampling_update_budget
 from fh5.sac_learning import SACResume, validate_sac_candidate
@@ -1246,14 +1246,11 @@ def run_learning_loop(
         if publish:
             loop.state["elapsed_seconds"] = time.monotonic() - began
             loop.save("stopped")
-    report = root / "report.html"
     atomic_json(root / "summary.json", loop.state)
-    report.write_text(
-        (
-            '<!doctype html><meta charset="utf-8"><h1>合成自主学习循环</h1><p>循环运行不等于驾驶能力提升。</p><pre>'
-            + html.escape(json.dumps(loop.state, ensure_ascii=False, indent=2))
-            + "</pre>"
-        ),
-        encoding="utf-8",
+    report = optional_report(
+        root / "report.html",
+        "合成自主学习循环（循环运行不等于驾驶能力提升）",
+        loop.state,
+        fallback=root / "summary.json",
     )
     return RunResult({}, [], [], {"learning_loop": loop.state}, report)

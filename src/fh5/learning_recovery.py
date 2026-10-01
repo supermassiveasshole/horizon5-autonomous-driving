@@ -204,17 +204,19 @@ def _require_originals(
                 continue
             path = asset(execution, archived["path"])
             require(path, archived["sha256"])
-            for frame in json.loads(read_bounded(path, 4 * 1024**2))["frames"]:
+            for frame in read_json(path, expected_sha256=archived["sha256"])["frames"]:
                 require(asset(execution, frame["path"]), frame["sha256"])
     elif trace_required:
-        trace = json.loads(read_bounded(root / "trace.json", 32 * 1024**2))
+        trace = read_json(
+            root / "trace.json", expected_sha256=inventory[str((root / "trace.json").resolve())]
+        )
         for observation in trace["observations"]:
             for frame in observation["frames"]:
                 require(asset(root, frame["path"]), frame["sha256"])
     declaration = root / "sampling-sources.json"
     if review_binding_required or declaration.exists():
         require(declaration)
-        bindings = json.loads(read_bounded(declaration, 4 * 1024**2))
+        bindings = read_json(declaration, expected_sha256=inventory[str(declaration.resolve())])
         if bindings.get("version") != 1 or "review" not in bindings:
             raise ValueError("Pending sampling lacks its original review declaration")
         if bindings["review"] is not None:
@@ -223,7 +225,7 @@ def _require_originals(
             if not path.is_absolute():
                 raise ValueError("Pending sampling review path is not absolute")
             require(path, review["sha256"])
-            proof = json.loads(read_bounded(path, 4 * 1024**2))
+            proof = read_json(path, expected_sha256=review["sha256"])
             for item in proof["items"]:
                 require(asset(path.parent, item["path"]), item["sha256"])
     if sources is not None and sources["review"] is not None:
@@ -233,7 +235,7 @@ def _require_originals(
         # Same bytes at different paths can refer to different relative attachments.
         # Require the attachments of every retained matching original review.
         for path in proofs:
-            proof = json.loads(read_bounded(path, 4 * 1024**2))
+            proof = read_json(path, expected_sha256=sources["review"])
             for item in proof["items"]:
                 require(asset(path.parent, item["path"]), item["sha256"])
 

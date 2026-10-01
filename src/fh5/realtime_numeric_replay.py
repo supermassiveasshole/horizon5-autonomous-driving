@@ -10,7 +10,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fh5.artifact_io import read_json, sha256_file
+from fh5.artifact_io import read_json
 from fh5.numeric_images import (
     DecisionActor,
     NumericDecision,
@@ -34,10 +34,10 @@ def read_realtime_recording(root: Path) -> dict[str, Any]:
     if (
         not isinstance(manifest, dict)
         or manifest.get("version") != 1
-        or sha256_file(path) != manifest.get("report_sha256")
+        or not isinstance(manifest.get("report_sha256"), str)
     ):
         raise ValueError("Real-time report hash mismatch or unsupported manifest")
-    report: dict[str, Any] = read_json(path)
+    report: dict[str, Any] = read_json(path, expected_sha256=manifest["report_sha256"])
     if (
         not isinstance(report, dict)
         or report["version"] != 2
@@ -214,12 +214,14 @@ def read_realtime_decision(
 ) -> NumericDecision:
     """Verify retained input metadata and RGB without loading or running a model."""
     reference = row["archive"]
-    if not reference or row["archive_reason"] is not None:
+    if (
+        not reference
+        or row["archive_reason"] is not None
+        or not isinstance(reference.get("sha256"), str)
+    ):
         raise ValueError("Numerical input was not archived")
     path = asset(root, reference["path"])
-    if sha256_file(path) != reference["sha256"]:
-        raise ValueError("Numerical input metadata hash mismatch")
-    saved = read_json(path)
+    saved = read_json(path, expected_sha256=reference["sha256"])
     for key in (
         "index",
         "decision_id",

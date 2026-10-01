@@ -19,6 +19,7 @@ from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import PixelContract
 from fh5.numeric_recording import read_numeric_frame
+from fh5.presentation import optional_report
 from fh5.sac_actions import ActionBounds
 from fh5.sac_checkpoint import (
     continuation_history,
@@ -440,18 +441,22 @@ def _run(
             "history": history,
             "resume_contract": critic_resume_contract(torch),
         }
-        report = output / "report.html"
+        publish_checkpoint(torch, output, manifest, state, diagnostic_payload)
+        report = optional_report(
+            output / "report.html",
+            "BC 冻结与双 Q 预热",
+            summary,
+            fallback=output / "training-report.json",
+        )
     else:
         report = request.report_path
-    report.parent.mkdir(parents=True, exist_ok=True)
-    write_file(
-        report,
-        (
-            '<!doctype html><meta charset="utf-8"><h1>BC 冻结与双 Q 预热</h1><pre>'
-            + html.escape(json.dumps(summary, ensure_ascii=False, indent=2))
-            + "</pre>"
-        ).encode("utf-8"),
-    )
-    if isinstance(request, SACCriticWarmup):
-        publish_checkpoint(torch, output, manifest, state, diagnostic_payload)
+        report.parent.mkdir(parents=True, exist_ok=True)
+        write_file(
+            report,
+            (
+                '<!doctype html><meta charset="utf-8"><h1>BC 冻结与双 Q 预热</h1><pre>'
+                + html.escape(json.dumps(summary, ensure_ascii=False, indent=2))
+                + "</pre>"
+            ).encode("utf-8"),
+        )
     return RunResult({}, [], [], {"sac": summary}, report)

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import shutil
 import sqlite3
 from collections.abc import Iterable, Iterator, Mapping
 from contextlib import contextmanager
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from fh5.artifact_io import read_json, sha256_file
@@ -40,13 +42,21 @@ def sampling_sources(binding: dict[str, Any]) -> Iterator[Mapping[str, str]]:
         yield binding
         return
     path = Path(binding["path"])
-    if not path.is_absolute() or sha256_file(path) != binding["sha256"]:
+    if not path.is_absolute():
         raise ValueError("Retained sampling source index changed")
-    connection = sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)
-    try:
-        yield _SourceIndex(connection)
-    finally:
-        connection.close()
+    # Query only the verified private snapshot, even if the original is replaced
+    # while recovering. Copy in blocks; no full inventory needs to occupy RAM.
+    with TemporaryDirectory(prefix="fh5-source-index-") as temporary:
+        snapshot = Path(temporary) / "sources.sqlite3"
+        with path.open("rb") as source, snapshot.open("xb") as target:
+            shutil.copyfileobj(source, target)
+        if sha256_file(snapshot) != binding["sha256"]:
+            raise ValueError("Retained sampling source index changed")
+        connection = sqlite3.connect(snapshot.as_uri() + "?mode=ro&immutable=1", uri=True)
+        try:
+            yield _SourceIndex(connection)
+        finally:
+            connection.close()
 
 
 def _inventory(paths: Iterable[Path]) -> dict[str, str]:
