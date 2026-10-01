@@ -20,6 +20,7 @@ from fh5.collection_store import atomic_json, encode, read_bounded, write_file
 from fh5.evaluation import EvaluationPrepare, EvaluationReview, read_evaluation_batch
 from fh5.evaluation_run import EvaluationEnvironment, EvaluationRun
 from fh5.learning_io import EvaluationLease, RejectedLease, SamplingLease
+from fh5.learning_recovery import completed_sampling
 from fh5.sac_cycle import SACCycle, SACEnvironment
 from fh5.sac_learning import validate_sac_candidate
 from fh5.sampling_evidence import verify_sampling_sources
@@ -208,6 +209,7 @@ class _Loop:
                     verify_sampling_sources(attempt.get("source_assets", {}))
             if "candidate_evaluation" in row:
                 _input(self.root, row["candidate_evaluation"]).verify()
+        self.reconcile_sampling()
         self.reconcile_commit()
         self.verify()
         clean_stop = state["phase"] == "stopped"
@@ -237,30 +239,28 @@ class _Loop:
             raise ValueError("Learning store changed outside this loop")
         _input(self.root, self.state["incumbent"]).verify()
 
-    def sample(self, number: int, row: dict[str, Any]) -> bool:
-        from fh5.experiment import run_experiment
-
+    def sampling_request(self, number: int) -> SACCycle:
         directory = self.root / f"round-{number:03d}" / "learning"
         learner = self.state["latest_learner"]
-        row["sampling_checkpoint_sha256"] = learner["sha256"]
-        self.save("opening_sampler")
-        summary = run_experiment(
-            SACCycle(
-                Path(learner["directory"]),
-                Path(self.config["recording"]),
-                Path(self.config["task"]),
-                Path(self.config["reward"]),
-                directory,
-                cycles=1,
-                steps_per_attempt=self.config["steps_per_attempt"],
-                seed=self.config["seed"] + number,
-                expected_checkpoint_sha256=learner["sha256"],
-            ),
-            sac_environment=SamplingLease(
-                self.environment.sampling(f"round-{number:03d}"), self.save
-            ),
-            sac_stop_requested=lambda _: (self.root / "stop.request").exists(),
-        ).summary["sac_cycle"]
+        return SACCycle(
+            Path(learner["directory"]),
+            Path(self.config["recording"]),
+            Path(self.config["task"]),
+            Path(self.config["reward"]),
+            directory,
+            cycles=1,
+            steps_per_attempt=self.config["steps_per_attempt"],
+            seed=self.config["seed"] + number,
+            expected_checkpoint_sha256=learner["sha256"],
+        )
+
+    def accept_sampling(
+        self,
+        row: dict[str, Any],
+        directory: Path,
+        summary: dict[str, Any],
+        verified_learner: dict[str, Any] | None = None,
+    ) -> None:
         row["learning"] = {
             "directory": str(directory),
             "summary_sha256": _sha(directory / "summary.json"),
@@ -275,8 +275,51 @@ class _Loop:
         self.state["learner_updates"] += row["learner_updates"]
         if summary.get("latest_candidate"):
             candidate = directory / summary["latest_candidate"]
-            self.state["latest_learner"] = _learner(candidate, _sha(candidate / "policy.json"))
+            self.state["latest_learner"] = verified_learner or _learner(
+                candidate, _sha(candidate / "policy.json")
+            )
             row["candidate_sha256"] = self.state["latest_learner"]["sha256"]
+
+    def reconcile_sampling(self) -> None:
+        rows = self.state["rounds"]
+        if not rows or rows[-1]["complete"] or "learning" in rows[-1]:
+            return
+        row = rows[-1]
+        request = self.sampling_request(len(rows) - 1)
+        if not request.output_dir.exists():
+            return
+        if (
+            self.state["phase"] != "updating"
+            or self.state["rounds_completed"] != len(rows) - 1
+            or not all(prior["complete"] for prior in rows[:-1])
+            or row.get("sampling_checkpoint_sha256") != self.state["latest_learner"]["sha256"]
+            or not self.state["child_resources_released"]
+        ):
+            raise ValueError("Unsealed sampling cannot be automatically acknowledged")
+        summary, learner = completed_sampling(request, self.state["latest_learner"])
+        self.accept_sampling(row, request.output_dir, summary, learner)
+        self.state.setdefault("recoveries", []).append(
+            {
+                "kind": "sealed_sampling",
+                "round": len(rows) - 1,
+                "candidate_sha256": learner["sha256"],
+            }
+        )
+
+    def sample(self, number: int, row: dict[str, Any]) -> bool:
+        from fh5.experiment import run_experiment
+
+        request = self.sampling_request(number)
+        row["sampling_checkpoint_sha256"] = self.state["latest_learner"]["sha256"]
+        self.save("opening_sampler")
+        summary = run_experiment(
+            request,
+            sac_environment=SamplingLease(
+                self.environment.sampling(f"round-{number:03d}"), self.save
+            ),
+            sac_stop_requested=lambda _: (self.root / "stop.request").exists(),
+        ).summary["sac_cycle"]
+        self.accept_sampling(row, request.output_dir, summary)
         self.save("learned")
         if not summary["resources_released"] or summary["stop_reason"] != "budget_completed":
             self.state["stop_reason"] = (

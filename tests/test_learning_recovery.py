@@ -43,6 +43,8 @@ def replace(source, destination, *args, **kwargs):
             os._exit(73)
         if sys.argv[4] == 'after_commit' and value['phase'] == 'ready' and value['rounds_completed'] == 1:
             os._exit(73)
+        if sys.argv[4] == 'before_learned' and value['phase'] == 'learned':
+            os._exit(73)
     return original_replace(source, destination, *args, **kwargs)
 os.replace = replace
 run_experiment(LearningLoop(Path(sys.argv[1]), root),
@@ -61,6 +63,40 @@ raise SystemExit('Expected filesystem exit was not reached')
         timeout=240,
     )
     assert process.returncode == 73, process.stdout + process.stderr
+
+
+def test_sealed_sampling_is_adopted_after_exit_before_parent_acknowledgement(tmp_path, seeded_loop):
+    request = loop_request(tmp_path, seeded_loop, rounds=1)
+    interrupt_selection(request, seeded_loop[0], "before_learned")
+    state_file = request.output_dir / "state.json"
+    interrupted = json.loads(state_file.read_bytes())
+    assert interrupted["phase"] == "updating"
+    assert interrupted["learner_updates"] == 0
+    assert "candidate_sha256" not in interrupted["rounds"][0]
+    learning = request.output_dir / "round-000/learning"
+    summary = json.loads((learning / "summary.json").read_bytes())
+    candidate = learning / summary["latest_candidate"]
+    candidate_sha = sha(candidate / "policy.json")
+    originals = {path: sha(path) for path in learning.rglob("*") if path.is_file()}
+    backend = SharedBackend(seeded_loop[0])
+    resumed = run_experiment(
+        LearningContinue(request.output_dir, sha(state_file)), learning_environment=backend
+    ).summary["learning_loop"]
+    assert resumed["stop_reason"] == "budget_completed", resumed.get("error")
+    assert resumed["rounds_completed"] == 1
+    assert resumed["learner_updates"] == resumed["eligible_transitions"] == 3
+    assert resumed["latest_learner"]["sha256"] == candidate_sha
+    assert resumed["latest_learner"]["total_steps"] == 33
+    assert resumed["recoveries"][0]["kind"] == "sealed_sampling"
+    assert resumed["interruptions"][0]["phase"] == "updating"
+    assert resumed["interruptions"][0]["stop_reason"] == "unclean_exit"
+    assert len(backend.leases) == 1  # Evaluate the saved model; no new sampling lease.
+    assert backend.closed and resumed["resources_released"]
+    assert all(sha(path) == digest for path, digest in originals.items())
+    history = run_experiment(CandidateHistory(tmp_path / "versions")).summary["candidate_store"]
+    assert len(history["history"]) == 2
+    assert history["explorer"]["model_sha256"] == candidate_sha
+    assert history["default"]["model_sha256"] == seeded_loop[2]["default"]["model_sha256"]
 
 
 def test_committed_candidate_is_reconciled_after_process_exit_without_duplicate_learning(
@@ -130,6 +166,56 @@ def test_prepared_selection_survives_exit_before_the_store_commit(tmp_path, seed
         "stop_reason": "unclean_exit",
         "error": None,
     }
+
+
+def test_unacknowledged_sampling_rejects_missing_or_inconsistent_child_evidence(
+    tmp_path, seeded_loop
+):
+    request = loop_request(tmp_path, seeded_loop, rounds=1)
+    interrupt_selection(request, seeded_loop[0], "before_learned")
+    state = request.output_dir / "state.json"
+    original_state = state.read_bytes()
+    root = request.output_dir / "round-000/learning"
+    summary_path = root / "summary.json"
+    result_path = root / "attempt-000/cycle-result.json"
+    summary = json.loads(summary_path.read_bytes())
+    wrong_count = json.loads(summary_path.read_bytes())
+    wrong_count["attempts"][0]["eligible_transitions"] = 2
+    unreleased = dict(summary, resources_released=False)
+    cases = (
+        {summary_path: None},
+        {summary_path: json.dumps(unreleased).encode()},
+        {root / "protocol.json": b'{"source_kind": "synthetic", "seed": 192}'},
+        {root / "attempt-000/trace.json": b"original action trace changed"},
+        {root / "candidate-000/policy.pt": b"weights changed after child finished"},
+        {
+            summary_path: json.dumps(wrong_count).encode(),
+            result_path: json.dumps(wrong_count["attempts"][0]).encode(),
+        },
+    )
+    for changes in cases:
+        originals = {path: path.read_bytes() for path in changes}
+        backend = SharedBackend(seeded_loop[0])
+        try:
+            for path, raw in changes.items():
+                if raw is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(raw)
+            with pytest.raises((OSError, ValueError)):
+                run_experiment(
+                    LearningContinue(request.output_dir, sha(state)), learning_environment=backend
+                )
+            assert state.read_bytes() == original_state
+            assert not backend.leases and backend.closed
+            history = run_experiment(CandidateHistory(tmp_path / "versions")).summary[
+                "candidate_store"
+            ]
+            assert len(history["history"]) == 1
+            assert history["revision"] == seeded_loop[2]["revision"]
+        finally:
+            for path, raw in originals.items():
+                path.write_bytes(raw)
 
 
 def test_commit_recovery_rejects_changed_assets_and_another_store_successor(tmp_path, seeded_loop):
