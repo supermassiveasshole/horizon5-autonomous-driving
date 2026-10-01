@@ -112,6 +112,7 @@ from fh5.sac_learning import (
     run_sac_policy_replay,
     run_sac_training,
 )
+from fh5.sac_realtime_experience import SACRealtimePrepare, prepare_realtime_experience
 from fh5.sac_replay import SACReplayPrepare, prepare_sac_replay
 from fh5.storage import LearningStoragePlan, plan_learning_storage
 from fh5.temporal_bc import TemporalBCReplay, TemporalBCTrain, run_temporal_bc
@@ -294,6 +295,7 @@ def run_experiment(
     | AttemptReplay
     | RewardReplay
     | SACReplayPrepare
+    | SACRealtimePrepare
     | SACCriticWarmup
     | SACCriticReplay
     | SACCriticResume
@@ -440,6 +442,10 @@ def run_experiment(
         return settle_rewards(request)
     if isinstance(request, SACReplayPrepare):
         return prepare_sac_replay(request)
+    if isinstance(request, SACRealtimePrepare):
+        if numeric_actor is None:
+            raise ValueError("Asynchronous SAC preparation requires the frozen sampling actor")
+        return prepare_realtime_experience(request, numeric_actor)
     if isinstance(request, SACCycle):
         if sac_environment is None:
             raise ValueError("SAC cycle requires an explicit synthetic environment")

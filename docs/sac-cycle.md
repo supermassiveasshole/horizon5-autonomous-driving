@@ -51,9 +51,66 @@ result = run_experiment(
 清单保留算法、种子和 CPU 设备，同一记录可经 `RealtimeNumericReplay` 独立重放。
 不同运行的真实决策时间不同，因此相同种子不保证两次在线运行发出相同命令。
 
-此入口目前保存异步输入、预测和命令证据，**尚未将其转换为可学习 replay，也不自动触发更新**。
-后续须依据实际持有时长、监督器接管、epoch 和独立任务证据构造转移，不能把这些异步记录直接改名为上述同步 trace。
+运行器保存异步输入、预测和命令证据，随后可用下面的实验入口准备学习经验。
 原生资格校验、CUDA 推理及实际驾驶收益仍待后续接入和验证。
+
+## 异步记录进入学习
+
+`SACRealtimePrepare` 接收封存的异步执行目录、同一次尝试的完整遥测、独立任务/奖励与核验依据，
+以及当时实际使用的冻结 actor。先核对原始包流、实际成功发送、因果动作历史和独立数值重放，
+再生成 `sac-numeric-replay-v3`，可交给已有 `SACResume` 继续更新。当前来源必须是 `synthetic`；
+外部模拟输入使用真实 CPU 模型，并不使该记录获得原生游戏资格。
+
+```python
+from fh5.sac_realtime_experience import SACRealtimePrepare
+from fh5.sac_learning import SACResume
+
+prepared = run_experiment(
+    SACRealtimePrepare(
+        recording_dir=Path("runs/attempt/recording"),
+        execution_dir=Path("runs/attempt/execution"),
+        task_file=Path("runs/task.json"),
+        reward_file=Path("configs/reward.json"),
+        output_dir=Path("runs/attempt/experience"),
+        evidence_file=Path("runs/attempt/evidence.json"),
+    ),
+    numeric_actor=frozen_sampling_actor,
+)
+run_experiment(
+    SACResume(
+        checkpoint_dir=Path("runs/sac-initial"),
+        output_dir=Path("runs/sac-next"),
+        steps=2,
+        additions=(
+            (
+                Path("runs/attempt/experience/replay.json"),
+                prepared.summary["sac_replay"]["replay_sha256"],
+            ),
+        ),
+    )
+)
+```
+
+`frozen_sampling_actor` 必须与记录的模型、探索种子及时间特征契约一致。准备操作不会发送输入，
+也不自动训练；示例假定已有至少两条可接纳的新经验和兼容的父检查点。
+
+三种时间分别保留：
+
+- `physical_dt_s`：当前观测到下一观测所对应的遥测游戏时间；奖励和折扣沿用独立逐包结算。
+- `hold_dt_s`：本次成功发送返回至下一条命令发送返回的完整持有时间。
+- `next_action_elapsed_s`：下一次**决策时**距本次成功发送返回的时间，用于下一状态的动作区间和 Q 目标。
+
+不能用完整 hold 代替下一决策时已知的时间：后续推理和发送的延迟在下一决策时尚未发生。
+观测锚点也不伪装成发送完成瞬间的游戏状态；从决策到发送返回期间，上一命令仍在生效。
+记录保留上一命令、决策/发送时间和实际整数动作，发送返回仍只是应用时刻的代理。
+
+缺一份图像存档只排除依赖它的转移，不补相邻帧；监督器归零不作为策略动作，之后完整策略片段仍可使用。
+恢复前后的 epoch 和历史不能相连。独立确认的任务失败保留负回报和终止；没有真实下一观测的尾部排除，
+不把录制结束伪造为零价值终止。独立核验未覆盖时没有合格经验。
+目前完整命令账本必须全部成功发送且记录最终释放；发送失败或账本损坏会拒绝整份准备，尚不抢救其前缀。
+旧同步 replay 与 v3 可按兼容性检查混合，各自时间依据保留，不改写成同一来源。
+
+验证与已知边界见[异步经验接入记录](validation/t10-asynchronous-experience.md)。
 
 ## 新经验和持续学习
 

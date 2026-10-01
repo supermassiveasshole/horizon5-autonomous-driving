@@ -91,7 +91,7 @@ def expand_experience(
                 raise ValueError("Expanded SAC replay exceeds 10000 transitions")
     assert combined is not None
     combined.update(transitions=rows, source_inventory=inventory)
-    if combined["version"] == 2:
+    if combined["version"] in (2, 3):
         combined["source_role"] = "mixed"
     # Recording-specific identities belong to each inventory entry, not to the union.
     combined["source_hashes"] = {

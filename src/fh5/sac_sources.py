@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fh5.sac_checkpoint import source_replays
+from fh5.sac_timing import next_action_elapsed
 
 
 def check_compatible(replay: dict[str, Any], anchor: dict[str, Any]) -> None:
@@ -61,11 +62,15 @@ def _signature(row: dict[str, Any]) -> dict[str, Any]:
 def replay_roles(root: Path, replay: dict[str, Any]) -> list[str]:
     if (
         (replay.get("version"), replay.get("kind"))
-        not in ((1, "sac-numeric-replay-v1"), (2, "sac-numeric-replay-v2"))
+        not in (
+            (1, "sac-numeric-replay-v1"),
+            (2, "sac-numeric-replay-v2"),
+            (3, "sac-numeric-replay-v3"),
+        )
         or replay.get("source_kind") != "synthetic"
         or not isinstance(replay.get("transitions"), list)
         or not 1 <= len(replay["transitions"]) <= 10_000
-        or replay.get("version") == 2
+        or replay.get("version") in (2, 3)
         and not isinstance(replay.get("task_contract"), dict)
     ):
         raise ValueError("SAC requires a bounded prepared synthetic replay")
@@ -74,6 +79,14 @@ def replay_roles(root: Path, replay: dict[str, Any]) -> list[str]:
         raise ValueError("SAC Q learning requires complete transitions, not action-only labels")
     if len({row["id"] for row in replay["transitions"]}) != len(replay["transitions"]):
         raise ValueError("Duplicate SAC transition")
+    for row in replay["transitions"]:
+        next_action_elapsed(row)
+        if (
+            replay["version"] == 3
+            and not replay.get("source_inventory")
+            and row.get("action_time_basis") != "asynchronous_send_return_proxy_v1"
+        ):
+            raise ValueError("Version 3 requires explicit asynchronous transition timing")
     sources = source_replays(root, replay)
     if not sources:
         return _leaf_roles(replay)

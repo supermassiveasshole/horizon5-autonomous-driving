@@ -263,7 +263,7 @@ def read_realtime_decision(
     return decision
 
 
-def _decision(
+def verify_realtime_decision(
     root: Path, row: dict[str, Any], contract: PixelContract, actor: DecisionActor, tolerance: float
 ) -> dict[str, Any]:
     decision = read_realtime_decision(root, row, contract)
@@ -340,7 +340,9 @@ def replay_realtime_numeric(request: RealtimeNumericReplay, actor: DecisionActor
                 if "actor" not in row:
                     continue
                 summary["checks"].append(
-                    _decision(request.recording_dir, row, contract, actor, request.tolerance)
+                    verify_realtime_decision(
+                        request.recording_dir, row, contract, actor, request.tolerance
+                    )
                 )
             except (OSError, ValueError, KeyError, TypeError, IndexError) as error:
                 summary["errors"].append({"decision_id": row["decision_id"], "error": str(error)})

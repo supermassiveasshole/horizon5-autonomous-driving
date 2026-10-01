@@ -15,6 +15,7 @@ from fh5.numeric_recording import read_numeric_frame
 from fh5.sac import _task_features
 from fh5.sac_actions import ActionBounds
 from fh5.sac_sources import replay_roles
+from fh5.sac_timing import next_action_elapsed
 
 
 def validate_cache_budget(value: int) -> None:
@@ -94,7 +95,7 @@ class LearningReplay:
                 if row["next"] is None or row["terminated"]:
                     raise ValueError("SAC bootstrap requires a real nonterminal final observation")
                 self.following.append(observation(row["next"]))
-                next_contexts.append(bounds.context(row["action"], row["hold_dt_s"]))
+                next_contexts.append(bounds.context(row["action"], next_action_elapsed(row)))
                 next_tasks.append(_task_features(row["next_task_state"], replay["task_context"]))
                 discounts.append(row["discount"])
             else:

@@ -191,6 +191,16 @@ def _verify_history(report: dict[str, Any]) -> None:
             raise ValueError("Execution action history differs from recorded successful sends")
 
 
+def bind_execution_inputs(
+    root: Path, report: dict[str, Any], source: Path, recording: RunResult
+) -> int:
+    """Bind complete packets, successful commands and causal input history."""
+    count = _bind_telemetry(root, report, source, recording)
+    _verify_commands(report)
+    _verify_history(report)
+    return count
+
+
 def review_execution(
     binding: dict[str, Any] | None,
     *,

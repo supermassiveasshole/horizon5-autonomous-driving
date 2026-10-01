@@ -28,6 +28,7 @@ from fh5.sac_checkpoint import (
     seal_experience,
     state_digest,
 )
+from fh5.sac_timing import next_action_elapsed
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -269,7 +270,7 @@ def _run(
                         next_state,
                         torch.tensor(
                             [
-                                *bounds.context(row["action"], row["hold_dt_s"]),
+                                *bounds.context(row["action"], next_action_elapsed(row)),
                                 *_task_features(row["next_task_state"], replay["task_context"]),
                             ]
                         ),
@@ -277,7 +278,7 @@ def _run(
                 )
             )
             next_actions.append(
-                bounds.deterministic(next_prediction, row["action"], row["hold_dt_s"])
+                bounds.deterministic(next_prediction, row["action"], next_action_elapsed(row))
             )
             discounts.append(row["discount"])
         else:
