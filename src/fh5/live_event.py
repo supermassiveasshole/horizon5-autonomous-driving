@@ -60,8 +60,17 @@ class BoundedFrames:
                         self._close_error = error
 
         self._worker = threading.Thread(target=work, daemon=True, name="fh5-frame-capture")
-        self._worker.start()
-        self._receive(2.0)  # Initialization also stays bounded, before controller creation.
+        try:
+            self._worker.start()
+            self._receive(2.0)  # Initialization also stays bounded, before controller creation.
+        except (Exception, KeyboardInterrupt):
+            # The caller cannot own this instance until construction returns.
+            # Signal even a still-initializing worker to close when it can return.
+            try:
+                self.close()
+            except Exception:
+                pass  # Preserve the acquisition failure; release remains unconfirmed.
+            raise
 
     def _receive(self, timeout: float) -> ScreenFrame | None:
         try:

@@ -391,11 +391,16 @@ def test_native_runner_accepts_a_qualified_environment_contract(tmp_path, eligib
     assert result.summary["evaluation"]["execution_metrics"]["bound_runs"] == 2
 
 
-def test_failed_menu_acquisition_does_not_claim_all_resources_released(tmp_path, eligible_model):
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_failed_menu_acquisition_does_not_claim_all_resources_released(
+    tmp_path, eligible_model, interrupted
+):
     from fh5.evaluation_native import NativeEvaluationEnvironment
 
     class Devices(ExternalDevices):
         def menu(self, path, plan):
+            if interrupted:
+                raise KeyboardInterrupt("interrupted external capture allocation")
             raise OSError("external capture allocation failed; cleanup status unknown")
 
     operation = replace(native_request(tmp_path, eligible_model), live=True)
@@ -408,6 +413,6 @@ def test_failed_menu_acquisition_does_not_claim_all_resources_released(tmp_path,
         ),
     )
     summary = result.summary["evaluation_run"]
-    assert summary["stop_reason"] == "interface_error"
+    assert summary["stop_reason"] == ("user_stop" if interrupted else "interface_error")
     assert not summary["resources_released"]
     assert not devices.controllers and not summary["started_slots"]

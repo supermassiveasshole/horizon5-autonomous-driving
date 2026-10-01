@@ -50,8 +50,8 @@ class _EventLease:
         if not self.closed:
             try:
                 self.source.close()
-            except Exception as error:
-                self.error = str(error)
+            except (Exception, KeyboardInterrupt) as error:
+                self.error = f"{type(error).__name__}: {error}"
                 raise
             finally:
                 self.closed = True
@@ -132,7 +132,7 @@ class NativeEvaluationEnvironment:
         assert self.request is not None
         try:
             source = self.menu_factory(self.request.output_dir / "event.json", plan)
-        except Exception as error:
+        except (Exception, KeyboardInterrupt) as error:
             self.acquisition_errors.append(f"Menu acquisition cleanup unconfirmed: {error}")
             raise
         lease = _EventLease(source)
@@ -148,7 +148,7 @@ class NativeEvaluationEnvironment:
         plan = self._attempt(slot_id)
         try:
             drive = self.driving_factory(plan)
-        except Exception as error:
+        except (Exception, KeyboardInterrupt) as error:
             self.acquisition_errors.append(f"Driving acquisition cleanup unconfirmed: {error}")
             raise
         self.drives.append(drive)
