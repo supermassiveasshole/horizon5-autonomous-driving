@@ -30,7 +30,13 @@
 - 正向检查使用**明确构造的外部原生文件 fixture**，来源身份/条件只为覆盖程序分支而模拟，另用合成数据实际训练两步 CPU BC。没有修改或晋升旧模型；所有结果都不是用户候选、实际 DXGI 或驾驶证据。`t08-qualified-adapter-red/green-20261002` 发现并修正条件绑定 JSON 中列表/元组不一致导致的误拒绝；通过后实际模型命令到达模拟设备，仍报告 `real_game_validation=false`。
 - 独立测试 `tests/test_numeric_drive_cli.py tests/test_realtime_driving.py`：**21 passed in 30.11s**，JUnit `runs/t08-numeric-entry-fresh-20261002-results.xml`。包括取得资格后的适配器参数变化、模型文件替换、正常命令及异常释放。使用有界两步 CPU fixture，主线大型回归继续运行且没有修改其源码；没有另外开启大型训练/完整套件。
 
-本增量尚待双轴审查和针对审查修复的复测；主线全量任务的结果不覆盖此分支。
+审查固定范围 `fc78add...3d21f0f`：Standards 0 项违反、1 项候选身份映射重复的维护建议；Spec 2 项缺口：资格检查未重新读取原始图像资产，实际 worker 设备未与只读时效依据绑定。两项均先复现失败再修正，并把两处候选身份比较收敛为同一映射。
+
+- `runs/t08-shadow-assets-red/green-20261002`：外部文件缺失/损坏的 4 类情况由误判合格改为拒绝，连同数值回放共 **24 passed / 21.30 秒**。输入读取与回放共用数值完整性校验，不启动 GPU 或预测。
+- `runs/t08-worker-device-red/green-20261002`：明确模拟的 CUDA 证据文件不能授权实际 CPU 模型；修正后在观测/控制创建前拒绝。同设备正向路径仍通过，共 **2 passed / 8.57 秒**。未启动 CUDA 或真实采集。
+- 相关回归 `tests/test_numeric_drive_cli.py`、`test_realtime_driving.py`、`test_realtime.py`、`test_realtime_shadow.py`、`test_realtime_numeric_replay.py`、`test_control.py`：**123 passed / 65.92 秒**；JUnit `runs/t08-entry-reviewed-regression-20261002-results.xml`。
+
+主线 `8dce7af` 的全量任务已结束：**1117 passed / 4508.11 秒**，JUnit `runs/t14-updates-integrated-full-20261002-results.xml`；它不覆盖本分支。当前修正待增量复审及合并验证。
 
 ## 仍需推进
 

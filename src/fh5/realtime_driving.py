@@ -41,10 +41,12 @@ class NumericDrivingEnvironment:
         self._result: dict[str, Any] | None = None
         self.sent_count = self.failed_count = 0
 
-    def authorize(self, request: RealtimeRun, manifest: dict[str, Any]) -> None:
+    def authorize(
+        self, request: RealtimeRun, manifest: dict[str, Any], inference_device: str | None
+    ) -> None:
         if self.configuration is None:
             raise ValueError("Native driving requires qualified input and shadow bindings")
-        self.configuration.authorize(request, manifest)
+        self.configuration.authorize(request, manifest, inference_device)
         if (
             self.observations.request != request
             or self.observations.capture_config != self.configuration.capture

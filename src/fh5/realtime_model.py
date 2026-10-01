@@ -52,6 +52,7 @@ class ShadowNumericActor:
         self.actor = FrozenNumericActor(
             directory, trained, device, expected_manifest_sha256=expected_manifest_sha256
         )
+        self.device = self.actor.device
         if self.actor.manifest["weights_sha256"] != expected_model_sha256:
             raise ValueError("Shadow expected model changed while loading")
         self.manifest = {

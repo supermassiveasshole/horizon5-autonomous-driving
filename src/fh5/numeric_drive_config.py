@@ -13,7 +13,11 @@ from fh5.collection_store import read_bounded
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.realtime import RealtimeConfig, RealtimeRun
 from fh5.realtime_model import ShadowNumericActor, shadow_model_contract
-from fh5.realtime_numeric_replay import read_realtime_journal, read_realtime_recording
+from fh5.realtime_numeric_replay import (
+    read_realtime_decision,
+    read_realtime_journal,
+    read_realtime_recording,
+)
 from fh5.realtime_shadow import LocalTask
 from fh5.realtime_udp import UDPTelemetry
 
@@ -131,6 +135,9 @@ class NumericDriveConfiguration:
             raise ValueError("Shadow evidence manifest changed")
         report = read_realtime_recording(root)
         read_realtime_journal(root, report)
+        for row in report["decisions"]:
+            if "actor" in row:
+                read_realtime_decision(root, row, self.capture.pixels)
         reasons = []
         env = report["environment"]
         if (
@@ -140,13 +147,7 @@ class NumericDriveConfiguration:
         ):
             reasons.append("shadow_not_native")
         if report["actor_kind"] != ShadowNumericActor.kind or any(
-            report["model"].get(key) != value
-            for key, value in {
-                "weights_sha256": self.metadata["weights_sha256"],
-                "model_contract": self.metadata["contract"],
-                "numeric_contract": self.capture.pixels.metadata(),
-                "provenance": self.metadata["provenance"],
-            }.items()
+            report["model"].get(key) != value for key, value in self._candidate_identity().items()
         ):
             reasons.append("shadow_candidate_mismatch")
         expected = {**asdict(self.request.config), "pixels": self.capture.pixels.metadata()}
@@ -162,6 +163,8 @@ class NumericDriveConfiguration:
         ):
             if bindings.get(key) != json.loads(json.dumps(self.bindings[key])):
                 reasons.append("shadow_" + key + "_mismatch")
+        if report["inference"].get("inference_device") != self.device:
+            reasons.append("shadow_worker_device_mismatch")
         task = env.get("task", {})
         if any(
             task.get(key) != value
@@ -225,15 +228,21 @@ class NumericDriveConfiguration:
                 "Numerical driving not qualified: " + ", ".join(self.qualification["reasons"])
             )
 
-    def authorize(self, request: RealtimeRun, manifest: dict[str, Any]) -> None:
-        self.require_eligible()
-        if request != self.request or not request.live:
-            raise ValueError("Driving request differs from qualified configuration")
-        expected = {
+    def _candidate_identity(self) -> dict[str, Any]:
+        return {
             "weights_sha256": self.metadata["weights_sha256"],
             "numeric_contract": self.capture.pixels.metadata(),
             "model_contract": self.metadata["contract"],
             "provenance": self.metadata["provenance"],
         }
-        if any(manifest.get(key) != value for key, value in expected.items()):
+
+    def authorize(
+        self, request: RealtimeRun, manifest: dict[str, Any], inference_device: str | None
+    ) -> None:
+        self.require_eligible()
+        if request != self.request or not request.live:
+            raise ValueError("Driving request differs from qualified configuration")
+        if inference_device != self.device:
+            raise ValueError("Loaded inference device differs from qualified timing evidence")
+        if any(manifest.get(key) != value for key, value in self._candidate_identity().items()):
             raise ValueError("Loaded driving candidate differs from qualified model")

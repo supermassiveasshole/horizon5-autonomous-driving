@@ -220,9 +220,10 @@ def _verify_action_wait(row: dict[str, Any], report: dict[str, Any]) -> None:
     raise ValueError("Action support wait has executable policy support")
 
 
-def _decision(
-    root: Path, row: dict[str, Any], contract: PixelContract, actor: DecisionActor, tolerance: float
-) -> dict[str, Any]:
+def read_realtime_decision(
+    root: Path, row: dict[str, Any], contract: PixelContract
+) -> NumericDecision:
+    """Verify retained input metadata and RGB without loading or running a model."""
     reference = row["archive"]
     if not reference or row["archive_reason"] is not None:
         raise ValueError("Numerical input was not archived")
@@ -259,6 +260,14 @@ def _decision(
     reason = validate_decision(decision, contract)
     if reason:
         raise ValueError("Invalid recorded observation: " + reason)
+    return decision
+
+
+def _decision(
+    root: Path, row: dict[str, Any], contract: PixelContract, actor: DecisionActor, tolerance: float
+) -> dict[str, Any]:
+    decision = read_realtime_decision(root, row, contract)
+    frames = decision.frames
     if row["prediction"] is None or row.get("error"):
         raise ValueError("Inference failure has no reproducible prediction")
     if not _valid_prediction(row["prediction"]):

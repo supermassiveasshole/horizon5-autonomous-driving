@@ -15,6 +15,7 @@ from test_temporal_bc import temporal_fixture
 
 from fh5.cli import main
 from fh5.experiment import run_experiment
+from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_drive_config import NumericDriveConfiguration
 from fh5.realtime_driving import NumericDrivingEnvironment
 from fh5.realtime_model import ShadowNumericActor
@@ -289,4 +290,75 @@ def test_model_replacement_after_qualification_stops_before_capture(tmp_path, el
     assert r["stop_reason"] == "model_startup_failed"
     assert "manifest changed" in r["inference"]["error"]
     assert not controller.commands and not capture.closed
+    assert telemetry.closed and r["resources_released"]
+
+
+@pytest.mark.parametrize("asset_kind", ["input", "pixels"])
+@pytest.mark.parametrize("damage", ["missing", "corrupt"])
+def test_damaged_shadow_assets_cannot_qualify_driving(
+    tmp_path, eligible_model, capsys, asset_kind, damage
+):
+    config = drive_config(tmp_path, eligible_model)
+    synthetic_shadow(tmp_path, eligible_model, config, native_file_fixture=True)
+    output = tmp_path / "drive"
+    args = ["realtime-drive", "--config", str(config), "--output", str(output)]
+    assert main(args) == 0
+    assert json.loads(capsys.readouterr().out)["qualification"]["eligible"]
+    recording = tmp_path / "shadow"
+    report = json.loads((recording / "report.json").read_text())
+    row = next(d for d in report["decisions"] if d["status"] == "accepted")
+    path = recording / row["archive"]["path"]
+    if asset_kind == "pixels":
+        path = recording / json.loads(path.read_text())["frames"][0]["path"]
+    if damage == "missing":
+        path.unlink()
+    else:
+        content = bytearray(path.read_bytes())
+        content[-1] ^= 1
+        path.write_bytes(content)
+    assert main(args) == 2
+    assert json.loads(capsys.readouterr().err)["status"] == "error"
+    assert not output.exists()
+
+
+def test_cpu_worker_cannot_use_cuda_timing_qualification(tmp_path, eligible_model):
+    config = drive_config(tmp_path, eligible_model)
+    synthetic_shadow(tmp_path, eligible_model, config, native_file_fixture=True)
+    # Simulate saved CUDA evidence at the external file boundary. The executing
+    # actor below remains a real CPU model; no CUDA or native device is opened.
+    root = json.loads(config.read_text())
+    root["model"]["device"] = "cuda"
+    recording = tmp_path / "shadow"
+    report = json.loads((recording / "report.json").read_text())
+    report["environment"]["input_conditions"]["inference_device"] = "cuda"
+    report["inference"]["inference_device"] = "cuda"
+    payload = json.dumps(report).encode()
+    (recording / "report.json").write_bytes(payload)
+    manifest = recording / "realtime-manifest.json"
+    data = json.loads(manifest.read_text())
+    data["report_sha256"] = hashlib.sha256(payload).hexdigest()
+    manifest.write_text(json.dumps(data))
+    root["shadow"]["manifest_sha256"] = hashlib.sha256(manifest.read_bytes()).hexdigest()
+    config.write_text(json.dumps(root))
+    plan = NumericDriveConfiguration(config, tmp_path / "drive", 1, True)
+    assert plan.qualification["eligible"]
+    capture, telemetry, controller = Capture(), Telemetry(), Controller()
+    observations = ShadowEnvironment(
+        plan.request,
+        plan.capture,
+        lambda: capture,
+        telemetry,
+        Desktop(),
+        plan.task,
+        input_conditions=plan.bindings,
+    )
+    env = NumericDrivingEnvironment(observations, lambda: controller, configuration=plan)
+    r = run_experiment(
+        plan.request,
+        realtime_environment=env,
+        numeric_actor_factory=lambda: FrozenNumericActor(eligible_model, plan.capture.pixels),
+    ).summary["realtime"]
+    assert "inference device differs" in r["stop_reason"]
+    assert not controller.commands and not capture.closed
+    assert not r["environment"]["controller_created"]
     assert telemetry.closed and r["resources_released"]
