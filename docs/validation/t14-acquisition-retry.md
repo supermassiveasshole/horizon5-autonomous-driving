@@ -16,6 +16,8 @@
 | 等待期间用户停止 | 5 秒等待被中断，收到停止后 2 秒内返回，无第二次请求 | `runs/t14-acquisition-wait-latency-20261001/` |
 | 重试前磁盘余量下降 | 再次容量核对拒绝，停止于 `storage_budget_exhausted`，仅 1 次请求 | `runs/t14-acquisition-capacity-20261001/` |
 | 耗尽后显式接续 | 保留旧失败历史与 learner，后续可以重新获取；测试随后主动停止，未开始训练 | `runs/t14-acquisition-continue-20261001/` |
+| 未释放后显式接续 | 原先仍尝试获取连接；修复后在接续校验时拒绝，原状态字节不变、0 次新连接 | `runs/t14-acquisition-unreleased-{red,green}-20261001/` |
+| 重试期间候选批次原件变化 | 原先继续请求评估接口；修复后先核验并停止，只请求 1 次、保持已有 learner | `runs/t14-acquisition-input-{red,green}-20261001/` |
 
 评估原型使用 `runs/t15-capacity-fresh-20261001/test_capacity_stop_after_learn0/loop/` 中真实的评估前 learner/学习记录，在隔离夹具中增加新的重试配置及绑定摘要。它验证新输入下的行为，不宣称允许在生产接续时修改原冻结配置。正式整文件测试从头生成同类状态。
 
@@ -23,9 +25,9 @@
 
 ## 待完成验证
 
-`tests/test_learning_retry.py` 共 14 项，包含从头生成实际 CPU 模型、采样与评估首次获取分别失败后自动完成一轮的验证。整文件尚未运行；先等待主分支 `feb1ca2` 的完整回归释放训练/写盘测试资源。主分支那次回归不覆盖本增量。
+`tests/test_learning_retry.py` 共 16 项，包含从头生成实际 CPU 模型、采样与评估首次获取分别失败后自动完成一轮的验证。整文件尚未运行。主分支 `feb1ca2` 的完整回归不覆盖本增量：458 项通过后，候选夹具遇到停止时遗留推理的 `Incomplete decision outcome journal`，导致后续记录缺失；原件保留在 `runs/t14-parent-capacity-final-full-20261001/`，尚不能报告完整回归通过。
 
-Standards / Spec 审查和增量完整回归待完成。以上原型不证明真实游戏可恢复或驾驶能力改善；没有启动 FH5、Steam、原生捕获或控制器。
+Standards 审查无发现；Spec 审查发现上述未释放接续及候选重验两项缺口，均已有红绿原型，等待复核及增量完整回归。以上原型不证明真实游戏可恢复或驾驶能力改善；没有启动 FH5、Steam、原生捕获或控制器。
 
 ## 剩余范围
 

@@ -398,3 +398,71 @@ def test_explicit_continue_keeps_exhausted_history_and_can_acquire_again(tmp_pat
     )
     assert len(backend.leases) == 1 and backend.leases[0].closed
     assert result["resources_released"] and backend.closed
+
+
+def test_continue_refuses_an_unreleased_acquisition_without_opening_again(tmp_path, seeded_loop):
+    request = loop_request(
+        tmp_path,
+        seeded_loop,
+        rounds=1,
+        acquisition_retry={"max_retries": 2, "delay_seconds": 0},
+    )
+
+    class UnreleasedBackend(SharedBackend):
+        def sampling(self, identity):
+            raise LearningUnavailable("Source release uncertain", resources_released=False)
+
+    result = run_experiment(
+        request, learning_environment=UnreleasedBackend(seeded_loop[0])
+    ).summary["learning_loop"]
+    assert result["stop_reason"] == "release_fault" and not result["resources_released"]
+    before = (request.output_dir / "state.json").read_bytes()
+
+    class DetectOpening(SharedBackend):
+        requests = 0
+
+        def sampling(self, identity):
+            self.requests += 1
+            raise LearningUnavailable("A new connection was attempted", resources_released=True)
+
+    backend = DetectOpening(seeded_loop[0])
+    with pytest.raises(ValueError, match="unreleased"):
+        run_experiment(
+            LearningContinue(request.output_dir, sha(request.output_dir / "state.json")),
+            learning_environment=backend,
+        )
+    assert backend.requests == 0 and backend.closed and not backend.leases
+    assert (request.output_dir / "state.json").read_bytes() == before
+    assert not (request.output_dir / "round-000/learning").exists()
+
+
+def test_retry_checks_the_prepared_candidate_before_requesting_another_environment(
+    tmp_path, waiting_retry_evaluation
+):
+    request, source = waiting_retry_evaluation
+    state_file = request.output_dir / "state.json"
+    before = json.loads(state_file.read_bytes())
+
+    class UnavailableEvaluation(SharedBackend):
+        requests = 0
+
+        def sampling(self, identity):
+            raise AssertionError("A trained candidate must not be resampled")
+
+        def evaluation(self, identity):
+            self.requests += 1
+            # External filesystem change while the service is unavailable.
+            task = request.output_dir / "round-000/batch/task.json"
+            with task.open("ab") as stream:
+                stream.write(b"\n")
+            raise LearningUnavailable("Service reconnecting", resources_released=True)
+
+    backend = UnavailableEvaluation(source)
+    result = run_experiment(
+        LearningContinue(request.output_dir, sha(state_file)), learning_environment=backend
+    ).summary["learning_loop"]
+    assert backend.requests == 1 and backend.closed and not backend.leases
+    assert result["stop_reason"] == "interface_error" and result["resources_released"]
+    assert result["latest_learner"] == before["latest_learner"]
+    assert result["learner_updates"] == 3 and len(result["acquisition_failures"]) == 1
+    assert not (request.output_dir / "round-000/evaluation").exists()

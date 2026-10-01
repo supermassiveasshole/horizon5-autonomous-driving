@@ -265,6 +265,15 @@ class _Loop:
                         return None
                     time.sleep(min(0.05, max(0, deadline - time.monotonic())))
                 self.verify()
+                learner = self.state["latest_learner"]
+                if _learner(Path(learner["directory"]), learner["sha256"]) != learner:
+                    raise ValueError("Learning acquisition checkpoint changed")
+                if kind == "evaluation":
+                    root = self.root / f"round-{number:03d}"
+                    prepared = self.state["rounds"][number]["evaluation_prepared"]
+                    if _sha(root / "evaluation.json") != prepared["config_sha256"]:
+                        raise ValueError("Prepared evaluation configuration changed")
+                    read_evaluation_batch(root / "batch", prepared["batch_sha256"])
                 if not self.capacity(kind):
                     return None
             else:
@@ -295,6 +304,8 @@ class _Loop:
         ):
             raise ValueError("Learning continuation configuration changed")
         self.state = state
+        if state["child_resources_released"] is not True:
+            raise ValueError("Learning continuation refuses unreleased child resources")
         if state.get("initialized", True) is False:
             if (
                 "storage" not in self.config
