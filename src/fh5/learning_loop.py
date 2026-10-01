@@ -25,10 +25,10 @@ from fh5.evaluation_run import EvaluationEnvironment, EvaluationRun
 from fh5.learning_capacity import capacity_decision, validate_storage_budget
 from fh5.learning_io import EvaluationLease, LearningUnavailable, RejectedLease, SamplingLease
 from fh5.learning_monitor import StorageMonitor, validate_monitor
-from fh5.learning_recovery import completed_sampling
+from fh5.learning_recovery import completed_sampling, retryable_sampling, sampling_bindings
 from fh5.sac_cycle import SACCycle, SACEnvironment
 from fh5.sac_learning import validate_sac_candidate
-from fh5.sampling_evidence import verify_sampling_sources
+from fh5.sampling_evidence import seal_sampling_sources, verify_sampling_sources
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -67,7 +67,7 @@ def _configuration(path: Path) -> dict[str, Any]:
     config: dict[str, Any] = json.loads(read_bounded(path, 1024**2))
     if (
         set(config)
-        - {"acquisition_retry"}
+        - {"acquisition_retry", "sampling_retry"}
         - ({"storage", "storage_monitor"} if config.get("version") == 2 else set())
         != {
             "version",
@@ -101,6 +101,15 @@ def _configuration(path: Path) -> dict[str, Any]:
             or not 0 <= retry["delay_seconds"] <= 5
         ):
             raise ValueError("Learning acquisition retries require explicit finite bounds")
+    if "sampling_retry" in config:
+        retry = config["sampling_retry"]
+        if (
+            not isinstance(retry, dict)
+            or set(retry) != {"max_retries"}
+            or type(retry["max_retries"]) is not int
+            or not 0 <= retry["max_retries"] <= 3
+        ):
+            raise ValueError("Learning sampling retries require an integer bound from 0 to 3")
     for key, low, high in (
         ("rounds", 1, 10),
         ("steps_per_attempt", 1, 1000),
@@ -366,8 +375,9 @@ class _Loop:
             if _learner(Path(saved["directory"]), saved["sha256"]) != saved:
                 raise ValueError("Learning continuation checkpoint changed")
         for row in state["rounds"]:
-            if "learning" in row:
-                binding = row["learning"]
+            for archived in row.get("sampling_history", []):
+                verify_sampling_sources(archived.get("retained_files", {}))
+            for binding in sampling_bindings(row):
                 if _sha(Path(binding["directory"]) / "summary.json") != binding["summary_sha256"]:
                     raise ValueError("Retained sampling result changed")
                 sampled = json.loads(
@@ -410,7 +420,12 @@ class _Loop:
         _input(self.root, self.state["incumbent"]).verify()
 
     def sampling_request(self, number: int) -> SACCycle:
-        directory = self.root / f"round-{number:03d}" / "learning"
+        attempt = self.state["rounds"][number].get("sampling_attempt", 0)
+        directory = (
+            self.root
+            / f"round-{number:03d}"
+            / ("learning" if attempt == 0 else f"learning-{attempt:03d}")
+        )
         learner = self.state["latest_learner"]
         return SACCycle(
             Path(learner["directory"]),
@@ -420,9 +435,48 @@ class _Loop:
             directory,
             cycles=1,
             steps_per_attempt=self.config["steps_per_attempt"],
-            seed=self.config["seed"] + number,
+            seed=(self.config["seed"] + number + attempt * self.config["rounds"]) % 2**32,
             expected_checkpoint_sha256=learner["sha256"],
         )
+
+    def retry_sampling(self, number: int, row: dict[str, Any]) -> bool:
+        maximum = self.config.get("sampling_retry", {}).get("max_retries", 0)
+        if maximum == 0 or "learning" not in row:
+            raise ValueError("Interrupted sampling is retained; cannot overwrite its attempts")
+        request = self.sampling_request(number)
+        binding = row["learning"]
+        if Path(binding["directory"]) != request.output_dir or not retryable_sampling(
+            request, self.state["latest_learner"], binding["summary_sha256"]
+        ):
+            raise ValueError("Sampling retry requires a sealed released failure without updates")
+        attempt = row.get("sampling_attempt", 0)
+        if attempt >= maximum:
+            self.state["stop_reason"] = "sampling_retries_exhausted"
+            return False
+        if self.stopped():
+            self.state["stop_reason"] = self.stopping_reason()
+            return False
+        self.verify()
+        learner = self.state["latest_learner"]
+        if _learner(Path(learner["directory"]), learner["sha256"]) != learner:
+            raise ValueError("Sampling retry learner changed")
+        row.setdefault("sampling_history", []).append(
+            {**binding, "retained_files": seal_sampling_sources(request.output_dir, None)}
+        )
+        row["sampling_attempt"] = attempt + 1
+        self.state.setdefault("recoveries", []).append(
+            {
+                "kind": "sampling_retry",
+                "round": number,
+                "attempt": attempt + 1,
+                "reason": row["sampling_stop_reason"],
+                "source_directory": binding["directory"],
+            }
+        )
+        for key in ("learning", "sampling_stop_reason", "eligible_transitions", "learner_updates"):
+            row.pop(key, None)
+        self.save("retrying_sampling")
+        return True
 
     def accept_sampling(
         self,
@@ -483,7 +537,16 @@ class _Loop:
         row["sampling_checkpoint_sha256"] = self.state["latest_learner"]["sha256"]
         self.save("opening_sampler")
         source = self.acquire(
-            "sampling", number, lambda: self.environment.sampling(f"round-{number:03d}")
+            "sampling",
+            number,
+            lambda: self.environment.sampling(
+                f"round-{number:03d}"
+                + (
+                    f"-sampling-{row['sampling_attempt']:03d}"
+                    if row.get("sampling_attempt", 0)
+                    else ""
+                )
+            ),
         )
         if source is None:
             return False
@@ -837,15 +900,19 @@ class _Loop:
             else:
                 row = {"number": number, "complete": False}
                 self.state["rounds"].append(row)
-            if "candidate_sha256" not in row:
-                if (self.root / f"round-{number:03d}" / "learning").exists():
-                    raise ValueError(
-                        "Interrupted sampling is retained; cannot overwrite its attempts"
-                    )
+            while "candidate_sha256" not in row:
+                if self.sampling_request(number).output_dir.exists():
+                    if not self.retry_sampling(number, row):
+                        return
                 if not self.capacity("sampling"):
                     return
                 if not self.sample(number, row):
-                    return
+                    if (
+                        self.stopped()
+                        or "learning" not in row
+                        or not self.config.get("sampling_retry", {}).get("max_retries", 0)
+                    ):
+                        return
             if self.stopped():
                 self.state["stop_reason"] = self.stopping_reason()
                 return

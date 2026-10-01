@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from fh5.candidate_archive import checkpoint_asset_names
 from fh5.candidate_store import _read_events
 from fh5.collection_store import encode, read_bounded, write_file
+from fh5.learning_recovery import sampling_bindings
 from fh5.numeric_images import asset
 
 if TYPE_CHECKING:
@@ -268,8 +269,7 @@ class _Inventory:
                 for entry in row["review_input"]["entries"]:
                     if entry.get("evidence") is not None:
                         self.evidence(root, entry["evidence"], "parent_review")
-            if "learning" in row:
-                learning = row["learning"]
+            for learning in sampling_bindings(row):
                 sampled = self.document(
                     Path(learning["directory"]) / "summary.json",
                     "sampling_original",

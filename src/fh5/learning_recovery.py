@@ -14,6 +14,58 @@ from fh5.sac_learning import validate_sac_candidate
 from fh5.sampling_evidence import verify_sampling_sources
 
 
+def sampling_bindings(row: dict[str, Any]) -> list[dict[str, Any]]:
+    return [*row.get("sampling_history", []), *([row["learning"]] if "learning" in row else [])]
+
+
+def retryable_sampling(request: SACCycle, parent: dict[str, Any], expected_summary: str) -> bool:
+    """Only released, sealed failures without any learner output may be resampled."""
+    root = request.output_dir
+    if _sha(root / "summary.json") != expected_summary:
+        raise ValueError("Retained sampling result changed")
+    summary = json.loads(read_bounded(root / "summary.json", 4 * 1024**2))
+    reason = summary.get("stop_reason")
+    attempts = summary.get("attempts", [])
+    if (
+        reason not in ("sampling_fault", "no_eligible_experience", "stop_requested")
+        or summary.get("source_kind") != "synthetic"
+        or summary.get("resources_released") is not True
+        or summary.get("commands_sent_to_game") is not False
+        or summary.get("latest_candidate")
+        or summary.get("error")
+        or summary.get("release_error")
+        or len(attempts) > 1
+        or not attempts
+        and reason != "stop_requested"
+        or any(root.glob("candidate-*"))
+    ):
+        return False
+    files = (request.recording_config_file, request.task_file, request.reward_file)
+    protocol = json.loads(read_bounded(root / "protocol.json", 1024**2))
+    if protocol != {
+        "source_kind": "synthetic",
+        "cycles": 1,
+        "steps_per_attempt": request.steps_per_attempt,
+        "seed": request.seed,
+        "update_ratio": "at most one critic update per newly accepted transition",
+        "protocol_files": {str(path): _sha(path, 1024**2) for path in files},
+    }:
+        raise ValueError("Failed sampling differs from its frozen retry protocol")
+    for attempt in attempts:
+        if (
+            attempt.get("sampling_checkpoint_sha256") != parent["sha256"]
+            or attempt.get("sampler_seed") != request.seed
+            or attempt.get("learner_updates", 0) != 0
+            or attempt.get("eligible_transitions", 0) != 0
+            or attempt.get("candidate")
+            or attempt.get("archive_error")
+            or attempt.get("diagnostic_write_error")
+        ):
+            return False
+        verify_sampling_sources(attempt.get("source_assets", {}))
+    return True
+
+
 def _sha(path: Path, limit: int = 4 * 1024**2) -> str:
     return hashlib.sha256(read_bounded(path, limit)).hexdigest()
 
