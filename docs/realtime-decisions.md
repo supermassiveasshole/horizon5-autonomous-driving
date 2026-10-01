@@ -16,7 +16,23 @@
 
 报告保存执行器发送次数、失败、独立看门狗与收尾事件，另增加 `source_to_send_return_ms`。原 `source_to_sendable_ms` 仍表示推理结果就绪时间。两者都不能代表游戏实际采用命令的时刻；`real_game_validation`、训练与晋升资格不会因 API 成功而置为真。原生来源的记录可以离线重放，重放始终不创建执行器。
 
-本增量提供实验入口适配器，**尚未提供 `realtime-drive` CLI**，旧 `policy --live` 仍未替换。下一步补齐候选/采集条件绑定、候选自己的只读时效记录及命令行接入，再做实机短段；不把机械接口接通当作 #9 完成。验证细节见 [数值驾驶适配记录](validation/t08-numeric-driving-adapter.md)。
+新增 `realtime-drive` CLI；旧 `policy --live` 保留为原管线入口，不自动迁移或追认旧成绩。不把接口接通当作 #9 完成。验证细节见 [数值驾驶适配记录](validation/t08-numeric-driving-adapter.md)。
+
+## 有界驾驶命令与条件绑定
+
+`configs/realtime-drive.example.json` 是需填写真实候选目录与 SHA-256 的模板，默认沿用 4K 采集配置。`model.expected_sha256` 是 `actor.pt` 哈希，`model.manifest_sha256` 是完整 `model.json` 哈希；`shadow.manifest_sha256` 是对应只读运行的 `realtime-manifest.json` 文件哈希。路径相对于配置文件。可暂填 `shadow: null` 查看其他缺项。
+
+```powershell
+uv run --locked fh5 realtime-drive --config runs/drive-config.json --output runs/numeric-drive-001 --seconds 15
+```
+
+默认只读取配置、路线、候选声明与已保存只读记录，不打开采集、UDP、GPU或手柄，也不创建运行目录。`status=validated_only` 只表示完成配置检查；是否具备接管条件须看 `qualification.eligible` 和 `reasons`。候选须来自新连续数值采集、不是诊断模型，实际 Δt/图像契约、车型/PI、动作历史（当前 200 ms 年龄预算）匹配，并训练过无参考视图。
+
+采集条件中 `status: confirmed` 表示已核对该份相机、渲染/HUD、车辆/调校等声明；不能把示例待核验状态直接改名充当实机证据。声明必须与训练来源完全相同。仍需该候选在同一采集配置、推理设备、决策配置和局部任务下的实际 DXGI 只读记录：绑定报告及原始日志，资源释放、记录完整、正常到时或到达局部终点，至少有 1 秒接受决策的时间跨度，并满足原期限/年龄与看门狗间隔。此门槛用于排除空跑或单个幸运预测，不是长期驾驶可靠性验收；不要求零丢帧或每个 tick 都有新图。
+
+准备好实机短段并完成上述核对后，才使用相同命令加 `--live`。默认 15 秒、最多 30 秒；不支持旧来源诊断豁免。资格不足时在创建原生资源前拒绝；模型 worker 加载时再检查完整清单哈希，观测适配器再次核对配置和绑定。输入来源、推理设备或运行配置改变时重新采集对应只读依据，不能复用旧配置的通过结论。该入口当前执行无参考策略；参考辅助模式、真实响应、人类对照与 #10/#11/#15 接入仍需后续工作。
+
+原生数值记录保留资格摘要和只读证据哈希。原生控制的 `commands_sent_to_game` 计入运行时、看门狗和收尾成功返回的发送；它仍不代表车辆已运动。CLI 返回零也只表示本次有接受决策、正常结束且资源释放，不会把 `real_game_validation` 改为真。
 
 `ShadowEnvironment` 组合独立 DXGI 采集/预处理、单个回环 UDP 接收器和任务几何核验。每个包都检查，不能用同批末尾的正常包覆盖中间故障。准备前的菜单、时钟异常、失焦或遥测间断会清空历史；恢复后只接受边界之后的新帧。准备完成后硬故障锁存，不自动重试接管。采集 epoch 即使暂无完整历史也会传播，使旧推理及时失效。
 

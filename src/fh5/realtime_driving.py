@@ -6,12 +6,15 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import replace
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 from fh5.control import Command
 from fh5.live import NEUTRAL, Controller, LiveEnvironment
-from fh5.realtime import TimelineInput
+from fh5.realtime import RealtimeRun, TimelineInput
 from fh5.realtime_shadow import ShadowEnvironment
+
+if TYPE_CHECKING:
+    from fh5.numeric_drive_config import NumericDriveConfiguration
 
 
 class NumericDrivingEnvironment:
@@ -21,12 +24,15 @@ class NumericDrivingEnvironment:
         controller_factory: Callable[[], Controller],
         *,
         source_kind: Literal["synthetic", "native"] = "native",
+        configuration: NumericDriveConfiguration | None = None,
     ) -> None:
         if source_kind not in ("synthetic", "native"):
             raise ValueError("Unknown numerical driving source")
         self.observations = observations
         self.controller_factory = controller_factory
         self.source_kind = source_kind
+        self.configuration = configuration
+        self.authorized = False
         self.control: LiveEnvironment | None = None
         self.controller: Controller | None = None
         self.latest: TimelineInput | None = None
@@ -34,6 +40,19 @@ class NumericDrivingEnvironment:
         self._closed = False
         self._result: dict[str, Any] | None = None
         self.sent_count = self.failed_count = 0
+
+    def authorize(self, request: RealtimeRun, manifest: dict[str, Any]) -> None:
+        if self.configuration is None:
+            raise ValueError("Native driving requires qualified input and shadow bindings")
+        self.configuration.authorize(request, manifest)
+        if (
+            self.observations.request != request
+            or self.observations.capture_config != self.configuration.capture
+            or self.observations.task != self.configuration.task
+            or self.observations.input_conditions != self.configuration.bindings
+        ):
+            raise ValueError("Native observation adapter differs from qualified conditions")
+        self.authorized = True
 
     def _check_ready(self, *, creating: bool = False) -> None:
         value, cfg = self.latest, self.observations.request.config
@@ -61,6 +80,8 @@ class NumericDrivingEnvironment:
                 raise OSError("stale_image")
 
     def read(self, period_s: float) -> TimelineInput:
+        if self.source_kind == "native" and not self.authorized:
+            raise OSError("Native numerical driving has not been qualified")
         value = self.observations.read(period_s)
         with self._lock:
             if self._closed:
@@ -150,6 +171,7 @@ class NumericDrivingEnvironment:
                 + sum(e["status"] == "failed" for e in release_events),
                 runtime_send_returns=self.sent_count,
                 runtime_send_errors=self.failed_count,
+                qualification=self.configuration.qualification if self.configuration else None,
                 resources_released=bool(
                     result["resources_released"] and release["resources_released"]
                 ),

@@ -127,6 +127,11 @@ def run_realtime(
                 }
             ):
                 raise ValueError("Native driving requires compatible non-diagnostic temporal BC")
+            if environment.source_kind == "native":
+                authorize = getattr(environment, "authorize", None)
+                if not callable(authorize):
+                    raise ValueError("Native driving requires qualified input and shadow bindings")
+                authorize(request, worker.manifest)
             state.require_command_context = bool(worker.manifest.get("command_context"))
             if state.require_command_context:
                 state.command_bounds = ActionBounds(**worker.manifest["bounds"])

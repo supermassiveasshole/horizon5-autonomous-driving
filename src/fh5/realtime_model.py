@@ -44,11 +44,14 @@ class ShadowNumericActor:
         device: str = "cpu",
         *,
         allow_legacy_source_diagnostic: bool = False,
+        expected_manifest_sha256: str | None = None,
     ) -> None:
         _, trained = shadow_model_contract(
             directory, source, expected_model_sha256, allow_legacy_source_diagnostic
         )
-        self.actor = FrozenNumericActor(directory, trained, device)
+        self.actor = FrozenNumericActor(
+            directory, trained, device, expected_manifest_sha256=expected_manifest_sha256
+        )
         if self.actor.manifest["weights_sha256"] != expected_model_sha256:
             raise ValueError("Shadow expected model changed while loading")
         self.manifest = {

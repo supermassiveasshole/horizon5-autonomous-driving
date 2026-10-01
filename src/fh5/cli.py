@@ -339,6 +339,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     shadow.add_argument(
         "--live", action="store_true", help="Read FH5 and predict; never send game input"
     )
+    drive = commands.add_parser(
+        "realtime-drive",
+        help="Validate numerical driving; --live explicitly enables bounded control",
+    )
+    drive.add_argument("--config", type=Path, required=True)
+    drive.add_argument("--output", type=Path, required=True)
+    drive.add_argument("--seconds", type=float, default=15)
+    drive.add_argument("--live", action="store_true")
     trace = commands.add_parser("capture-frame-times", help="Attach independent PresentMon QPC CSV")
     trace.add_argument("recording", type=Path)
     trace.add_argument("--csv", type=Path, required=True)
@@ -750,6 +758,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             from fh5.realtime_cli import shadow_command
 
             return shadow_command(args)
+        if args.mode == "realtime-drive":
+            from fh5.numeric_drive_cli import drive_command
+
+            return drive_command(args)
         if args.mode == "capture-frame-times":
             from fh5.capture_trace import CaptureTraceReview
 

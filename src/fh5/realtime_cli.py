@@ -102,6 +102,10 @@ def shadow_command(args: argparse.Namespace) -> int:
     metadata, trained = shadow_model_contract(
         model_dir, pixels, model["expected_sha256"], args.allow_legacy_source_diagnostic
     )
+    model_bytes = (model_dir / "model.json").read_bytes()
+    if json.loads(model_bytes) != metadata:
+        raise ValueError("Shadow model changed during configuration validation")
+    model_manifest_sha256 = hashlib.sha256(model_bytes).hexdigest()
     if metadata["contract"]["actor_shape"] != {
         "action_count": len(request.config.action_offsets_ms),
         "reference_count": request.config.reference_count,
@@ -113,6 +117,8 @@ def shadow_command(args: argparse.Namespace) -> int:
         "capture_config_sha256": hashlib.sha256(capture_bytes).hexdigest(),
         "capture_target": asdict(target),
         "conditions": conditions,
+        "inference_device": model["device"],
+        "model_manifest_sha256": model_manifest_sha256,
     }
     if not args.live:
         print(
@@ -156,6 +162,7 @@ def shadow_command(args: argparse.Namespace) -> int:
             model["expected_sha256"],
             model["device"],
             allow_legacy_source_diagnostic=args.allow_legacy_source_diagnostic,
+            expected_manifest_sha256=model_manifest_sha256,
         ),
     )
     summary = result.summary["realtime"]
