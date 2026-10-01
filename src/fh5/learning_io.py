@@ -15,6 +15,14 @@ from fh5.realtime import RealtimeEnvironment, TimelineInput
 from fh5.sac_sampler import SACEnvironment, SACSample, SACStart
 
 
+class LearningUnavailable(RuntimeError):
+    """An acquisition failed; the adapter must report whether it released resources."""
+
+    def __init__(self, reason: str, *, resources_released: bool):
+        super().__init__(reason)
+        self.resources_released = resources_released
+
+
 class RejectedLease(ValueError):
     def __init__(self, released: dict[str, Any]):
         super().__init__("Learning lease must use synthetic external I/O")
