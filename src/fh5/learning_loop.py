@@ -7,10 +7,11 @@ import html
 import json
 import math
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 
 from fh5.candidate_archive import CandidateRestore
 from fh5.candidate_selection import _input, evaluation_conditions
@@ -21,7 +22,7 @@ from fh5.evaluation import EvaluationPrepare, EvaluationReview, read_evaluation_
 from fh5.evaluation_completion import completed_evaluation
 from fh5.evaluation_run import EvaluationEnvironment, EvaluationRun
 from fh5.learning_capacity import capacity_decision, validate_storage_budget
-from fh5.learning_io import EvaluationLease, RejectedLease, SamplingLease
+from fh5.learning_io import EvaluationLease, LearningUnavailable, RejectedLease, SamplingLease
 from fh5.learning_recovery import completed_sampling
 from fh5.sac_cycle import SACCycle, SACEnvironment
 from fh5.sac_learning import validate_sac_candidate
@@ -29,6 +30,8 @@ from fh5.sampling_evidence import verify_sampling_sources
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
+
+_Lease = TypeVar("_Lease", SACEnvironment, EvaluationEnvironment)
 
 
 @dataclass(frozen=True)
@@ -61,7 +64,7 @@ def _sha(path: Path, limit: int = 4 * 1024**2) -> str:
 def _configuration(path: Path) -> dict[str, Any]:
     config: dict[str, Any] = json.loads(read_bounded(path, 1024**2))
     if (
-        set(config) - ({"storage"} if config.get("version") == 2 else set())
+        set(config) - {"acquisition_retry"} - ({"storage"} if config.get("version") == 2 else set())
         != {
             "version",
             "store",
@@ -80,6 +83,18 @@ def _configuration(path: Path) -> dict[str, Any]:
         raise ValueError("Unsupported learning loop configuration")
     if config["version"] == 2:
         config["storage"] = validate_storage_budget(config.get("storage"), path.parent)
+    if "acquisition_retry" in config:
+        retry = config["acquisition_retry"]
+        if (
+            not isinstance(retry, dict)
+            or set(retry) != {"max_retries", "delay_seconds"}
+            or type(retry["max_retries"]) is not int
+            or not 0 <= retry["max_retries"] <= 3
+            or type(retry["delay_seconds"]) not in (int, float)
+            or not math.isfinite(retry["delay_seconds"])
+            or not 0 <= retry["delay_seconds"] <= 5
+        ):
+            raise ValueError("Learning acquisition retries require explicit finite bounds")
     for key, low, high in (
         ("rounds", 1, 10),
         ("steps_per_attempt", 1, 1000),
@@ -206,6 +221,67 @@ class _Loop:
         self.state["initialized"] = True
         self.save("ready")
         return True
+
+    def acquire(
+        self, kind: Literal["sampling", "evaluation"], number: int, opening: Callable[[], _Lease]
+    ) -> _Lease | None:
+        retry = self.config.get("acquisition_retry", {"max_retries": 0, "delay_seconds": 0})
+        for attempt in range(1, retry["max_retries"] + 2):
+            if (self.root / "stop.request").exists():
+                self.state["stop_reason"] = "stop_requested"
+                return None
+            self.save("opening_" + kind)
+            try:
+                source = opening()
+            except LearningUnavailable as error:
+                safe_to_retry = error.resources_released is True
+                self.state["child_resources_released"] &= safe_to_retry
+                self.state.setdefault("acquisition_failures", []).append(
+                    {
+                        "kind": kind,
+                        "round": number,
+                        "continuation": len(self.state["interruptions"]),
+                        "attempt": attempt,
+                        "error": str(error),
+                        "resources_released": safe_to_retry,
+                        "at_ns": time.perf_counter_ns(),
+                    }
+                )
+                self.save("acquisition_failed")
+                if not safe_to_retry:
+                    self.state["stop_reason"] = "release_fault"
+                    return None
+                if (self.root / "stop.request").exists():
+                    self.state["stop_reason"] = "stop_requested"
+                    return None
+                if attempt > retry["max_retries"]:
+                    self.state["stop_reason"] = "acquisition_retries_exhausted"
+                    return None
+                self.save("waiting_for_interface")
+                deadline = time.monotonic() + retry["delay_seconds"]
+                while time.monotonic() < deadline:
+                    if (self.root / "stop.request").exists():
+                        self.state["stop_reason"] = "stop_requested"
+                        return None
+                    time.sleep(min(0.05, max(0, deadline - time.monotonic())))
+                self.verify()
+                if not self.capacity(kind):
+                    return None
+            else:
+                if (self.root / "stop.request").exists():
+                    previous = self.state["child_resources_released"]
+                    self.state["child_resources_released"] = False
+                    released = source.close()
+                    self.state.setdefault("acquisition_closes", []).append(
+                        {"kind": kind, "round": number, "release": released}
+                    )
+                    self.state["child_resources_released"] = previous and (
+                        released.get("resources_released") is True
+                    )
+                    self.state["stop_reason"] = "stop_requested"
+                    return None
+                return source
+        return None
 
     def restore(self, expected: str) -> bool:
         path = self.root / "state.json"
@@ -363,11 +439,14 @@ class _Loop:
         request = self.sampling_request(number)
         row["sampling_checkpoint_sha256"] = self.state["latest_learner"]["sha256"]
         self.save("opening_sampler")
+        source = self.acquire(
+            "sampling", number, lambda: self.environment.sampling(f"round-{number:03d}")
+        )
+        if source is None:
+            return False
         summary = run_experiment(
             request,
-            sac_environment=SamplingLease(
-                self.environment.sampling(f"round-{number:03d}"), self.save
-            ),
+            sac_environment=SamplingLease(source, self.save),
             sac_stop_requested=lambda _: (self.root / "stop.request").exists(),
         ).summary["sac_cycle"]
         self.accept_sampling(row, request.output_dir, summary)
@@ -461,7 +540,7 @@ class _Loop:
             atomic_json(path, row["review_input"])
         return path
 
-    def evaluate(self, number: int, row: dict[str, Any]) -> dict[str, Any]:
+    def evaluate(self, number: int, row: dict[str, Any]) -> dict[str, Any] | None:
         from fh5.experiment import run_experiment
 
         root = self.root / f"round-{number:03d}"
@@ -497,6 +576,11 @@ class _Loop:
                 raise ValueError(
                     "Interrupted evaluation is retained; cannot overwrite its attempts"
                 )
+            source = self.acquire(
+                "evaluation", number, lambda: self.environment.evaluation(f"round-{number:03d}")
+            )
+            if source is None:
+                return None
             execution = run_experiment(
                 EvaluationRun(
                     batch,
@@ -508,7 +592,7 @@ class _Loop:
                     initial_operation="restart_ready",
                 ),
                 evaluation_environment=EvaluationLease(
-                    self.environment.evaluation(f"round-{number:03d}"),
+                    source,
                     self.save,
                     lambda: (self.root / "stop.request").exists(),
                 ),
@@ -714,6 +798,8 @@ class _Loop:
                 if not self.capacity("evaluation"):
                     return
                 binding = self.evaluate(number, row)
+                if binding is None:
+                    return
             if (self.root / "stop.request").exists():
                 self.state["stop_reason"] = "stop_requested"
                 return
