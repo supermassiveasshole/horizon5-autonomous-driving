@@ -35,7 +35,7 @@ from fh5.sac_checkpoint import (
     source_replays,
     state_digest,
 )
-from fh5.sac_data import LearningReplay
+from fh5.sac_data import LearningReplay, validate_cache_budget
 from fh5.sac_experience import expand_experience
 from fh5.sac_imitation import (
     checkpoint_imitation,
@@ -71,6 +71,7 @@ class SACTrain:
     demonstration_fraction: float | None = None
     imitation_weights: tuple[float, ...] | None = None
     imitation_protocol_batch: Path | None = None
+    raw_cache_bytes: int = 512 * 1024**2
 
 
 @dataclass(frozen=True)
@@ -79,6 +80,7 @@ class SACPolicyReplay:
     replay_file: Path
     report_path: Path
     noise: tuple[float, float] = (0.0, 0.0)
+    raw_cache_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -91,6 +93,7 @@ class SACResume:
     demonstration_fraction: float | None = None
     imitation_comparison: Path | None = None
     imitation_registry: Path | None = None
+    raw_cache_bytes: int | None = None
 
 
 class _Learner(NamedTuple):
@@ -122,6 +125,7 @@ class _Learner(NamedTuple):
 
 
 def _validate_configuration(request: SACTrain) -> None:
+    validate_cache_budget(request.raw_cache_bytes)
     if (
         type(request.steps) is not int
         or not 0 <= request.steps <= 10_000
@@ -223,7 +227,12 @@ def validate_sac_candidate(root: Path, expected_sha256: str) -> dict[str, Any]:
             expected_manifest_sha256=manifest["bc_manifest_sha256"],
         )
         data = LearningReplay(
-            torch, replay_file, manifest["replay_sha256"], bc, ActionBounds(**manifest["bounds"])
+            torch,
+            replay_file,
+            manifest["replay_sha256"],
+            bc,
+            ActionBounds(**manifest["bounds"]),
+            cache_bytes=request.raw_cache_bytes,
         )
         replay = json.loads(data.raw)
         source_replays(replay_file.parent, replay)
@@ -315,6 +324,8 @@ def _train(
         configuration = dict(manifest["configuration"], steps=operation.steps)
         if operation.demonstration_fraction is not None:
             configuration["demonstration_fraction"] = operation.demonstration_fraction
+        if operation.raw_cache_bytes is not None:
+            configuration["raw_cache_bytes"] = operation.raw_cache_bytes
         request = SACTrain(
             operation.checkpoint_dir,
             operation.checkpoint_dir / "experience/replay.json",
@@ -412,7 +423,14 @@ def _train(
         assert continuation is not None
         continuation["experience_additions"] = [sha for _, sha in operation.additions]
         continuation["new_transition_credit"] = added
-    data = LearningReplay(torch, request.replay_file, warm["replay_sha256"], bc, bounds)
+    data = LearningReplay(
+        torch,
+        request.replay_file,
+        warm["replay_sha256"],
+        bc,
+        bounds,
+        cache_bytes=request.raw_cache_bytes,
+    )
     if isinstance(operation, SACResume) and operation.imitation_comparison is not None:
         if imitation is None or imitation["protocol_sha256"] is None:
             raise ValueError("Imitation exit requires a protocol frozen before training")
@@ -610,7 +628,8 @@ def _train(
         ),
         "updates": metrics,
         "sampling": sampling.report(),
-        "raw_frame_bytes": data.raw_bytes,
+        "raw_frame_bytes": data.source_bytes,
+        "raw_frame_cache": data.cache_summary(),
         "feature_cache": "none; re-encode after updates",
         "density_coordinates": "continuous command before integer quantization",
         "q_action_coordinates": "actual rounded command; straight-through actor gradient surrogate",
@@ -686,7 +705,14 @@ def run_sac_policy_replay(request: SACPolicyReplay) -> RunResult:
         frozen = FrozenSAC(torch, request.checkpoint_dir, allow_legacy=True)
         manifest = frozen.manifest
         data = LearningReplay(
-            torch, request.replay_file, manifest["replay_sha256"], frozen.bc, frozen.bounds
+            torch,
+            request.replay_file,
+            manifest["replay_sha256"],
+            frozen.bc,
+            frozen.bounds,
+            cache_bytes=request.raw_cache_bytes
+            if request.raw_cache_bytes is not None
+            else manifest["configuration"].get("raw_cache_bytes", 512 * 1024**2),
         )
         summary = {
             "predictions": policy_predictions(
@@ -701,6 +727,7 @@ def run_sac_policy_replay(request: SACPolicyReplay) -> RunResult:
             "real_driving_validated": False,
             "density_coordinates": manifest["density_coordinates"],
             "q_action_coordinates": manifest["q_action_coordinates"],
+            "raw_frame_cache": data.cache_summary(),
         }
     request.report_path.parent.mkdir(parents=True, exist_ok=True)
     write_file(

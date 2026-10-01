@@ -48,6 +48,7 @@ def _sac(args: argparse.Namespace) -> int:
                 demonstration_fraction=args.demonstration_fraction,
                 imitation_comparison=args.imitation_comparison,
                 imitation_registry=args.imitation_registry,
+                raw_cache_bytes=args.raw_cache_bytes,
             )
         )
         print(json.dumps(resumed.summary["sac_learning"], ensure_ascii=False))
@@ -73,7 +74,11 @@ def _sac(args: argparse.Namespace) -> int:
         print(json.dumps(summary, ensure_ascii=False))
         return 4 if summary["stop_reason"] == "stop_requested" else 0
     if args.mode == "sac-policy-replay":
-        replayed = run_experiment(SACPolicyReplay(args.checkpoint, args.replay, args.report))
+        replayed = run_experiment(
+            SACPolicyReplay(
+                args.checkpoint, args.replay, args.report, raw_cache_bytes=args.raw_cache_bytes
+            )
+        )
         print(json.dumps(replayed.summary["sac_policy"], ensure_ascii=False))
         return 0
 
@@ -201,6 +206,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     sac_resume.add_argument("--checkpoint", type=Path, required=True)
     sac_resume.add_argument("--output", type=Path, required=True)
     sac_resume.add_argument("--steps", type=int, default=100)
+    sac_resume.add_argument(
+        "--raw-cache-bytes", type=int, help="Raw uint8 frame cache budget; omitted inherits"
+    )
     sac_resume.add_argument("--checkpoint-sha256", help="Require this exact parent manifest digest")
     sac_resume.add_argument(
         "--imitation-comparison",
@@ -228,6 +236,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     sac_policy = commands.add_parser("sac-policy-replay", help="Replay a frozen learned SAC policy")
     for name in ("checkpoint", "replay", "report"):
         sac_policy.add_argument("--" + name, type=Path, required=True)
+    sac_policy.add_argument(
+        "--raw-cache-bytes", type=int, help="Raw uint8 frame cache budget; omitted inherits"
+    )
     sac_prepare = commands.add_parser(
         "sac-prepare", help="Prepare synthetic numerical learning transitions; no devices"
     )

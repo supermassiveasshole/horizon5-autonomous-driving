@@ -79,4 +79,21 @@ uv run --locked fh5 learning-storage-plan --config runs/storage-request.json --o
 
 每次运行锁存首次观察到的停止原因，收尾期间清除 `stop.request` 不会撤销已生效的停止。评估中断标记只在评估停止回调实际返回停止时设置；若先失焦、后在释放资源时出现磁盘压力，原失焦仍保留，空间恢复也不能把它当作可自动跳过的资源中断。显式接续开启新的停止观察周期，不清改旧结果。
 
-该机制监测物理剩余空间，不是阶段内逻辑配额、空间预分配或硬实时保证；观察与停止之间仍可能发生写入，磁盘真的耗尽仍可能妨碍封存。展示降级、热缓存预算、writer 长时压力和真实 4K 共存仍待交付。软件测试进度见[运行期监测记录](validation/t15-running-monitor.md)。
+该机制监测物理剩余空间，不是阶段内逻辑配额、空间预分配或硬实时保证；观察与停止之间仍可能发生写入，磁盘真的耗尽仍可能妨碍封存。展示降级、writer 长时压力和真实 4K 共存仍待交付。软件测试进度见[运行期监测记录](validation/t15-running-monitor.md)。
+
+## 学习用数值帧热缓存
+
+`SACTrain` 的 `raw_cache_bytes` 控制原始 uint8 数值帧的常驻缓存；省略时为 512 MiB。允许正整数字节数，最高 512 MiB，且至少容纳配置中的一张模型输入图像。该数值是软件预算，不是本机实测推荐值。`sac-train` JSON 可直接设置此字段；续训及冻结回放可显式覆盖：
+
+```powershell
+uv run --locked fh5 sac-resume --checkpoint runs/candidate --output runs/continued --steps 100 --raw-cache-bytes 134217728
+uv run --locked fh5 sac-policy-replay --checkpoint runs/continued --replay runs/continued/experience/replay.json --report runs/cache-check.html --raw-cache-bytes 134217728
+```
+
+`SACResume` 和 `SACPolicyReplay` 省略预算时沿用候选配置；旧候选没有此字段时使用原 512 MiB 默认值。预算写入候选配置，不改变回报、采样种子或优化器状态。学习循环使用候选继承的预算。
+
+缓存按像素摘要共享同一帧；历史观测与转移保留引用，不持有额外图像张量。达到上限时淘汰最近最少使用的帧，后续需要时从原始数值文件重新读入并核验摘要。只释放内存，不删除冷存储文件，不淘汰训练转移。输入特征仍根据每条观测的时间、状态和动作元数据构建；不会把一帧的时间信息复制到共享它的其他观测。训练或回放组批时逐帧复制到浮点批次，不永久保存 encoder latent。
+
+报告中的 `raw_frame_cache` 给出预算、缓存峰值/当前字节数、唯一帧及常驻帧数、命中、重载和淘汰次数。`raw_frame_bytes` 保持学习观测引用的唯一原始像素总量含义，不能把它当作缓存占用。缓存上限不含观测校验的临时图像、浮点批次、模型、优化器、元数据和经验合并的暂存；浮点批次仍有原来的 256 MiB 上限，经验封存/合并仍保留原 512 MiB 数据限制。因此这不是整个进程 RAM/显存或无限多圈 replay 的总预算保证。
+
+低预算会增加磁盘读取；从缓存重载时发现缺失或损坏文件会拒绝处理，不用错误像素发布新候选。保留模型原型、梯度更新对照及尚待完成的长时检查见[缓存验证记录](validation/t15-frame-cache.md)。
