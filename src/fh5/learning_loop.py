@@ -145,6 +145,7 @@ class _Loop:
     def __init__(self, root: Path, config: dict[str, Any], environment: LearningEnvironment):
         self.root, self.config, self.environment = root, config, environment
         self.monitor: StorageMonitor | None = None
+        self.requested_stop_reason: str | None = None
         self.store = Path(config["store"]["directory"])
         self.registry = Path(config["registry"])
         self.state: dict[str, Any] = {
@@ -299,9 +300,12 @@ class _Loop:
         return None
 
     def stopping_reason(self) -> str | None:
-        if (self.root / "stop.request").exists():
-            return "stop_requested"
-        return self.monitor.reason() if self.monitor is not None else None
+        if self.requested_stop_reason is None:
+            if (self.root / "stop.request").exists():
+                self.requested_stop_reason = "stop_requested"
+            elif self.monitor is not None:
+                self.requested_stop_reason = self.monitor.reason()
+        return self.requested_stop_reason
 
     def stopped(self) -> bool:
         return self.stopping_reason() is not None
@@ -597,6 +601,8 @@ class _Loop:
         if evaluation_conditions(frozen) != evaluation_conditions(basis.batch):
             raise ValueError("Candidate evaluation changed frozen comparison conditions")
         execution = row.get("evaluation_run") if row.get("evaluation_completion_sha256") else None
+        row.setdefault("evaluation_interrupted_by_stop", False)
+        row.setdefault("evaluation_interrupted_by_resource", False)
         if execution is None:
             self.save("evaluating")
             if (root / "evaluation").exists():
@@ -608,6 +614,18 @@ class _Loop:
             )
             if source is None:
                 return None
+
+            def evaluation_stopped() -> bool:
+                reason = self.stopping_reason()
+                if reason is not None:
+                    field = (
+                        "evaluation_interrupted_by_stop"
+                        if reason == "stop_requested"
+                        else "evaluation_interrupted_by_resource"
+                    )
+                    row[field] = True
+                return reason is not None
+
             execution = run_experiment(
                 EvaluationRun(
                     batch,
@@ -621,18 +639,13 @@ class _Loop:
                 evaluation_environment=EvaluationLease(
                     source,
                     self.save,
-                    self.stopped,
+                    evaluation_stopped,
                 ),
             ).summary["evaluation_run"]
             completion = root / "evaluation/completion.json"
             if completion.is_file():
                 row["evaluation_completion_sha256"] = _sha(completion)
         row["evaluation_run"] = execution
-        row.setdefault("evaluation_interrupted_by_stop", (self.root / "stop.request").exists())
-        row.setdefault(
-            "evaluation_interrupted_by_resource",
-            self.monitor is not None and self.monitor.reason() is not None,
-        )
         self.state["child_resources_released"] &= execution["resources_released"]
         for attempt in range(10):
             review_output = root / ("reviewed" if attempt == 0 else f"reviewed-{attempt:03d}")
