@@ -400,6 +400,7 @@ def _train(
     else:
         saved = restored
     added = 0
+    expansion = None
     if isinstance(operation, SACResume) and operation.additions:
         if any(
             operation.output_dir.resolve().is_relative_to(p.parent.resolve())
@@ -407,7 +408,7 @@ def _train(
         ):
             raise ValueError("SAC output must be outside its experience additions")
         temporary = Path(resources.enter_context(TemporaryDirectory(prefix="fh5-sac-")))
-        replay_file, replay_sha, added = expand_experience(
+        replay_file, replay_sha, added, expansion = expand_experience(
             torch,
             request.replay_file,
             warm["replay_sha256"],
@@ -607,6 +608,7 @@ def _train(
         "update_duration_s": time.monotonic() - started,
         "steps_requested": request.steps,
         "experience_added_transitions": added,
+        "experience_expansion": expansion,
         "steps_completed": len(metrics),
         "total_steps": start_step + len(metrics),
         "stop_reason": stop_reason,
