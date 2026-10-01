@@ -103,7 +103,7 @@ class _StopMenu:
 
 
 @dataclass
-class _StopDrive:
+class StoppingDrive:
     source: RealtimeEnvironment
     stopped: Callable[[], bool]
 
@@ -151,7 +151,7 @@ class EvaluationLease:
 
     def driving(self, slot_id: str, ready_state: dict[str, Any]) -> RealtimeEnvironment:
         self.phase("evaluating")
-        return _StopDrive(self.source.driving(slot_id, ready_state), self.stopped)
+        return StoppingDrive(self.source.driving(slot_id, ready_state), self.stopped)
 
     def close(self) -> dict[str, Any]:
         return self.source.close()

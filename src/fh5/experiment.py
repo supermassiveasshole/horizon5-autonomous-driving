@@ -104,7 +104,7 @@ from fh5.routes import (
     locate_route,
 )
 from fh5.sac import SACCriticReplay, SACCriticResume, SACCriticWarmup, run_critic
-from fh5.sac_cycle import SACCycle, SACEnvironment, run_sac_cycle
+from fh5.sac_cycle import SACCycle, SACEnvironment, SACRealtimeCycle, run_sac_cycle
 from fh5.sac_learning import (
     SACPolicyReplay,
     SACResume,
@@ -113,6 +113,7 @@ from fh5.sac_learning import (
     run_sac_training,
 )
 from fh5.sac_realtime_experience import SACRealtimePrepare, prepare_realtime_experience
+from fh5.sac_realtime_sampler import SACRealtimeEnvironment
 from fh5.sac_replay import SACReplayPrepare, prepare_sac_replay
 from fh5.storage import LearningStoragePlan, plan_learning_storage
 from fh5.temporal_bc import TemporalBCReplay, TemporalBCTrain, run_temporal_bc
@@ -296,6 +297,7 @@ def run_experiment(
     | RewardReplay
     | SACReplayPrepare
     | SACRealtimePrepare
+    | SACRealtimeCycle
     | SACCriticWarmup
     | SACCriticReplay
     | SACCriticResume
@@ -344,6 +346,7 @@ def run_experiment(
     learning_resources: LearningResources | None = None,
     sac_stop_requested: Callable[[int], bool] | None = None,
     sac_environment: SACEnvironment | None = None,
+    sac_realtime_environment: SACRealtimeEnvironment | None = None,
     evaluation_environment: EvaluationEnvironment | None = None,
     learning_environment: LearningEnvironment | None = None,
     collection_write: WriteFile | None = None,
@@ -446,6 +449,10 @@ def run_experiment(
         if numeric_actor is None:
             raise ValueError("Asynchronous SAC preparation requires the frozen sampling actor")
         return prepare_realtime_experience(request, numeric_actor)
+    if isinstance(request, SACRealtimeCycle):
+        if sac_realtime_environment is None:
+            raise ValueError("SAC realtime cycle requires an explicit external environment")
+        return run_sac_cycle(request, sac_realtime_environment, sac_stop_requested)
     if isinstance(request, SACCycle):
         if sac_environment is None:
             raise ValueError("SAC cycle requires an explicit synthetic environment")

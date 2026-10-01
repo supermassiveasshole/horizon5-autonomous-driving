@@ -7,14 +7,17 @@ import html
 import importlib
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.learning_runtime import preserve_torch_state
+from fh5.realtime import RealtimeConfig, RealtimeRun
 from fh5.sac_actor import FrozenSAC
 from fh5.sac_learning import SACResume
+from fh5.sac_realtime_experience import SACRealtimePrepare
+from fh5.sac_realtime_sampler import SACRealtimeEnvironment, sample_realtime_attempt
 from fh5.sac_replay import SACReplayPrepare
 from fh5.sac_sampler import (
     SACEnvironment,
@@ -22,12 +25,20 @@ from fh5.sac_sampler import (
     SACStart,
     sample_attempt,
 )
+from fh5.sac_sampling_actor import SACSamplingActor
 from fh5.sampling_evidence import seal_sampling_attempt, verify_sampling_sources
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
 
-__all__ = ["SACCycle", "SACEnvironment", "SACSample", "SACStart", "run_sac_cycle"]
+__all__ = [
+    "SACCycle",
+    "SACRealtimeCycle",
+    "SACEnvironment",
+    "SACSample",
+    "SACStart",
+    "run_sac_cycle",
+]
 
 
 @dataclass(frozen=True)
@@ -54,9 +65,36 @@ class SACCycle:
             raise ValueError("SAC cycle requires finite attempts, steps and sampler seed")
 
 
+@dataclass(frozen=True)
+class SACRealtimeCycle:
+    checkpoint_dir: Path
+    recording_config_file: Path
+    task_file: Path
+    reward_file: Path
+    output_dir: Path
+    runtime: RealtimeConfig
+    seconds_per_attempt: float = 1.0
+    cycles: int = 2
+    max_updates_per_attempt: int = 8
+    seed: int = 19
+    expected_checkpoint_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.cycles) is not int
+            or not 1 <= self.cycles <= 10
+            or type(self.max_updates_per_attempt) is not int
+            or not 1 <= self.max_updates_per_attempt <= 1000
+            or type(self.seed) is not int
+            or not 0 <= self.seed < 2**32
+        ):
+            raise ValueError("SAC realtime cycle requires finite attempts, updates and seed")
+        RealtimeRun(self.output_dir, self.runtime, seconds=self.seconds_per_attempt)
+
+
 def run_sac_cycle(
-    request: SACCycle,
-    environment: SACEnvironment,
+    request: SACCycle | SACRealtimeCycle,
+    environment: SACEnvironment | SACRealtimeEnvironment,
     stop_requested: Callable[[int], bool] | None = None,
 ) -> RunResult:
     from fh5.experiment import RunResult, run_experiment
@@ -98,7 +136,15 @@ def run_sac_cycle(
                 {
                     "source_kind": "synthetic",
                     "cycles": request.cycles,
-                    "steps_per_attempt": request.steps_per_attempt,
+                    **(
+                        {
+                            "runtime": asdict(request.runtime),
+                            "seconds_per_attempt": request.seconds_per_attempt,
+                            "max_updates_per_attempt": request.max_updates_per_attempt,
+                        }
+                        if isinstance(request, SACRealtimeCycle)
+                        else {"steps_per_attempt": request.steps_per_attempt}
+                    ),
                     "seed": request.seed,
                     "update_ratio": "at most one critic update per newly accepted transition",
                     "protocol_files": {
@@ -120,39 +166,96 @@ def run_sac_cycle(
                 actor = FrozenSAC(torch, checkpoint)
                 if expected_sampling_sha is not None and actor.sha != expected_sampling_sha:
                     raise ValueError("Sampling candidate changed after its verified handoff")
-                if (request.steps_per_attempt + 1) * len(
-                    actor.pixels.history_offsets_ms
-                ) * actor.pixels.size[0] * actor.pixels.size[1] * 3 > 512 * 1024**2:
+                frame_count = (
+                    int(request.seconds_per_attempt * request.runtime.decision_hz) + 1
+                    if isinstance(request, SACRealtimeCycle)
+                    else request.steps_per_attempt + 1
+                )
+                if (
+                    frame_count
+                    * len(actor.pixels.history_offsets_ms)
+                    * actor.pixels.size[0]
+                    * actor.pixels.size[1]
+                    * 3
+                    > 512 * 1024**2
+                ):
                     raise ValueError("SAC attempt exceeds 512 MiB numerical frame budget")
                 attempt_dir = root / f"attempt-{number:03d}"
-                result, review = sample_attempt(
-                    environment,
-                    actor,
-                    attempt_dir,
-                    request.recording_config_file,
-                    f"sac-attempt-{number}",
-                    request.steps_per_attempt,
-                    request.seed + number,
-                    stopped,
-                )
+                if isinstance(request, SACRealtimeCycle):
+                    runtime = request.runtime
+                    if (
+                        runtime.pixels != actor.pixels
+                        or runtime.action_offsets_ms != (200, 100, 0)
+                        or actor.bc.original_contract["actor_shape"]
+                        != {
+                            "action_count": len(runtime.action_offsets_ms),
+                            "reference_count": runtime.reference_count,
+                        }
+                        or any(
+                            getattr(runtime, key) != getattr(actor.bounds, key)
+                            for key in ("max_steer", "max_throttle", "max_brake")
+                        )
+                    ):
+                        raise ValueError("Realtime execution contract differs from the learner")
+                    result, review = sample_realtime_attempt(
+                        cast(SACRealtimeEnvironment, environment),
+                        checkpoint,
+                        actor.sha,
+                        attempt_dir,
+                        request.recording_config_file,
+                        request.runtime,
+                        request.seconds_per_attempt,
+                        f"sac-attempt-{number}",
+                        request.seed + number,
+                        stopped,
+                    )
+                else:
+                    result, review = sample_attempt(
+                        cast(SACEnvironment, environment),
+                        actor,
+                        attempt_dir,
+                        request.recording_config_file,
+                        f"sac-attempt-{number}",
+                        request.steps_per_attempt,
+                        request.seed + number,
+                        stopped,
+                    )
                 summary["attempts"].append(result)
                 result["source_assets"] = seal_sampling_attempt(attempt_dir, review)
-                if stopped():
+                if stopped() or result["stop_reason"] == "user_stop":
                     summary["stop_reason"] = "stop_requested"
                     break
                 if result["error"]:
                     summary["stop_reason"] = "sampling_fault"
                     break
-                prepared = run_experiment(
-                    SACReplayPrepare(
-                        attempt_dir / "recording",
-                        attempt_dir / "trace.json",
-                        request.task_file,
-                        request.reward_file,
-                        attempt_dir / "prepared",
-                        review,
-                    )
-                ).summary["sac_replay"]
+                if isinstance(request, SACRealtimeCycle):
+                    prepared = run_experiment(
+                        SACRealtimePrepare(
+                            attempt_dir / "recording",
+                            attempt_dir / "execution",
+                            request.task_file,
+                            request.reward_file,
+                            attempt_dir / "prepared",
+                            review,
+                        ),
+                        numeric_actor=SACSamplingActor(
+                            checkpoint,
+                            actor.pixels,
+                            actor.sha,
+                            exploration_seed=request.seed + number,
+                        ),
+                    ).summary["sac_replay"]
+                else:
+                    prepared = run_experiment(
+                        SACReplayPrepare(
+                            attempt_dir / "recording",
+                            attempt_dir / "trace.json",
+                            request.task_file,
+                            request.reward_file,
+                            attempt_dir / "prepared",
+                            review,
+                        )
+                    ).summary["sac_replay"]
                 result.update(prepared)
                 verify_sampling_sources(result["source_assets"])
                 replay = attempt_dir / "prepared/replay.json"
@@ -166,7 +269,9 @@ def run_sac_cycle(
                     SACResume(
                         checkpoint,
                         candidate,
-                        steps=count,
+                        steps=min(count, request.max_updates_per_attempt)
+                        if isinstance(request, SACRealtimeCycle)
+                        else count,
                         additions=((replay, prepared["replay_sha256"]),),
                         expected_checkpoint_sha256=actor.sha,
                     ),
@@ -207,6 +312,10 @@ def run_sac_cycle(
         try:
             released = environment.close()
             summary["resources_released"] = released.get("resources_released") is True
+            if isinstance(request, SACRealtimeCycle):
+                summary["resources_released"] &= all(
+                    a["resources_released"] for a in summary["attempts"]
+                )
         except Exception as error:
             summary["release_error"] = str(error)
         if not summary["resources_released"] and summary["stop_reason"] == "budget_completed":

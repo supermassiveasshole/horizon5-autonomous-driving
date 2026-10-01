@@ -115,6 +115,47 @@ run_experiment(
 
 验证与已知边界见[异步经验接入记录](validation/t10-asynchronous-experience.md)。
 
+## 自动交替异步采样与学习
+
+`SACRealtimeCycle` 将上述异步运行、独立经验审核和续训接成有界循环。
+它复用 `RealtimeRun` 的采集、推理、动作租期及旁路存档；学习只在采样资源全部释放之后进行。
+当前使用实际 CPU SAC 和合成外部 I/O，原生 SAC 资格与 #15 的恢复调度尚未接入。
+
+```python
+from fh5.realtime import RealtimeConfig
+from fh5.sac_cycle import SACRealtimeCycle
+
+result = run_experiment(
+    SACRealtimeCycle(
+        checkpoint_dir=Path("runs/sac-initial"),
+        recording_config_file=Path("configs/policy-record.json"),
+        task_file=Path("runs/task.json"),
+        reward_file=Path("configs/reward.json"),
+        output_dir=Path("runs/sac-async-cycle"),
+        runtime=RealtimeConfig(pixels=trained_pixel_contract),
+        seconds_per_attempt=10,
+        cycles=2,
+        max_updates_per_attempt=8,
+        expected_checkpoint_sha256=initial_manifest_sha256,
+    ),
+    sac_realtime_environment=environment,
+)
+```
+
+示例中的像素、历史长度、参考槽位及动作幅度必须与实际检查点一致；不一致时在取得输入设备前拒绝。
+`SACRealtimeEnvironment.start(identity, runtime)` 返回一次新的 `RealtimeEnvironment`；
+它须准备新的观测/控制历史并对命令产生合成反馈。`finish(recording_dir)` 在该次运行器资源全部释放后
+返回独立核验文件或 `None`，`close()` 释放环境级资源。适配器示例见 `tests/test_sac_realtime_cycle.py`。
+
+每次执行保存完整命令/数值图像记录及原始遥测，封存来源后生成 v3 replay。
+一次学习的 critic 更新数不超过新接纳转移数和 `max_updates_per_attempt` 两者中的较小值。
+候选完整保存、重载且预测核验通过后，下一次尝试才换用其冻结快照；父模型和可靠默认版本不变。
+当前最多 10 次尝试、每次 600 秒，并受已有图像和经验容量限制；这些是软件上限，不是实机资格。
+
+外部停止、`stop.request` 或停止回调会阻止后续采样和学习；发送失败、释放未确认、无合格经验同样停止循环，
+保留已启动尝试。环境级关闭成功不能覆盖某次运行的释放失败。故障记录不会生成驾驶进步结论。
+此入口尚无专用 CLI，也不恢复被中断的异步循环；已封存候选仍可使用已有 `SACResume`。
+
 ## 新经验和持续学习
 
 新增转移先经过已有 `SACReplayPrepare` 的独立任务、奖励、动作反馈和时序检查。记录窗口截断保留末状态 bootstrap；确认失败保留负回报与终止；接口故障不当作驾驶失败学习。
