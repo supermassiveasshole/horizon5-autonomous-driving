@@ -8,7 +8,7 @@ import json
 import math
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
@@ -32,8 +32,9 @@ from fh5.learning_recovery import (
     sampling_bindings,
     verify_archived_sampling,
 )
+from fh5.learning_updates import UpdateProgress, retained_update_progress
 from fh5.sac_cycle import SACCycle, SACEnvironment
-from fh5.sac_learning import validate_sac_candidate
+from fh5.sac_learning import SACResume, validate_sac_candidate
 from fh5.sampling_evidence import verify_sampling_sources
 
 if TYPE_CHECKING:
@@ -380,7 +381,7 @@ class _Loop:
             saved = state[key]
             if _learner(Path(saved["directory"]), saved["sha256"]) != saved:
                 raise ValueError("Learning continuation checkpoint changed")
-        for row in state["rounds"]:
+        for number, row in enumerate(state["rounds"]):
             for archived in row.get("sampling_history", []):
                 verify_archived_sampling(archived)
             for binding in sampling_bindings(row):
@@ -393,6 +394,8 @@ class _Loop:
                     verify_sampling_sources(attempt.get("source_assets", {}))
             if "candidate_evaluation" in row:
                 _input(self.root, row["candidate_evaluation"]).verify()
+            if row.get("update_segments"):
+                self.update_progress(number, row)
         self.reconcile_sampling()
         self.reconcile_evaluation()
         self.reconcile_commit()
@@ -558,6 +561,7 @@ class _Loop:
 
         request = self.sampling_request(number)
         row["sampling_checkpoint_sha256"] = self.state["latest_learner"]["sha256"]
+        row["sampling_parent"] = dict(self.state["latest_learner"])
         self.save("opening_sampler")
         source = self.acquire(
             "sampling",
@@ -586,6 +590,78 @@ class _Loop:
                 if summary["stop_reason"] == "stop_requested"
                 else "sampling_" + summary["stop_reason"]
             )
+            return False
+        return True
+
+    def update_progress(self, number: int, row: dict[str, Any]) -> UpdateProgress:
+        parent = row.get("sampling_parent", self.state["explorer"])
+        if (
+            parent["sha256"] != row["sampling_checkpoint_sha256"]
+            or _learner(Path(parent["directory"]), parent["sha256"]) != parent
+        ):
+            raise ValueError("Stopped updates lost their original sampling parent")
+        request = replace(
+            self.sampling_request(number),
+            checkpoint_dir=Path(parent["directory"]),
+            expected_checkpoint_sha256=parent["sha256"],
+        )
+        progress = retained_update_progress(request, parent, row.get("update_segments", []))
+        if (
+            progress.earned != row["eligible_transitions"]
+            or progress.completed != row["learner_updates"]
+            or progress.learner["sha256"] != row["candidate_sha256"]
+        ):
+            raise ValueError("Stopped updates differ from their retained progress")
+        return progress
+
+    def resume_updates(self, number: int, row: dict[str, Any]) -> bool:
+        from fh5.experiment import run_experiment
+
+        progress = self.update_progress(number, row)
+        if progress.learner != self.state["latest_learner"]:
+            raise ValueError("Stopped updates differ from the current learner")
+        segments = row.get("update_segments", [])
+        if len(segments) >= 10:
+            raise ValueError("Learning round exceeds 10 retained update continuations")
+        if not self.capacity("updating"):
+            return False
+        output = self.root / f"round-{number:03d}" / f"updates-{len(segments):03d}"
+        self.save("resuming_updates")
+        learned = run_experiment(
+            SACResume(
+                Path(progress.learner["directory"]),
+                output,
+                steps=progress.earned - progress.completed,
+                expected_checkpoint_sha256=progress.learner["sha256"],
+            ),
+            sac_stop_requested=lambda _: self.stopped(),
+        ).summary["sac_learning"]
+        learner = _learner(output, _sha(output / "policy.json"))
+        proposed = {
+            **row,
+            "update_segments": [
+                *segments,
+                {"directory": str(output), "sha256": learner["sha256"]},
+            ],
+            "learner_updates": row["learner_updates"] + learned["steps_completed"],
+            "candidate_sha256": learner["sha256"],
+        }
+        checked = self.update_progress(number, proposed)
+        row.update(proposed)
+        self.state["learner_updates"] += checked.completed - progress.completed
+        self.state["latest_learner"] = checked.learner
+        self.state.setdefault("recoveries", []).append(
+            {
+                "kind": "resumed_updates",
+                "round": number,
+                "completed": checked.completed - progress.completed,
+                "remaining": checked.earned - checked.completed,
+                "directory": str(output),
+            }
+        )
+        self.save("learned")
+        if learned["stop_reason"] == "stop_requested" or self.stopped():
+            self.state["stop_reason"] = self.stopping_reason() or "stop_requested"
             return False
         return True
 
@@ -940,6 +1016,9 @@ class _Loop:
             if self.stopped():
                 self.state["stop_reason"] = self.stopping_reason()
                 return
+            if row["learner_updates"] < row["eligible_transitions"]:
+                if not self.resume_updates(number, row):
+                    return
             binding = row.get("candidate_evaluation")
             if binding is None:
                 if not self.capacity("evaluation"):

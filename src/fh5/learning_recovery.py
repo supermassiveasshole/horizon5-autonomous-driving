@@ -185,15 +185,20 @@ def _require_originals(
 
 
 def completed_sampling(
-    request: SACCycle, parent: dict[str, Any]
+    request: SACCycle, parent: dict[str, Any], *, allow_stopped_updates: bool = False
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Only a sealed successful single attempt can cross this recovery boundary."""
+    """Authenticate a sealed single attempt and its complete learner snapshot."""
     root = request.output_dir
     protocol = json.loads(read_bounded(root / "protocol.json", 1024**2))
     summary: dict[str, Any] = json.loads(read_bounded(root / "summary.json", 4 * 1024**2))
     if protocol != _expected_protocol(request) or not (
         summary.get("source_kind") == "synthetic"
-        and summary.get("stop_reason") == "budget_completed"
+        and summary.get("stop_reason")
+        in (
+            ("budget_completed", "stop_requested")
+            if allow_stopped_updates
+            else ("budget_completed",)
+        )
         and summary.get("resources_released") is True
         and summary.get("commands_sent_to_game") is False
         and summary.get("latest_candidate") == "candidate-000"
@@ -246,8 +251,12 @@ def completed_sampling(
         or not 1 <= count <= request.steps_per_attempt
         or count != len(replay["transitions"])
         or type(updates) is not int
-        or updates != count
-        or report["stop_reason"] != "budget_completed"
+        or not 0 <= updates <= count
+        or (
+            (updates != count or report["stop_reason"] != "budget_completed")
+            if summary["stop_reason"] == "budget_completed"
+            else (updates >= count or report["stop_reason"] != "stop_requested")
+        )
         or report["steps_completed"] != updates
         or report["steps_requested"] != count
         or learner["total_steps"] != parent["total_steps"] + updates
