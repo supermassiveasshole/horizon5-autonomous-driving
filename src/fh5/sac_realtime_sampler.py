@@ -80,7 +80,7 @@ def sample_realtime_attempt(
         result.update(
             stop_reason=executed["stop_reason"],
             resources_released=executed["resources_released"],
-            decisions=executed["decisions"],
+            decision_count=len(executed["decisions"]),
         )
         packets = read_realtime_journal(root / "execution", executed)
         run_experiment(

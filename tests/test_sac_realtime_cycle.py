@@ -126,6 +126,21 @@ def test_external_stop_retains_attempt_without_learning_or_restarting(tmp_path, 
     assert not (settings.output_dir / "candidate-000").exists()
 
 
+def test_async_results_reference_originals_without_repeating_frame_diagnostics(
+    tmp_path, sac_policy
+):
+    settings = replace(request(tmp_path, sac_policy), cycles=1)
+    environment = AsyncEnvironment(settings.output_dir)
+    result = run_experiment(settings, sac_realtime_environment=environment).summary["sac_cycle"]
+    assert result["stop_reason"] == "budget_completed", result
+    attempt = result["attempts"][0]
+    assert "decisions" not in attempt
+    assert attempt["source_assets"]["kind"] == "sampling-source-index-v1"
+    execution = json.loads((settings.output_dir / "attempt-000/execution/report.json").read_bytes())
+    assert attempt["decision_count"] == len(execution["decisions"])
+    assert attempt["learner_updates"] == 2
+
+
 @pytest.mark.parametrize(
     "change",
     [{"max_steer": 0.3}, {"reference_count": 2}, {"action_offsets_ms": (180, 80, 0)}],

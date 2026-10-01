@@ -1,7 +1,9 @@
 """Continuous asynchronous learning through the experiment entry point."""
 
 import json
+import sqlite3
 from dataclasses import asdict, replace
+from pathlib import Path
 
 import pytest
 from test_candidate_store import candidate_setup, record_config
@@ -183,8 +185,18 @@ def test_async_pending_child_cannot_omit_original_pixels_from_its_inventory(tmp_
     summary_file = child / "summary.json"
     summary = json.loads(summary_file.read_bytes())
     attempt = summary["attempts"][0]
-    omitted = next(path for path in attempt["source_assets"] if path.endswith(".rgb"))
-    del attempt["source_assets"][omitted]
+    binding = attempt["source_assets"]
+    index = Path(binding["path"])
+    connection = sqlite3.connect(index)
+    try:
+        omitted = connection.execute("SELECT path FROM assets WHERE path LIKE '%.rgb'").fetchone()[
+            0
+        ]
+        connection.execute("DELETE FROM assets WHERE path = ?", (omitted,))
+        connection.commit()
+    finally:
+        connection.close()
+    binding["sha256"] = sha(index)
     summary_file.write_text(json.dumps(summary))
     (child / "attempt-000/cycle-result.json").write_text(json.dumps(attempt))
     before = {path: sha(path) for path in root.rglob("*") if path.is_file()}
@@ -227,7 +239,12 @@ def test_large_async_result_can_be_acknowledged_and_resumed(tmp_path, async_seed
         backend = LargeMetadataBackend(async_seed[0])
         result = run_experiment(operation, learning_environment=backend).summary["learning_loop"]
     child = root / "round-000/learning"
-    assert (child / "summary.json").stat().st_size > 4 * 1024**2
+    execution = child / "attempt-000/execution/report.json"
+    assert execution.stat().st_size > 4 * 1024**2  # Cross the old refusal threshold.
+    assert (child / "summary.json").stat().st_size < execution.stat().st_size
+    attempt = json.loads((child / "summary.json").read_bytes())["attempts"][0]
+    assert "decisions" not in attempt
+    assert attempt["source_assets"]["kind"] == "sampling-source-index-v1"
     assert result["stop_reason"] == "budget_completed", result.get("error")
     assert result["learner_updates"] == 2 and result["rounds_completed"] == 1
     assert result["resources_released"]

@@ -232,7 +232,9 @@ def run_sac_cycle(
                         stopped,
                     )
                 summary["attempts"].append(result)
-                result["source_assets"] = seal_sampling_attempt(attempt_dir, review)
+                result["source_assets"] = seal_sampling_attempt(
+                    attempt_dir, review, indexed=isinstance(request, SACRealtimeCycle)
+                )
                 if stopped() or result["stop_reason"] == "user_stop":
                     summary["stop_reason"] = "stop_requested"
                     break

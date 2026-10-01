@@ -10,6 +10,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fh5.artifact_io import read_json, sha256_file
 from fh5.numeric_images import (
     DecisionActor,
     NumericDecision,
@@ -19,7 +20,7 @@ from fh5.numeric_images import (
     validate_decision,
 )
 from fh5.numeric_recording import numeric_features, read_numeric_frame
-from fh5.realtime import MAX_REALTIME_REPORT_BYTES, RealtimeNumericReplay
+from fh5.realtime import RealtimeNumericReplay
 from fh5.sac_actions import ActionBounds, ActionSupportUnavailable
 from fh5.sac_replay import command_action
 
@@ -27,24 +28,16 @@ if TYPE_CHECKING:
     from fh5.experiment import RunResult
 
 
-def _read(path: Path, limit: int = MAX_REALTIME_REPORT_BYTES) -> bytes:
-    with path.open("rb") as stream:
-        payload = stream.read(limit + 1)
-    if len(payload) > limit:
-        raise ValueError("Replay asset exceeds bounded read limit")
-    return payload
-
-
 def read_realtime_recording(root: Path) -> dict[str, Any]:
-    manifest = json.loads(_read(root / "realtime-manifest.json", 4096))
-    payload = _read(root / "report.json")
+    manifest = read_json(root / "realtime-manifest.json")
+    path = root / "report.json"
     if (
         not isinstance(manifest, dict)
         or manifest.get("version") != 1
-        or hashlib.sha256(payload).hexdigest() != manifest.get("report_sha256")
+        or sha256_file(path) != manifest.get("report_sha256")
     ):
         raise ValueError("Real-time report hash mismatch or unsupported manifest")
-    report: dict[str, Any] = json.loads(payload)
+    report: dict[str, Any] = read_json(path)
     if (
         not isinstance(report, dict)
         or report["version"] != 2
@@ -71,8 +64,6 @@ def read_realtime_journal(
     ):
         raise ValueError("Incomplete real-time journal")
     path = asset(root, reference["path"])
-    if path.stat().st_size > 256 * 1024**2:
-        raise ValueError("Journal exceeds bounded replay limit")
     with path.open("rb") as stream:
         if hashlib.file_digest(stream, "sha256").hexdigest() != reference["sha256"]:
             raise ValueError("Real-time journal hash mismatch")
@@ -82,9 +73,7 @@ def read_realtime_journal(
     packets = []
     stops = []
     with path.open("rb") as stream:
-        while line := stream.readline(1024**2 + 1):
-            if len(line) > 1024**2 or len(sequences) >= 1_000_000:
-                raise ValueError("Journal event exceeds bounded replay limit")
+        for line in stream:
             event = json.loads(line)
             if (
                 not isinstance(event, dict)
@@ -227,10 +216,10 @@ def read_realtime_decision(
     reference = row["archive"]
     if not reference or row["archive_reason"] is not None:
         raise ValueError("Numerical input was not archived")
-    payload = _read(asset(root, reference["path"]), 1024**2)
-    if hashlib.sha256(payload).hexdigest() != reference["sha256"]:
+    path = asset(root, reference["path"])
+    if sha256_file(path) != reference["sha256"]:
         raise ValueError("Numerical input metadata hash mismatch")
-    saved = json.loads(payload)
+    saved = read_json(path)
     for key in (
         "index",
         "decision_id",

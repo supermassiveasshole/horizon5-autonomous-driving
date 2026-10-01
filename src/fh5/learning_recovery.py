@@ -4,17 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from fh5.artifact_io import read_json, sha256_file
 from fh5.collection_store import atomic_json, encode, read_bounded
 from fh5.numeric_images import asset
 from fh5.realtime_numeric_replay import read_realtime_journal, read_realtime_recording
 from fh5.sac_cycle import SACCycle, SACRealtimeCycle, sampling_update_budget
 from fh5.sac_learning import validate_sac_candidate
 from fh5.sampling_evidence import (
-    SAMPLING_RESULT_LIMIT,
+    sampling_sources,
     seal_sampling_sources,
     verify_sampling_sources,
 )
@@ -73,7 +75,7 @@ def _expected_protocol(request: SACCycle | SACRealtimeCycle) -> dict[str, Any]:
         ),
         "seed": request.seed,
         "update_ratio": "at most one critic update per newly accepted transition",
-        "protocol_files": {str(path): _sha(path, 1024**2) for path in files},
+        "protocol_files": {str(path): _sha(path) for path in files},
     }
     canonical: dict[str, Any] = json.loads(encode(result))
     return canonical  # Match the saved JSON tuple/list representation.
@@ -88,9 +90,9 @@ def retryable_sampling(
 ) -> bool:
     """Only released, sealed failures without any learner output may be resampled."""
     root = request.output_dir
-    if _sha(root / "summary.json", SAMPLING_RESULT_LIMIT) != expected_summary:
+    if _sha(root / "summary.json") != expected_summary:
         raise ValueError("Retained sampling result changed")
-    summary = json.loads(read_bounded(root / "summary.json", SAMPLING_RESULT_LIMIT))
+    summary = read_json(root / "summary.json")
     reason = summary.get("stop_reason")
     attempts = summary.get("attempts", [])
     if (
@@ -112,7 +114,7 @@ def retryable_sampling(
     protocol = json.loads(read_bounded(root / "protocol.json", 1024**2))
     if protocol != _expected_protocol(request):
         raise ValueError("Failed sampling differs from its frozen retry protocol")
-    attempt_names = {path.name for path in root.glob("attempt-*")}
+    attempt_names = {path.name for path in root.glob("attempt-*") if path.is_dir()}
     if attempt_names != ({"attempt-000"} if attempts else set()):
         raise ValueError("Failed sampling summary omits or invents an original attempt")
     for attempt in attempts:
@@ -132,27 +134,28 @@ def retryable_sampling(
         if type(count) is not int or count < 0:
             return False
         attempt_dir = root / "attempt-000"
-        diagnostic = json.loads(read_bounded(attempt_dir / "sampling.json", SAMPLING_RESULT_LIMIT))
+        diagnostic = read_json(attempt_dir / "sampling.json")
         if diagnostic.get("received_packets") != count:
             raise ValueError("Failed sampling count differs from its original diagnostic")
-        _require_originals(
-            attempt_dir,
-            inventory,
-            None,
-            trace_required=count > 0 or (attempt_dir / "trace.json").exists(),
-            review_binding_required=pending,
-            asynchronous=request if isinstance(request, SACRealtimeCycle) else None,
-        )
+        with sampling_sources(inventory) as original:
+            _require_originals(
+                attempt_dir,
+                original,
+                None,
+                trace_required=count > 0 or (attempt_dir / "trace.json").exists(),
+                review_binding_required=pending,
+                asynchronous=request if isinstance(request, SACRealtimeCycle) else None,
+            )
     return True
 
 
-def _sha(path: Path, limit: int = 4 * 1024**2) -> str:
-    return hashlib.sha256(read_bounded(path, limit)).hexdigest()
+def _sha(path: Path) -> str:
+    return sha256_file(path)
 
 
 def _require_originals(
     root: Path,
-    inventory: dict[str, str],
+    inventory: Mapping[str, str],
     sources: dict[str, Any] | None,
     *,
     trace_required: bool = True,
@@ -244,7 +247,7 @@ def completed_sampling(
     """Authenticate a sealed single attempt and its complete learner snapshot."""
     root = request.output_dir
     protocol = json.loads(read_bounded(root / "protocol.json", 1024**2))
-    summary: dict[str, Any] = json.loads(read_bounded(root / "summary.json", SAMPLING_RESULT_LIMIT))
+    summary: dict[str, Any] = read_json(root / "summary.json")
     if protocol != _expected_protocol(request) or not (
         summary.get("source_kind") == "synthetic"
         and summary.get("stop_reason")
@@ -263,8 +266,7 @@ def completed_sampling(
         raise ValueError("Pending sampling did not seal a matching successful child")
     attempt = summary["attempts"][0]
     if (
-        attempt
-        != json.loads(read_bounded(root / "attempt-000/cycle-result.json", SAMPLING_RESULT_LIMIT))
+        attempt != read_json(root / "attempt-000/cycle-result.json")
         or attempt.get("sampling_checkpoint_sha256") != parent["sha256"]
         or attempt.get("sampler_seed") != request.seed
         or attempt.get("candidate") != "candidate-000"
@@ -275,7 +277,7 @@ def completed_sampling(
         raise ValueError("Pending sampling result differs from its parent or sealed attempt")
     verify_sampling_sources(attempt.get("source_assets", {}))
     replay_path = root / attempt["replay"]
-    if _sha(replay_path, 128 * 1024**2) != attempt["replay_sha256"]:
+    if _sha(replay_path) != attempt["replay_sha256"]:
         raise ValueError("Pending sampling replay changed")
     replay = json.loads(read_bounded(replay_path, 128 * 1024**2))
     source_hashes = replay["source_hashes"]
@@ -290,14 +292,15 @@ def completed_sampling(
         "task": request.task_file,
         "reward": request.reward_file,
     }
-    if any(source_hashes[key] != _sha(path, 256 * 1024**2) for key, path in originals.items()):
+    if any(source_hashes[key] != _sha(path) for key, path in originals.items()):
         raise ValueError("Pending sampling replay differs from its original evidence")
-    _require_originals(
-        root / "attempt-000",
-        attempt["source_assets"],
-        source_hashes,
-        asynchronous=request if isinstance(request, SACRealtimeCycle) else None,
-    )
+    with sampling_sources(attempt["source_assets"]) as inventory:
+        _require_originals(
+            root / "attempt-000",
+            inventory,
+            source_hashes,
+            asynchronous=request if isinstance(request, SACRealtimeCycle) else None,
+        )
     candidate = root / "candidate-000"
     manifest_sha = _sha(candidate / "policy.json")
     if attempt["candidate_sha256"] != manifest_sha:

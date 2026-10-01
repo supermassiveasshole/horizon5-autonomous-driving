@@ -14,6 +14,7 @@ from fh5.candidate_store import _read_events
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.learning_recovery import sampling_bindings
 from fh5.numeric_images import asset
+from fh5.sampling_evidence import sampling_sources
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -276,8 +277,12 @@ class _Inventory:
                     learning["summary_sha256"],
                 )
                 for attempt in sampled["attempts"]:
-                    for name in attempt["source_assets"]:
-                        self.file(Path(name), "sampling_original")
+                    binding = attempt["source_assets"]
+                    if binding.get("kind") == "sampling-source-index-v1":
+                        self.file(Path(binding["path"]), "sampling_original_index")
+                    with sampling_sources(binding) as sources:
+                        for name in sources:
+                            self.file(Path(name), "sampling_original")
             if "candidate_evaluation" in row:
                 self.evaluation(root, row["candidate_evaluation"])
         self.store(Path(config["store"]["directory"]), state["store_revision"])

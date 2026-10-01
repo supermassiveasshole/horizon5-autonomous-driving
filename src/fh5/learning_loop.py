@@ -14,6 +14,7 @@ from tempfile import TemporaryDirectory
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar, cast
 
+from fh5.artifact_io import read_json, sha256_file
 from fh5.candidate_archive import CandidateRestore
 from fh5.candidate_selection import _input, evaluation_conditions
 from fh5.candidate_store import CandidateHistory, CandidateRecord
@@ -44,7 +45,7 @@ from fh5.realtime import RealtimeConfig
 from fh5.sac_cycle import SACCycle, SACEnvironment, SACRealtimeCycle, sampling_update_budget
 from fh5.sac_learning import SACResume, validate_sac_candidate
 from fh5.sac_realtime_sampler import SACRealtimeEnvironment
-from fh5.sampling_evidence import SAMPLING_RESULT_LIMIT, verify_sampling_sources
+from fh5.sampling_evidence import verify_sampling_sources
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -75,8 +76,8 @@ class LearningEnvironment(Protocol):
     def close(self) -> dict[str, Any]: ...
 
 
-def _sha(path: Path, limit: int = 4 * 1024**2) -> str:
-    return hashlib.sha256(read_bounded(path, limit)).hexdigest()
+def _sha(path: Path) -> str:
+    return sha256_file(path)
 
 
 def _configuration(path: Path) -> dict[str, Any]:
@@ -438,14 +439,9 @@ class _Loop:
             for archived in row.get("sampling_history", []):
                 verify_archived_sampling(archived)
             for binding in sampling_bindings(row):
-                if (
-                    _sha(Path(binding["directory"]) / "summary.json", SAMPLING_RESULT_LIMIT)
-                    != binding["summary_sha256"]
-                ):
+                if _sha(Path(binding["directory"]) / "summary.json") != binding["summary_sha256"]:
                     raise ValueError("Retained sampling result changed")
-                sampled = json.loads(
-                    read_bounded(Path(binding["directory"]) / "summary.json", SAMPLING_RESULT_LIMIT)
-                )
+                sampled = read_json(Path(binding["directory"]) / "summary.json")
                 for attempt in sampled["attempts"]:
                     verify_sampling_sources(attempt.get("source_assets", {}))
             if "candidate_evaluation" in row:
@@ -574,7 +570,7 @@ class _Loop:
     ) -> None:
         row["learning"] = {
             "directory": str(directory),
-            "summary_sha256": _sha(directory / "summary.json", SAMPLING_RESULT_LIMIT),
+            "summary_sha256": _sha(directory / "summary.json"),
         }
         row["sampling_stop_reason"] = summary["stop_reason"]
         self.state["child_resources_released"] &= summary["resources_released"]
@@ -609,7 +605,7 @@ class _Loop:
         ):
             raise ValueError("Unsealed sampling cannot be automatically acknowledged")
         summary_path = request.output_dir / "summary.json"
-        summary = json.loads(read_bounded(summary_path, SAMPLING_RESULT_LIMIT))
+        summary = read_json(summary_path)
         if (
             self.config.get("sampling_retry", {}).get("max_retries", 0)
             and summary.get("stop_reason")
@@ -619,7 +615,7 @@ class _Loop:
             if not retryable_sampling(
                 request,
                 self.state["latest_learner"],
-                _sha(summary_path, SAMPLING_RESULT_LIMIT),
+                _sha(summary_path),
                 pending=True,
             ):
                 raise ValueError("Pending sampling failure is not sealed, released and update-free")

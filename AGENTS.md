@@ -8,6 +8,7 @@
 - `tests/` checks observable experiment behavior using synthetic packets and loopback UDP. `configs/` contains versioned configuration examples.
 - `runs/` holds ignored local recordings. Keep recordings, credentials, model checkpoints, and machine tooling out of commits.
 - Before changing scope, read `docs/PRD.md`. Before changing control or learning behavior, read `docs/driving-learning-design.md`. `CONTEXT.md` holds domain terminology; `docs/adr/` records consequential decisions.
+- Before adding or changing resource limits, storage, training continuation, or recovery, read `docs/resource-policy.md`. Use measured capacity, interface requirements, or explicit experiment budgets; handle growing data structurally and preserve completed work when optional diagnostics fail.
 
 ## Build, Test, and Development Commands
 
