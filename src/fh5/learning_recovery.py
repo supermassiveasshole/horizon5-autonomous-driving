@@ -7,15 +7,60 @@ import json
 from pathlib import Path
 from typing import Any
 
-from fh5.collection_store import read_bounded
+from fh5.collection_store import atomic_json, encode, read_bounded
 from fh5.numeric_images import asset
 from fh5.sac_cycle import SACCycle
 from fh5.sac_learning import validate_sac_candidate
-from fh5.sampling_evidence import verify_sampling_sources
+from fh5.sampling_evidence import seal_sampling_sources, verify_sampling_sources
+
+_INVENTORY_LIMIT = 64 * 1024**2
 
 
 def sampling_bindings(row: dict[str, Any]) -> list[dict[str, Any]]:
     return [*row.get("sampling_history", []), *([row["learning"]] if "learning" in row else [])]
+
+
+def archive_failed_sampling(binding: dict[str, Any]) -> dict[str, Any]:
+    """Keep large original inventories outside the bounded parent state document."""
+    root = Path(binding["directory"])
+    path = root.with_name(root.name + "-originals.json")
+    inventory = seal_sampling_sources(root, None)
+    payload = encode(inventory)
+    if len(payload) > _INVENTORY_LIMIT:
+        raise ValueError("Sampling originals inventory exceeds 64 MiB")
+    if path.exists():
+        if read_bounded(path, _INVENTORY_LIMIT) != payload:
+            raise ValueError("Retained sampling originals inventory changed")
+    else:
+        atomic_json(path, inventory)
+    return {
+        **binding,
+        "originals_file": str(path),
+        "originals_sha256": hashlib.sha256(payload).hexdigest(),
+    }
+
+
+def verify_archived_sampling(binding: dict[str, Any]) -> None:
+    root = Path(binding["directory"])
+    path = root.with_name(root.name + "-originals.json")
+    raw = read_bounded(path, _INVENTORY_LIMIT)
+    if str(path) != binding.get("originals_file") or hashlib.sha256(raw).hexdigest() != binding.get(
+        "originals_sha256"
+    ):
+        raise ValueError("Retained sampling originals inventory changed")
+    verify_sampling_sources(json.loads(raw))
+
+
+def _expected_protocol(request: SACCycle) -> dict[str, Any]:
+    files = (request.recording_config_file, request.task_file, request.reward_file)
+    return {
+        "source_kind": "synthetic",
+        "cycles": 1,
+        "steps_per_attempt": request.steps_per_attempt,
+        "seed": request.seed,
+        "update_ratio": "at most one critic update per newly accepted transition",
+        "protocol_files": {str(path): _sha(path, 1024**2) for path in files},
+    }
 
 
 def retryable_sampling(request: SACCycle, parent: dict[str, Any], expected_summary: str) -> bool:
@@ -40,16 +85,8 @@ def retryable_sampling(request: SACCycle, parent: dict[str, Any], expected_summa
         or any(root.glob("candidate-*"))
     ):
         return False
-    files = (request.recording_config_file, request.task_file, request.reward_file)
     protocol = json.loads(read_bounded(root / "protocol.json", 1024**2))
-    if protocol != {
-        "source_kind": "synthetic",
-        "cycles": 1,
-        "steps_per_attempt": request.steps_per_attempt,
-        "seed": request.seed,
-        "update_ratio": "at most one critic update per newly accepted transition",
-        "protocol_files": {str(path): _sha(path, 1024**2) for path in files},
-    }:
+    if protocol != _expected_protocol(request):
         raise ValueError("Failed sampling differs from its frozen retry protocol")
     for attempt in attempts:
         if (
@@ -107,15 +144,7 @@ def completed_sampling(
     root = request.output_dir
     protocol = json.loads(read_bounded(root / "protocol.json", 1024**2))
     summary: dict[str, Any] = json.loads(read_bounded(root / "summary.json", 4 * 1024**2))
-    files = (request.recording_config_file, request.task_file, request.reward_file)
-    if protocol != {
-        "source_kind": "synthetic",
-        "cycles": 1,
-        "steps_per_attempt": request.steps_per_attempt,
-        "seed": request.seed,
-        "update_ratio": "at most one critic update per newly accepted transition",
-        "protocol_files": {str(path): _sha(path, 1024**2) for path in files},
-    } or not (
+    if protocol != _expected_protocol(request) or not (
         summary.get("source_kind") == "synthetic"
         and summary.get("stop_reason") == "budget_completed"
         and summary.get("resources_released") is True

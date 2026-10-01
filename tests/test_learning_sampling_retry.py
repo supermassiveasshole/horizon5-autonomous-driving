@@ -203,3 +203,76 @@ def test_no_eligible_experience_uses_the_same_finite_retry_budget(tmp_path, seed
         assert child["stop_reason"] == "no_eligible_experience"
         assert child["attempts"][0]["eligible_transitions"] == 0
     assert result["resources_released"] and backend.closed
+
+
+def test_child_stop_ends_the_invocation_before_any_automatic_sampling_retry(tmp_path, seeded_loop):
+    request = loop_request(tmp_path, seeded_loop, rounds=1, sampling_retry={"max_retries": 1})
+    first = SharedBackend(seeded_loop[0])
+    first.stop_sampling_file = request.output_dir / "round-000/learning/stop.request"
+    stopped = run_experiment(request, learning_environment=first).summary["learning_loop"]
+    assert stopped["stop_reason"] == "stop_requested", stopped.get("error")
+    assert len(first.leases) == 1 and first.closed and stopped["resources_released"]
+    assert stopped["learner_updates"] == 0
+    assert not (request.output_dir / "round-000/learning-001").exists()
+
+    # Keep the historical child's stop marker immutable; a new explicit invocation
+    # starts in a different directory and must still spend the same finite budget.
+    state = request.output_dir / "state.json"
+    second = SharedBackend(seeded_loop[0])
+    second.stop_sampling_file = request.output_dir / "round-000/learning-001/stop.request"
+    resumed = run_experiment(
+        LearningContinue(request.output_dir, sha(state)), learning_environment=second
+    ).summary["learning_loop"]
+    assert resumed["stop_reason"] == "stop_requested", resumed.get("error")
+    assert len(second.leases) == 1 and resumed["rounds"][0]["sampling_attempt"] == 1
+    assert resumed["learner_updates"] == 0 and second.closed and resumed["resources_released"]
+
+
+def test_many_failed_originals_leave_a_bounded_state_that_can_resume(tmp_path, seeded_loop):
+    request = loop_request(tmp_path, seeded_loop, rounds=1, sampling_retry={"max_retries": 3})
+
+    class ManyOriginals(SharedBackend):
+        def sampling(self, identity):
+            lease = super().sampling(identity)
+            lease.fail_at = 0
+            finish = lease.finish
+
+            def review(recording):
+                # A real filesystem stress case: each child stays below its own
+                # metadata bound, but accumulated originals exceed the parent bound.
+                if len(self.leases) <= 3:
+                    extra = recording.parent / "diagnostics"
+                    for _ in range(6):
+                        extra /= "证" * 80
+                    extra.mkdir(parents=True)
+                    for number in range(500):
+                        (extra / (f"{number:05d}-" + "e" * 180 + ".bin")).write_bytes(b"x")
+                return finish(recording)
+
+            lease.finish = review
+            return lease
+
+    backend = ManyOriginals(seeded_loop[0])
+    stopped = run_experiment(request, learning_environment=backend).summary["learning_loop"]
+    assert stopped["stop_reason"] == "sampling_retries_exhausted", stopped.get("error")
+    state = request.output_dir / "state.json"
+    assert state.stat().st_size <= 4 * 1024**2
+    followup = SharedBackend(seeded_loop[0])
+    resumed = run_experiment(
+        LearningContinue(request.output_dir, sha(state)), learning_environment=followup
+    ).summary["learning_loop"]
+    assert resumed["stop_reason"] == "sampling_retries_exhausted", resumed.get("error")
+    assert not followup.leases and followup.closed and resumed["resources_released"]
+    assert len(resumed["rounds"][0]["sampling_history"]) == 3
+    assert resumed["learner_updates"] == 0
+    first_original = next(
+        (request.output_dir / "round-000/learning/attempt-000/diagnostics").rglob("*.bin")
+    )
+    first_original.write_bytes(b"changed")
+    before = state.read_bytes()
+    with pytest.raises(ValueError, match="originals|result changed"):
+        run_experiment(
+            LearningContinue(request.output_dir, sha(state)),
+            learning_environment=SharedBackend(seeded_loop[0]),
+        )
+    assert state.read_bytes() == before

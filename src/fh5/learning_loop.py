@@ -25,10 +25,16 @@ from fh5.evaluation_run import EvaluationEnvironment, EvaluationRun
 from fh5.learning_capacity import capacity_decision, validate_storage_budget
 from fh5.learning_io import EvaluationLease, LearningUnavailable, RejectedLease, SamplingLease
 from fh5.learning_monitor import StorageMonitor, validate_monitor
-from fh5.learning_recovery import completed_sampling, retryable_sampling, sampling_bindings
+from fh5.learning_recovery import (
+    archive_failed_sampling,
+    completed_sampling,
+    retryable_sampling,
+    sampling_bindings,
+    verify_archived_sampling,
+)
 from fh5.sac_cycle import SACCycle, SACEnvironment
 from fh5.sac_learning import validate_sac_candidate
-from fh5.sampling_evidence import seal_sampling_sources, verify_sampling_sources
+from fh5.sampling_evidence import verify_sampling_sources
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -376,7 +382,7 @@ class _Loop:
                 raise ValueError("Learning continuation checkpoint changed")
         for row in state["rounds"]:
             for archived in row.get("sampling_history", []):
-                verify_sampling_sources(archived.get("retained_files", {}))
+                verify_archived_sampling(archived)
             for binding in sampling_bindings(row):
                 if _sha(Path(binding["directory"]) / "summary.json") != binding["summary_sha256"]:
                     raise ValueError("Retained sampling result changed")
@@ -460,9 +466,7 @@ class _Loop:
         learner = self.state["latest_learner"]
         if _learner(Path(learner["directory"]), learner["sha256"]) != learner:
             raise ValueError("Sampling retry learner changed")
-        row.setdefault("sampling_history", []).append(
-            {**binding, "retained_files": seal_sampling_sources(request.output_dir, None)}
-        )
+        row.setdefault("sampling_history", []).append(archive_failed_sampling(binding))
         row["sampling_attempt"] = attempt + 1
         self.state.setdefault("recoveries", []).append(
             {
@@ -909,6 +913,7 @@ class _Loop:
                 if not self.sample(number, row):
                     if (
                         self.stopped()
+                        or row.get("sampling_stop_reason") == "stop_requested"
                         or "learning" not in row
                         or not self.config.get("sampling_retry", {}).get("max_retries", 0)
                     ):
