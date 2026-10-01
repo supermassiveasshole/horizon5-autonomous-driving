@@ -1,7 +1,9 @@
 """Bounded cold experience assembly through the public continuation request."""
 
 import json
+import shutil
 import tracemalloc
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
@@ -108,3 +110,66 @@ def test_small_experience_copy_does_not_allocate_the_global_frame_read_limit(
     (tmp_path / "copy-memory-observation.json").write_text(json.dumps({"peak_bytes": measured}))
     # Includes Python path/I/O/metadata overhead, independently of report counters.
     assert len(measured) == 1 and measured[0] < 64 * 1024
+
+
+def test_frozen_replay_pixel_reads_do_not_allocate_the_cache_capacity(tmp_path, saved_candidate):
+    checkpoint, replay = saved_candidate
+    opened = Path.open
+    peaks = []
+
+    class MeasuredReader:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def read(self, size=-1):
+            tracemalloc.start()
+            try:
+                return self.stream.read(size)
+            finally:
+                peaks.append(tracemalloc.get_traced_memory()[1])
+                tracemalloc.stop()
+
+    @contextmanager
+    def measure(stream):
+        with stream:
+            yield MeasuredReader(stream)
+
+    def open_file(path, *args, **kwargs):
+        stream = opened(path, *args, **kwargs)
+        if path.suffix == ".rgb" and args and args[0] == "rb":
+            return measure(stream)
+        return stream
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "open", open_file)
+        result = run_experiment(
+            SACPolicyReplay(checkpoint, replay, tmp_path / "replay.html")
+        ).summary["sac_policy"]
+    (tmp_path / "read-memory-observation.json").write_text(json.dumps({"peak_bytes": peaks}))
+    assert result["predictions"] and result["commands_sent"] is False
+    assert peaks and max(peaks) < 64 * 1024
+
+
+def test_pixel_file_growth_between_stat_and_read_is_rejected(tmp_path, saved_candidate):
+    checkpoint, _ = saved_candidate
+    copied = tmp_path / "source"
+    shutil.copytree(checkpoint, copied)
+    frame = next((copied / "experience/frames").glob("*.rgb"))
+    original = frame.read_bytes()
+    opened = Path.open
+    changed = []
+
+    def open_file(path, *args, **kwargs):
+        if path == frame and args and args[0] == "rb":
+            with opened(frame, "wb") as stream:
+                stream.write(original + b"x")
+            changed.append(True)
+        return opened(path, *args, **kwargs)
+
+    report = tmp_path / "rejected.html"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "open", open_file)
+        with pytest.raises(ValueError, match="changed size while reading"):
+            run_experiment(SACPolicyReplay(copied, copied / "experience/replay.json", report))
+    assert changed == [True]
+    assert not report.exists() and not report.with_suffix(".json").exists()

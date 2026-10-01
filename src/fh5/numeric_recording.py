@@ -41,12 +41,15 @@ def read_numeric_pixels(
 ) -> bytes:
     """Read and verify immutable RGB bytes without a second frame-owned copy."""
     path = asset(directory, entry["path"])
-    if path.stat().st_size > byte_limit:
+    size = path.stat().st_size
+    if size > byte_limit:
         raise ValueError("Numerical frame exceeds source byte budget")
     with path.open("rb") as stream:
-        pixels = stream.read(byte_limit + 1)
+        pixels = stream.read(size + 1)
     if len(pixels) > byte_limit:
         raise ValueError("Numerical frame exceeds source byte budget")
+    if len(pixels) != size:
+        raise ValueError("Numerical frame changed size while reading")
     if hashlib.sha256(pixels).hexdigest() != entry["sha256"]:
         raise ValueError("Numerical pixel hash mismatch")
     return pixels
