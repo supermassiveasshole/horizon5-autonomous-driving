@@ -135,14 +135,8 @@ def test_failed_continuation_audit_preserves_acknowledged_progress(tmp_path, see
     source_summary = root / "round-000/learning/summary.json"
     stop = root / "stop.request"
     stop.unlink()
-    mkdir, open_file = Path.mkdir, Path.open
+    open_file = Path.open
     failures = []
-
-    def create_directory(path, *args, **kwargs):
-        result = mkdir(path, *args, **kwargs)
-        if path == output:
-            stop.write_text("external stop before new updates")
-        return result
 
     def open_source(path, *args, **kwargs):
         if path == source_summary and (output / "policy.json").exists() and not failures:
@@ -151,8 +145,7 @@ def test_failed_continuation_audit_preserves_acknowledged_progress(tmp_path, see
         return open_file(path, *args, **kwargs)
 
     backend = SharedBackend(seeded_loop[0])
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(Path, "mkdir", create_directory)
+    with stop_on_creation(output, stop), pytest.MonkeyPatch.context() as patch:
         patch.setattr(Path, "open", open_source)
         result = run_experiment(
             LearningContinue(root, sha(root / "state.json")), learning_environment=backend
