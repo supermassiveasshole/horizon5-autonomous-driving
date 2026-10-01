@@ -36,10 +36,10 @@ def _encode(value: Any) -> bytes:
     return (json.dumps(value, ensure_ascii=False, allow_nan=False, indent=2) + "\n").encode()
 
 
-def read_numeric_frame(
+def read_numeric_pixels(
     directory: Path, entry: dict[str, Any], byte_limit: int = 4096 * 4096 * 3
-) -> NumericFrame:
-    """Verify a stored RGB frame in an offline or source-worker context."""
+) -> bytes:
+    """Read and verify immutable RGB bytes without a second frame-owned copy."""
     path = asset(directory, entry["path"])
     if path.stat().st_size > byte_limit:
         raise ValueError("Numerical frame exceeds source byte budget")
@@ -49,6 +49,14 @@ def read_numeric_frame(
         raise ValueError("Numerical frame exceeds source byte budget")
     if hashlib.sha256(pixels).hexdigest() != entry["sha256"]:
         raise ValueError("Numerical pixel hash mismatch")
+    return pixels
+
+
+def read_numeric_frame(
+    directory: Path, entry: dict[str, Any], byte_limit: int = 4096 * 4096 * 3
+) -> NumericFrame:
+    """Verify a stored RGB frame in an offline or source-worker context."""
+    pixels = read_numeric_pixels(directory, entry, byte_limit)
     metadata = {k: v for k, v in entry.items() if k not in ("path", "sha256")}
     metadata["size"] = tuple(metadata["size"])
     return NumericFrame(pixels=memoryview(pixels), **metadata)

@@ -10,7 +10,7 @@ from typing import Any
 
 from fh5.collection_store import encode, write_file
 from fh5.numeric_actor import FrozenNumericActor
-from fh5.numeric_recording import read_numeric_frame
+from fh5.numeric_recording import read_numeric_frame, read_numeric_pixels
 from fh5.sac_actions import ActionBounds
 from fh5.sac_checkpoint import source_replays
 from fh5.sac_data import LearningReplay
@@ -107,12 +107,13 @@ def expand_experience(
     output.mkdir(parents=True, exist_ok=False)
     peak = 0
     for name, (source, entry) in frames.items():
-        frame = read_numeric_frame(source, entry)
-        peak = max(peak, frame.pixels.nbytes)
+        width, height = entry["size"]
+        payload = read_numeric_pixels(source, entry, width * height * 3)
+        peak = max(peak, len(payload))
         target = output / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        write_file(target, frame.pixels)
-        del frame
+        write_file(target, payload)
+        del payload
     for name, payload in manifests.items():
         target = output / name
         target.parent.mkdir(parents=True, exist_ok=True)

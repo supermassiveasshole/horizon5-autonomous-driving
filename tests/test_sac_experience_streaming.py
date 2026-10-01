@@ -1,6 +1,7 @@
 """Bounded cold experience assembly through the public continuation request."""
 
 import json
+import tracemalloc
 from pathlib import Path
 
 import pytest
@@ -76,3 +77,34 @@ def test_failed_copy_releases_temporary_files_and_preserves_parent(tmp_path, sav
     assert not (tmp_path / "varied-candidate").exists()
     assert (parent / "policy.json").read_bytes() == parent_manifest
     assert all(path.read_bytes() == raw for path, raw in originals.items())
+
+
+def test_small_experience_copy_does_not_allocate_the_global_frame_read_limit(
+    tmp_path, saved_candidate
+):
+    mkdir, opened = Path.mkdir, Path.open
+    measured = []
+
+    def create_directory(path, *args, **kwargs):
+        result = mkdir(path, *args, **kwargs)
+        if path.name == "expanded":
+            tracemalloc.start()
+        return result
+
+    def open_file(path, *args, **kwargs):
+        if path.name == "replay.json" and path.parent.name == "expanded":
+            if args and args[0] == "xb":
+                measured.append(tracemalloc.get_traced_memory()[1])
+                tracemalloc.stop()
+        return opened(path, *args, **kwargs)
+
+    try:
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(Path, "mkdir", create_directory)
+            patch.setattr(Path, "open", open_file)
+            varied_candidate(tmp_path, saved_candidate)
+    finally:
+        tracemalloc.stop()
+    (tmp_path / "copy-memory-observation.json").write_text(json.dumps({"peak_bytes": measured}))
+    # Includes Python path/I/O/metadata overhead, independently of report counters.
+    assert len(measured) == 1 and measured[0] < 64 * 1024

@@ -49,7 +49,7 @@ def encode(value: Any) -> bytes:
     ).encode("utf-8")
 
 
-def write_file(path: Path, data: bytes | memoryview) -> None:
+def write_file(path: Path, data: bytes) -> None:
     with path.open("xb") as stream:
         stream.write(data)
         stream.flush()
