@@ -141,8 +141,9 @@ def test_async_results_reference_originals_without_repeating_frame_diagnostics(
     assert attempt["learner_updates"] == 2
 
 
-def test_cycle_html_failure_keeps_actual_updates_and_sealed_candidate(
-    tmp_path, sac_policy, monkeypatch
+@pytest.mark.parametrize("display", ["html", "json"])
+def test_cycle_display_failure_keeps_actual_updates_and_sealed_candidate(
+    tmp_path, sac_policy, monkeypatch, display
 ):
     settings = replace(request(tmp_path, sac_policy), cycles=1)
     environment = AsyncEnvironment(settings.output_dir)
@@ -151,7 +152,12 @@ def test_cycle_html_failure_keeps_actual_updates_and_sealed_candidate(
     def failed_display(path, mode="r", *args, **kwargs):
         if (
             path.parent == settings.output_dir
-            and path.suffix == ".html"
+            and (
+                display == "html"
+                and path.suffix == ".html"
+                or display == "json"
+                and path.name == "reload-0.json"
+            )
             and any(flag in mode for flag in "wx")
         ):
             raise OSError("display target unavailable")
@@ -164,9 +170,18 @@ def test_cycle_html_failure_keeps_actual_updates_and_sealed_candidate(
     assert result["resources_released"] and environment.closed
     assert result["attempts"][0]["learner_updates"] == 2
     assert result["latest_candidate"] == "candidate-000"
-    assert result["presentation"]["status"] == "unavailable"
-    assert outcome.report_path == settings.output_dir / "summary.json"
+    if display == "html":
+        assert result["presentation"]["status"] == "unavailable"
+        assert outcome.report_path == settings.output_dir / "summary.json"
+    else:
+        assert result["attempts"][0]["reload_diagnostic_export"]["status"] == "unavailable"
     assert outcome.report_path.is_file()
+    from fh5.sac_learning import SACResume
+
+    continued = run_experiment(
+        SACResume(settings.output_dir / "candidate-000", tmp_path / "continued", steps=1)
+    ).summary["sac_learning"]
+    assert continued["steps_completed"] == 1 and continued["total_steps"] == 6
 
 
 @pytest.mark.parametrize(

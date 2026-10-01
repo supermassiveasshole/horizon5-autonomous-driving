@@ -26,7 +26,9 @@ RED/GREEN 已验证：异步来源初始化后的混合被旧版本检查误拒�
 已复现并修复。整合专项回归 **139 passed / 160.98 秒**：异步经验/探索、SAC 预热/学习/续训/混合/循环、
 执行绑定、实时数值重放与 Δt BC。证据为 `runs/t10-async-regression-20261002-results.xml` 及同名测试目录。
 包含 CPU 线程数重载断言修复；[原全量失败与诊断](temporal-bc-cpu-roundoff.md)单独保留。
-当前增量的整库回归尚待完成；只读审查及修正如下。
+整合父版本 `b12fe19` 全量回归结果为 **1180 passed / 1 failed / 5601.31 秒**，
+`test_status_and_stop_work_while_stream_is_running_and_flush_the_tail` 在并发读取 `index.json`
+时遇到 Windows 文件共享冲突；尚待修复后集成验证。只读审查及修正如下。
 
 ## 审查修正
 

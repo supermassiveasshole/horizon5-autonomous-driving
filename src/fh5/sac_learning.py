@@ -732,8 +732,11 @@ def run_sac_policy_replay(request: SACPolicyReplay) -> RunResult:
             "q_action_coordinates": manifest["q_action_coordinates"],
             "raw_frame_cache": data.cache_summary(),
         }
-    request.report_path.parent.mkdir(parents=True, exist_ok=True)
-    diagnostic = request.report_path.with_suffix(".json")
-    write_file(diagnostic, encode(summary))
-    report = optional_report(request.report_path, "SAC 冻结策略回放", summary, fallback=diagnostic)
+    report = optional_report(
+        request.report_path,
+        "SAC 冻结策略回放",
+        summary,
+        fallback=request.checkpoint_dir / "policy.json",
+        diagnostic=request.report_path.with_suffix(".json"),
+    )
     return RunResult({}, [], [], {"sac_policy": summary}, report)

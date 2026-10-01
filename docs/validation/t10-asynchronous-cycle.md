@@ -29,8 +29,9 @@ FH5、Steam、原生截图、游戏 UDP、手柄和 CUDA 均未启动。整票�
   结果：`runs/t10-async-cycle-sync-reviewed-20261002-results.xml`。
 - Ruff lint、格式检查、mypy 128 个源文件及 diff 检查通过。
 
-以上路径位于增量开发 checkout。父版本 `b12fe19` 的独立整库回归仍在运行，
-已出现待定位失败；它也不覆盖本增量。不能把专项通过写成整库通过或完成合并。
+以上路径位于增量开发 checkout。父版本 `b12fe19` 的独立整库回归已结束：
+**1180 passed / 1 failed / 5601.31 秒**，失败为运行中 `CollectionReview` 读取 `index.json` 的
+Windows 文件共享冲突；它也不覆盖本增量。不能把专项通过写成整库通过或完成合并。
 
 ## Standards
 

@@ -312,6 +312,8 @@ def run_sac_cycle(
                 ).summary["sac_policy"]
                 if "presentation" in checked:
                     result["reload_presentation"] = checked["presentation"]
+                if "diagnostic_export" in checked:
+                    result["reload_diagnostic_export"] = checked["diagnostic_export"]
                 if checked["predictions"] != learned["predictions"]:
                     raise ValueError("Candidate reload differs from the complete learner snapshot")
                 result["inference_reload_max_error"] = 0
