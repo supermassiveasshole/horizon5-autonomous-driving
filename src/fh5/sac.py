@@ -23,6 +23,7 @@ from fh5.sac_actions import ActionBounds
 from fh5.sac_checkpoint import (
     continuation_history,
     critic_resume_contract,
+    publish_checkpoint,
     read_critic_checkpoint,
     seal_experience,
     state_digest,
@@ -416,7 +417,6 @@ def _run(
         # Training diagnostics grow with steps/transitions. Keep them outside
         # the small checkpoint manifest consumed by reload and later resume.
         diagnostic_payload = encode(summary)
-        write_file(output / "training-report.json", diagnostic_payload)
         manifest = {
             "version": 2,
             "stage": "critic_warmup",
@@ -439,8 +439,6 @@ def _run(
             "history": history,
             "resume_contract": critic_resume_contract(torch),
         }
-        torch.save({"metadata": manifest, **state}, output / "critic.pt")
-        manifest["weights_sha256"] = hashlib.sha256((output / "critic.pt").read_bytes()).hexdigest()
         report = output / "report.html"
     else:
         report = request.report_path
@@ -454,5 +452,5 @@ def _run(
         ).encode("utf-8"),
     )
     if isinstance(request, SACCriticWarmup):
-        write_file(output / "critic.json", encode(manifest))
+        publish_checkpoint(torch, output, manifest, state, diagnostic_payload)
     return RunResult({}, [], [], {"sac": summary}, report)

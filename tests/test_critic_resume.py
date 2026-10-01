@@ -309,3 +309,59 @@ def test_stop_file_saves_only_after_a_complete_update_and_can_resume(tmp_path):
     resumed = run_experiment(SACCriticResume(output, tmp_path / "resumed")).summary["sac"]
     assert resumed["steps_completed"] == 3 and resumed["total_steps"] == 6
     assert not (tmp_path / "resumed/stop.request").exists()
+
+
+@pytest.mark.parametrize(
+    "limit", ["REPORT_LIMIT_BYTES", "WEIGHTS_LIMIT_BYTES", "MANIFEST_LIMIT_BYTES"]
+)
+def test_capacity_failure_never_publishes_an_unreadable_warmup_snapshot(
+    tmp_path, monkeypatch, limit
+):
+    pytest.importorskip("torch")
+    from fh5 import sac_checkpoint
+
+    model, replay, digest = warm_inputs(tmp_path)
+    # Scale the storage capacity, not the learner or filesystem, to exercise overflow cheaply.
+    monkeypatch.setattr(sac_checkpoint, limit, 1, raising=False)
+    output = tmp_path / "overflow"
+    with pytest.raises(ValueError, match="capacity"):
+        run_experiment(SACCriticWarmup(model, replay, digest, output, steps=2))
+    assert not (output / "critic.json").exists()
+
+
+def test_combined_history_capacity_is_checked_before_publishing_the_next_snapshot(
+    tmp_path, monkeypatch
+):
+    pytest.importorskip("torch")
+    from fh5 import sac_checkpoint
+    from fh5.sac import SACCriticResume
+
+    model, replay, digest = warm_inputs(tmp_path)
+    first = tmp_path / "first"
+    run_experiment(SACCriticWarmup(model, replay, digest, first, steps=2))
+    # Parent history fits; adding this segment's report/manifest no longer fits.
+    prior_size = sum(
+        (first / name).stat().st_size for name in ("critic.json", "training-report.json")
+    )
+    monkeypatch.setattr(sac_checkpoint, "HISTORY_LIMIT_BYTES", prior_size + 1, raising=False)
+    output = tmp_path / "overflow"
+    with pytest.raises(ValueError, match="capacity"):
+        run_experiment(SACCriticResume(first, output, steps=0))
+    assert not (output / "critic.json").exists()
+
+
+def test_sac_handoff_cannot_publish_a_report_its_resume_reader_will_refuse(tmp_path, monkeypatch):
+    pytest.importorskip("torch")
+    from fh5 import sac_checkpoint
+    from fh5.sac_learning import SACTrain
+
+    model, replay, digest = warm_inputs(tmp_path)
+    first = tmp_path / "first"
+    run_experiment(SACCriticWarmup(model, replay, digest, first, steps=1))
+    monkeypatch.setattr(
+        sac_checkpoint, "REPORT_LIMIT_BYTES", (first / "training-report.json").stat().st_size
+    )
+    output = tmp_path / "overflow"
+    with pytest.raises(ValueError, match="capacity"):
+        run_experiment(SACTrain(first, replay, output, steps=3))
+    assert not (output / "policy.json").exists()

@@ -25,6 +25,7 @@ from fh5.sac_actions import ActionBounds
 from fh5.sac_actor import FrozenSAC
 from fh5.sac_checkpoint import (
     continuation_history,
+    publish_checkpoint,
     read_checkpoint,
     read_critic_checkpoint,
     resume_contract,
@@ -487,15 +488,6 @@ def _train(
     report_bytes = encode(summary)
     metadata["training_report_sha256"] = hashlib.sha256(report_bytes).hexdigest()
     metadata["learner_state_sha256"] = summary["learner_state_sha256"]
-    torch.save(
-        {"metadata": metadata, **state},
-        output / "policy.pt",
-    )
-    manifest = {
-        **metadata,
-        "weights_sha256": hashlib.sha256((output / "policy.pt").read_bytes()).hexdigest(),
-    }
-    write_file(output / "training-report.json", report_bytes)
     report = output / "report.html"
     report.write_text(
         '<!doctype html><meta charset="utf-8"><h1>SAC 软件更新</h1><pre>'
@@ -503,7 +495,7 @@ def _train(
         + "</pre>",
         encoding="utf-8",
     )
-    write_file(output / "policy.json", encode(manifest))
+    publish_checkpoint(torch, output, metadata, state, report_bytes)
     return RunResult({}, [], [], {"sac_learning": summary}, report)
 
 

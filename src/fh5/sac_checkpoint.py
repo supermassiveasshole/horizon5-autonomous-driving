@@ -8,9 +8,46 @@ from io import BytesIO
 from pathlib import Path
 from typing import Any
 
-from fh5.collection_store import read_bounded, write_file
+from fh5.collection_store import encode, read_bounded, write_file
 from fh5.numeric_images import asset
 from fh5.numeric_recording import read_numeric_frame
+
+MANIFEST_LIMIT_BYTES = 1024**2
+WEIGHTS_LIMIT_BYTES = 256 * 1024**2
+REPORT_LIMIT_BYTES = 128 * 1024**2
+HISTORY_LIMIT_BYTES = 128 * 1024**2
+
+
+def _read_state(
+    torch: Any,
+    root: Path,
+    manifest: dict[str, Any],
+    weights_file: str,
+    *,
+    require_metadata: bool = True,
+) -> dict[str, Any]:
+    payload = read_bounded(root / weights_file, WEIGHTS_LIMIT_BYTES)
+    if hashlib.sha256(payload).hexdigest() != manifest["weights_sha256"]:
+        raise ValueError("Checkpoint weights changed")
+    saved: dict[str, Any] = torch.load(BytesIO(payload), map_location="cpu", weights_only=True)
+    if require_metadata and saved.get("metadata") != {
+        k: v for k, v in manifest.items() if k != "weights_sha256"
+    }:
+        raise ValueError("Checkpoint metadata mismatch")
+    return saved
+
+
+def _verify_training_state(
+    torch: Any, root: Path, manifest: dict[str, Any], saved: dict[str, Any]
+) -> None:
+    report = read_bounded(root / "training-report.json", REPORT_LIMIT_BYTES)
+    if hashlib.sha256(report).hexdigest() != manifest["training_report_sha256"]:
+        raise ValueError("Checkpoint training report changed")
+    if (
+        state_digest(torch, {k: v for k, v in saved.items() if k != "metadata"})
+        != manifest["learner_state_sha256"]
+    ):
+        raise ValueError("Checkpoint learner state mismatch")
 
 
 def resume_contract(torch: Any, version: int = 2) -> dict[str, Any]:
@@ -36,30 +73,18 @@ def resume_contract(torch: Any, version: int = 2) -> dict[str, Any]:
 
 
 def read_checkpoint(torch: Any, root: Path) -> tuple[dict[str, Any], dict[str, Any], bytes]:
-    raw = read_bounded(root / "policy.json", 1024**2)
+    raw = read_bounded(root / "policy.json", MANIFEST_LIMIT_BYTES)
     manifest = json.loads(raw)
     if manifest.get("version") not in (1, 2, 3) or (
         manifest.get("architecture"),
         manifest.get("stage"),
     ) != ("conditional-temporal-sac-v1", "sac_updates"):
         raise ValueError("Unsupported SAC policy checkpoint")
-    payload = read_bounded(root / "policy.pt", 256 * 1024**2)
-    if hashlib.sha256(payload).hexdigest() != manifest["weights_sha256"]:
-        raise ValueError("SAC policy checkpoint changed")
-    saved: dict[str, Any] = torch.load(BytesIO(payload), map_location="cpu", weights_only=True)
-    if saved["metadata"] != {k: v for k, v in manifest.items() if k != "weights_sha256"}:
-        raise ValueError("SAC policy metadata mismatch")
+    saved = _read_state(torch, root, manifest, "policy.pt")
     if manifest["version"] in (2, 3):
         if manifest["resume_contract"] != resume_contract(torch, manifest["version"]):
             raise ValueError("Unsupported SAC continuation contract or Torch runtime")
-        report = read_bounded(root / "training-report.json", 128 * 1024**2)
-        if hashlib.sha256(report).hexdigest() != manifest["training_report_sha256"]:
-            raise ValueError("SAC training report changed")
-        if (
-            state_digest(torch, {k: v for k, v in saved.items() if k != "metadata"})
-            != manifest["learner_state_sha256"]
-        ):
-            raise ValueError("SAC learner state mismatch")
+        _verify_training_state(torch, root, manifest, saved)
     return manifest, saved, raw
 
 
@@ -82,17 +107,14 @@ def critic_resume_contract(torch: Any) -> dict[str, Any]:
 
 
 def read_critic_checkpoint(torch: Any, root: Path) -> tuple[dict[str, Any], dict[str, Any], bytes]:
-    raw = read_bounded(root / "critic.json", 1024**2)
+    raw = read_bounded(root / "critic.json", MANIFEST_LIMIT_BYTES)
     manifest = json.loads(raw)
     if manifest.get("version") not in (1, 2) or manifest.get("stage") != "critic_warmup":
         raise ValueError("Unsupported critic checkpoint version or stage")
-    payload = read_bounded(root / "critic.pt", 256 * 1024**2)
-    if hashlib.sha256(payload).hexdigest() != manifest["weights_sha256"]:
-        raise ValueError("Critic checkpoint hash mismatch")
-    saved: dict[str, Any] = torch.load(BytesIO(payload), map_location="cpu", weights_only=True)
+    saved = _read_state(
+        torch, root, manifest, "critic.pt", require_metadata=manifest["version"] == 2
+    )
     if manifest["version"] == 2:
-        if saved.get("metadata") != {k: v for k, v in manifest.items() if k != "weights_sha256"}:
-            raise ValueError("Critic checkpoint metadata mismatch")
         if manifest["resume_contract"] != critic_resume_contract(torch):
             raise ValueError("Unsupported critic continuation contract or Torch runtime")
         config = manifest["configuration"]
@@ -102,14 +124,7 @@ def read_critic_checkpoint(torch: Any, root: Path) -> tuple[dict[str, Any], dict
             or config["device"] != "cpu"
         ):
             raise ValueError("Unsupported critic configuration")
-        report = read_bounded(root / "training-report.json", 128 * 1024**2)
-        if hashlib.sha256(report).hexdigest() != manifest["training_report_sha256"]:
-            raise ValueError("Critic training report changed")
-        if (
-            state_digest(torch, {k: v for k, v in saved.items() if k != "metadata"})
-            != manifest["learner_state_sha256"]
-        ):
-            raise ValueError("Critic learner state mismatch")
+        _verify_training_state(torch, root, manifest, saved)
         budget = manifest["configuration"]["steps"]
         if (
             type(budget) is not int
@@ -120,12 +135,42 @@ def read_critic_checkpoint(torch: Any, root: Path) -> tuple[dict[str, Any], dict
     return manifest, saved, raw
 
 
+def publish_checkpoint(
+    torch: Any, root: Path, metadata: dict[str, Any], state: dict[str, Any], report: bytes
+) -> None:
+    """Publish only artifacts that fit the same limits used when reading and continuing."""
+    name = {"critic_warmup": "critic", "sac_updates": "policy"}[metadata["stage"]]
+    if len(report) > REPORT_LIMIT_BYTES:
+        raise ValueError("Training report exceeds capacity")
+    weights = root / (name + ".pt")
+    with weights.open("xb") as stream:
+        torch.save({"metadata": metadata, **state}, stream)
+    if weights.stat().st_size > WEIGHTS_LIMIT_BYTES:
+        raise ValueError("Checkpoint weights exceed capacity")
+    payload = read_bounded(weights, WEIGHTS_LIMIT_BYTES)
+    manifest = {**metadata, "weights_sha256": hashlib.sha256(payload).hexdigest()}
+    raw = encode(manifest)
+    if len(raw) > MANIFEST_LIMIT_BYTES:
+        raise ValueError("Checkpoint manifest exceeds capacity")
+    history_size = sum(
+        asset(root, entry[kind]).stat().st_size
+        for entry in metadata["history"]
+        for kind in ("checkpoint", "report")
+    )
+    if len(metadata["history"]) >= 1000 or (
+        history_size + len(report) + len(raw) > HISTORY_LIMIT_BYTES
+    ):
+        raise ValueError("Continuation history exceeds capacity")
+    write_file(root / "training-report.json", report)
+    write_file(root / (name + ".json"), raw)
+
+
 def continuation_history(
     root: Path, manifest: dict[str, Any], raw: bytes
 ) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
     history = list(manifest["history"])
     parent_sha = hashlib.sha256(raw).hexdigest()
-    report = read_bounded(root / "training-report.json", 128 * 1024**2)
+    report = read_bounded(root / "training-report.json", REPORT_LIMIT_BYTES)
     if hashlib.sha256(report).hexdigest() != manifest["training_report_sha256"]:
         raise ValueError("SAC training report changed")
     entry = {
@@ -136,17 +181,17 @@ def continuation_history(
     }
     blobs = {entry["checkpoint"]: raw, entry["report"]: report}
     total = sum(map(len, blobs.values()))
-    if total > 128 * 1024**2:
+    if total > HISTORY_LIMIT_BYTES:
         raise ValueError("SAC continuation history exceeds 128 MiB")
     if len(history) >= 1000:
         raise ValueError("SAC continuation history exceeds 1000 segments")
     for prior in history:
         for kind in ("checkpoint", "report"):
-            payload = read_bounded(asset(root, prior[kind]), 128 * 1024**2)
+            payload = read_bounded(asset(root, prior[kind]), HISTORY_LIMIT_BYTES)
             if hashlib.sha256(payload).hexdigest() != prior[kind + "_sha256"]:
                 raise ValueError("SAC continuation history changed")
             total += len(payload)
-            if total > 128 * 1024**2:
+            if total > HISTORY_LIMIT_BYTES:
                 raise ValueError("SAC continuation history exceeds 128 MiB")
             blobs[prior[kind]] = payload
     history.append(entry)
