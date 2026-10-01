@@ -6,6 +6,7 @@ import hashlib
 import json
 import math
 import threading
+import time
 from collections.abc import Iterable
 from itertools import islice
 from pathlib import Path
@@ -24,7 +25,8 @@ from fh5.numeric_images import (
     asset,
     validate_decision,
 )
-from fh5.numeric_report import preview_png, write_numeric_report
+from fh5.numeric_previews import NumericPreviews
+from fh5.numeric_report import write_numeric_report
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -63,7 +65,7 @@ class NumericArchive:
         self.pending = self.pending_bytes = self.peak_bytes = 0
         self.finished, self.aborted = threading.Event(), threading.Event()
         self.error: str | None = None
-        self.preview_errors = 0
+        self.previews = NumericPreviews(directory, capacity, byte_limit)
         self.records: dict[str, dict[str, Any]] = {}
         self.worker = threading.Thread(target=self._work, name="fh5-numeric-archive", daemon=True)
         self.worker.start()
@@ -109,16 +111,7 @@ class NumericArchive:
                         if not target.exists():
                             target.write_bytes(payload)
                         stored.append(dict(frame.metadata(), path=path, sha256=digest))
-                        preview = f"previews/{digest}.png"
-                        try:
-                            if not (self.directory / preview).exists():
-                                (self.directory / preview).write_bytes(
-                                    preview_png(payload, frame.size)
-                                )
-                            previews.append(preview)
-                        except OSError:
-                            self.preview_errors += 1
-                            previews.append(None)
+                        previews.append(self.previews.submit(digest, payload, frame.size))
                     document = _encode(dict(row, frames=stored))
                     path = f"inputs/{row['index']:06d}.json"
                     if self.aborted.is_set():
@@ -138,6 +131,7 @@ class NumericArchive:
             self.error = str(error)
 
     def close(self) -> dict[str, Any]:
+        deadline = time.monotonic() + 2
         self.finished.set()
         self.worker.join(timeout=2)
         released = not self.worker.is_alive()
@@ -152,14 +146,20 @@ class NumericArchive:
             with self.lock:
                 self.pending -= 1
                 self.pending_bytes -= size
+        previews, available = self.previews.close(deadline - time.monotonic())
+        for record in self.records.values():
+            record["previews"] = [
+                path if path in available else None for path in record["previews"]
+            ]
         return {
-            "resources_released": released,
+            "resources_released": released and previews["resources_released"],
             "error": self.error,
             "peak_pending_bytes": self.peak_bytes,
             "capacity": self.capacity,
             "byte_limit": self.byte_limit,
             "pending_after_close": self.pending,
-            "preview_errors": self.preview_errors,
+            "preview_errors": previews["failed"],
+            "previews": previews,
         }
 
 

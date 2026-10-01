@@ -222,6 +222,50 @@ def test_existing_frozen_bc_uses_prepared_numbers_without_image_io_or_codecs(tmp
     assert replay.summary["numeric"]["replay_errors"] == []
 
 
+def test_preview_stall_does_not_delay_exact_input_storage(tmp_path, monkeypatch):
+    import threading
+    from pathlib import Path
+
+    preview_started, release_preview = threading.Event(), threading.Event()
+    input_written = threading.Event()
+    write = Path.write_bytes
+
+    def stalled_preview(path, data):
+        if path.suffix == ".png":
+            preview_started.set()
+            assert release_preview.wait(2), "Exact input storage waited for a preview"
+        result = write(path, data)
+        if path.parent.name == "inputs":
+            input_written.set()
+        return result
+
+    def inputs():
+        try:
+            first, second = list(decisions())
+            yield first
+            assert preview_started.wait(2)
+            assert input_written.wait(0.5), "Preview blocked the exact numerical input archive"
+            yield second
+        finally:
+            release_preview.set()
+
+    monkeypatch.setattr(Path, "write_bytes", stalled_preview)
+    result = run_experiment(
+        NumericInfer(tmp_path / "numeric", PixelContract(size=(2, 1)), archive_capacity=2),
+        numeric_inputs=inputs(),
+        numeric_actor=NumericalProbe(),
+    ).summary["numeric"]
+    assert result["stop_reason"] == "source_end", result.get("execution_error")
+    assert [row["prediction"] for row in result["decisions"]] == [[0.2, -0.1]] * 2
+    assert all(row["exact_replay_available"] for row in result["decisions"])
+    assert result["archive"]["resources_released"]
+    replay = run_experiment(
+        NumericReplay(tmp_path / "numeric", tmp_path / "replay.html"),
+        numeric_actor=NumericalProbe(),
+    ).summary["numeric"]
+    assert replay["replay_errors"] == []
+
+
 def test_stalled_archive_drops_evidence_without_waiting_or_changing_predictions(
     tmp_path, monkeypatch
 ):

@@ -313,6 +313,46 @@ def test_persistent_worker_cannot_block_independent_action_expiry(tmp_path):
     assert r["commands_sent_to_game"] is False
 
 
+def test_stalled_preview_does_not_fill_the_exact_input_queue(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    preview_started, release_preview = threading.Event(), threading.Event()
+    write = Path.write_bytes
+
+    def stalled_preview(path, data):
+        if path.suffix == ".png":
+            preview_started.set()
+            assert release_preview.wait(2), "Preview blocked control shutdown"
+        return write(path, data)
+
+    class ClosingGame(ThreadedGame):
+        def close(self):
+            release_preview.set()
+            return super().close()
+
+    game = ClosingGame()
+    monkeypatch.setattr(Path, "write_bytes", stalled_preview)
+    try:
+        result = run_experiment(
+            RealtimeRun(
+                tmp_path / "preview", RealtimeConfig(pixels=PixelContract(size=(2, 1))), seconds=0.7
+            ),
+            realtime_environment=game,
+            numeric_actor_factory=FastActor,
+        ).summary["realtime"]
+    finally:
+        release_preview.set()
+    assert preview_started.is_set()
+    assert result["stop_reason"] == "time_limit"
+    assert sum(row["status"] == "accepted" for row in result["decisions"]) >= 8
+    assert all(row["archive"] for row in result["decisions"] if "actor" in row)
+    assert result["evidence"]["exact_replay_eligible"] is True
+    assert result["archive"]["previews"]["peak_pending_bytes"] == 6
+    assert result["resources_released"] and game.closed
+    assert game.sent[-1][1].throttle_u8 == 0
+    assert result["ended_ns"] - result["started_ns"] < 900 * MS
+
+
 def test_one_second_writer_stall_does_not_block_decisions_and_quarantines_gaps(tmp_path):
     writes = []
 
