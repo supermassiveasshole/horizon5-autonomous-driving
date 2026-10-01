@@ -210,13 +210,14 @@ class _Loop:
                 _input(self.root, row["candidate_evaluation"]).verify()
         self.reconcile_commit()
         self.verify()
-        if state["stop_reason"] != "budget_completed":
+        clean_stop = state["phase"] == "stopped"
+        if not clean_stop or state["stop_reason"] != "budget_completed":
             state["interruptions"].append(
                 {
-                    "stop_reason": state["stop_reason"],
-                    "error": state.get("error"),
+                    "stop_reason": state["stop_reason"] if clean_stop else "unclean_exit",
+                    "error": state.get("error") if clean_stop else None,
                     "phase": state["stages"][-2]["phase"]
-                    if len(state["stages"]) > 1
+                    if clean_stop and len(state["stages"]) > 1
                     else state["phase"],
                 }
             )

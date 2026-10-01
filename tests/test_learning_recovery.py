@@ -92,6 +92,11 @@ def test_committed_candidate_is_reconciled_after_process_exit_without_duplicate_
     assert final["default"]["model_sha256"] == history["default"]["model_sha256"]
     assert resumed["resources_released"]
     assert resumed["recoveries"][0]["kind"] == "candidate_commit"
+    assert resumed["interruptions"][0] == {
+        "phase": "saving_versions",
+        "stop_reason": "unclean_exit",
+        "error": None,
+    }
 
 
 def test_prepared_selection_survives_exit_before_the_store_commit(tmp_path, seeded_loop):
@@ -120,6 +125,11 @@ def test_prepared_selection_survives_exit_before_the_store_commit(tmp_path, seed
     after = run_experiment(store).summary["candidate_store"]
     assert len(after["history"]) == 2
     assert after["explorer"]["model_sha256"] == interrupted["latest_learner"]["sha256"]
+    assert resumed["interruptions"][0] == {
+        "phase": "saving_versions",
+        "stop_reason": "unclean_exit",
+        "error": None,
+    }
 
 
 def test_commit_recovery_rejects_changed_assets_and_another_store_successor(tmp_path, seeded_loop):
