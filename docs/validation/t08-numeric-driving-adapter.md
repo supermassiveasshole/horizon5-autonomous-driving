@@ -36,7 +36,9 @@
 - `runs/t08-worker-device-red/green-20261002`：明确模拟的 CUDA 证据文件不能授权实际 CPU 模型；修正后在观测/控制创建前拒绝。同设备正向路径仍通过，共 **2 passed / 8.57 秒**。未启动 CUDA 或真实采集。
 - 相关回归 `tests/test_numeric_drive_cli.py`、`test_realtime_driving.py`、`test_realtime.py`、`test_realtime_shadow.py`、`test_realtime_numeric_replay.py`、`test_control.py`：**123 passed / 65.92 秒**；JUnit `runs/t08-entry-reviewed-regression-20261002-results.xml`。
 
-主线 `8dce7af` 的全量任务已结束：**1117 passed / 4508.11 秒**，JUnit `runs/t14-updates-integrated-full-20261002-results.xml`；它不覆盖本分支。当前修正待增量复审及合并验证。
+主线 `8dce7af` 的全量任务已结束：**1117 passed / 4508.11 秒**，JUnit `runs/t14-updates-integrated-full-20261002-results.xml`；它不覆盖本分支。
+
+最终增量复审固定范围 `fc78add...cb8b4f8`：Standards **0 项违反 / 0 项可操作建议**；Spec **0 项遗留具体问题**。全部审查只读，未运行设备或替代上述测试；参考辅助、下游接入与实机验收仍按原范围保持未完成。Ruff、311 文件格式及 120 源文件严格 mypy 通过。合并后的整库结果另行记录。
 
 ## 仍需推进
 
