@@ -67,7 +67,7 @@ def _input(base: Path, binding: Any) -> EvaluationInput:
     return result
 
 
-def _conditions(batch: dict[str, Any]) -> dict[str, Any]:
+def evaluation_conditions(batch: dict[str, Any]) -> dict[str, Any]:
     config = batch["config"]
     return {
         "conditions": config["conditions"],
@@ -180,8 +180,8 @@ def compare_candidates(request: CandidateCompare) -> RunResult:
     }
     if any(request.output_dir.resolve().is_relative_to(i.batch_dir) for i in inputs.values()):
         raise ValueError("Comparison output must be outside frozen model batches")
-    conditions = _conditions(inputs["incumbent"].batch)
-    if conditions != _conditions(inputs["candidate"].batch):
+    conditions = evaluation_conditions(inputs["incumbent"].batch)
+    if conditions != evaluation_conditions(inputs["candidate"].batch):
         raise ValueError("Candidate comparison conditions, task, plan or criteria differ")
     request.output_dir.mkdir(parents=True)
     write_file(request.output_dir / "comparison.json", raw)

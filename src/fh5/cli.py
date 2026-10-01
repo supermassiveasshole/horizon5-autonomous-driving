@@ -46,6 +46,8 @@ def _sac(args: argparse.Namespace) -> int:
                 additions=tuple((Path(path), sha) for path, sha in args.add_replay),
                 expected_checkpoint_sha256=args.checkpoint_sha256,
                 demonstration_fraction=args.demonstration_fraction,
+                imitation_comparison=args.imitation_comparison,
+                imitation_registry=args.imitation_registry,
             )
         )
         print(json.dumps(resumed.summary["sac_learning"], ensure_ascii=False))
@@ -55,6 +57,10 @@ def _sac(args: argparse.Namespace) -> int:
         if not isinstance(options, dict) or options.pop("version", None) != 1:
             raise ValueError("SAC training requires a version 1 configuration")
         try:
+            if options.get("imitation_protocol_batch") is not None:
+                options["imitation_protocol_batch"] = (
+                    args.config.parent / options["imitation_protocol_batch"]
+                )
             request = SACTrain(
                 args.config.parent / options.pop("warmup"),
                 args.config.parent / options.pop("replay"),
@@ -159,6 +165,16 @@ def main(argv: Sequence[str] | None = None) -> int:
     sac_resume.add_argument("--output", type=Path, required=True)
     sac_resume.add_argument("--steps", type=int, default=100)
     sac_resume.add_argument("--checkpoint-sha256", help="Require this exact parent manifest digest")
+    sac_resume.add_argument(
+        "--imitation-comparison",
+        type=Path,
+        help="Recompute a frozen development comparison before guidance changes",
+    )
+    sac_resume.add_argument(
+        "--imitation-registry",
+        type=Path,
+        help="Previously reserved development evidence usage registry",
+    )
     sac_resume.add_argument(
         "--demonstration-fraction",
         type=float,

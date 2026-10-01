@@ -11,6 +11,7 @@ from fh5.collection_store import read_bounded
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import DecisionActor, PixelContract
 from fh5.sac_actor import FrozenSAC
+from fh5.sac_imitation import checkpoint_imitation, imitation_evidence
 
 
 def asset_limit(name: str) -> int:
@@ -33,6 +34,15 @@ def model_payloads(
     manifest = payloads["model/policy.json" if sac else "model/model.json"]
     if hashlib.sha256(manifest).hexdigest() != binding["manifest_sha256"]:
         raise ValueError("Evaluation model manifest changed")
+    if sac:
+        payloads.update(
+            {
+                "model/" + name: raw
+                for name, raw in imitation_evidence(
+                    directory, checkpoint_imitation(json.loads(manifest))
+                ).items()
+            }
+        )
     model = json.loads(payloads["model/bc/model.json" if sac else "model/model.json"])
     return model, payloads
 

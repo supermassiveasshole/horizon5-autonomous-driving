@@ -25,8 +25,8 @@ class FrozenSAC:
     def __init__(self, torch: Any, checkpoint: Path, *, allow_legacy: bool = False) -> None:
         self.torch = torch
         manifest, saved, raw = read_checkpoint(torch, checkpoint)
-        if manifest["version"] not in (2, 3) and not allow_legacy:
-            raise ValueError("SAC sampling requires a sealed version 2 or 3 checkpoint")
+        if manifest["version"] not in (2, 3, 4) and not allow_legacy:
+            raise ValueError("SAC sampling requires a sealed version 2, 3 or 4 checkpoint")
         self.sha = hashlib.sha256(raw).hexdigest()
         self.manifest = manifest
         model_dir = checkpoint / "bc"

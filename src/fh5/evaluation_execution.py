@@ -273,6 +273,7 @@ def review_execution(
             raise ValueError("Execution manifest changed during review")
         result.update(
             status="bound_diagnostic",
+            actor_kind=report["actor_kind"],
             reasons=["synthetic_or_shadow_only", "game_action_timing_unverified"],
             metrics=execution_metrics(report),
         )

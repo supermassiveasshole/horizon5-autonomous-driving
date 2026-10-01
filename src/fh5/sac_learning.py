@@ -34,6 +34,13 @@ from fh5.sac_checkpoint import (
 )
 from fh5.sac_data import LearningReplay
 from fh5.sac_experience import expand_experience
+from fh5.sac_imitation import (
+    checkpoint_imitation,
+    freeze_imitation_protocol,
+    guidance_loss,
+    imitation_evidence,
+    initial_imitation,
+)
 from fh5.sac_policy import encode_history, make_policy, soft_update
 from fh5.sac_sources import ReplaySampling
 
@@ -59,6 +66,8 @@ class SACTrain:
     tau: float = 0.005
     seed: int = 7
     demonstration_fraction: float | None = None
+    imitation_weights: tuple[float, ...] | None = None
+    imitation_protocol_batch: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -77,6 +86,8 @@ class SACResume:
     additions: tuple[tuple[Path, str], ...] = ()
     expected_checkpoint_sha256: str | None = None
     demonstration_fraction: float | None = None
+    imitation_comparison: Path | None = None
+    imitation_registry: Path | None = None
 
 
 def _difference(torch: Any, before: dict[str, Any], module: Any) -> float:
@@ -143,8 +154,8 @@ def _train(
             and hashlib.sha256(parent_bytes).hexdigest() != operation.expected_checkpoint_sha256
         ):
             raise ValueError("SAC continuation differs from its expected parent checkpoint")
-        if manifest["version"] not in (2, 3):
-            raise ValueError("SAC continuation requires a sealed version 2 or 3 checkpoint")
+        if manifest["version"] not in (2, 3, 4):
+            raise ValueError("SAC continuation requires a sealed version 2, 3 or 4 checkpoint")
         history, history_blobs = continuation_history(
             operation.checkpoint_dir, manifest, parent_bytes
         )
@@ -163,6 +174,8 @@ def _train(
         }
     else:
         request = operation
+    if request.imitation_protocol_batch is not None and request.imitation_weights is None:
+        raise ValueError("Imitation protocol requires explicit imitation weights")
     if request.output_dir.exists():
         raise FileExistsError(request.output_dir)
     if any(
@@ -207,6 +220,48 @@ def _train(
     bounds = ActionBounds(**warm["bounds"])
     bc_bytes = {n: read_bounded(bc_dir / n, 256 * 1024**2) for n in ("model.json", "actor.pt")}
     bc_manifest = json.loads(bc_bytes["model.json"])
+    imitation = (
+        initial_imitation(
+            request.imitation_weights,
+            warm["actor_manifest_sha256"],
+            freeze_imitation_protocol(request.imitation_protocol_batch)
+            if request.imitation_protocol_batch is not None
+            else None,
+        )
+        if request.imitation_weights is not None
+        else None
+    )
+    if restored is not None:
+        imitation = checkpoint_imitation(manifest)
+        assert isinstance(operation, SACResume)
+        history_blobs.update(imitation_evidence(operation.checkpoint_dir, imitation))
+    imitation_review = None
+    if isinstance(operation, SACResume) and operation.imitation_comparison is not None:
+        if imitation is None or imitation["protocol_sha256"] is None:
+            raise ValueError("Imitation exit requires a protocol frozen before training")
+        from fh5.sac_checkpoint import source_replays
+        from fh5.sac_imitation_review import review_imitation
+
+        root = Path(resources.enter_context(TemporaryDirectory(prefix="fh5-imitation-")))
+        replay = json.loads(read_bounded(request.replay_file, 128 * 1024**2))
+        learning_replays = [
+            replay,
+            *(
+                json.loads(raw)
+                for raw in source_replays(request.replay_file.parent, replay).values()
+            ),
+        ]
+        learning_origins = {item["source_hashes"]["packets"] for item in learning_replays}
+        imitation, imitation_review, proof_blobs = review_imitation(
+            imitation,
+            operation.imitation_comparison,
+            operation.imitation_registry,
+            root / "comparison",
+            parent_sha256=hashlib.sha256(parent_bytes).hexdigest(),
+            bc_manifest=bc_manifest,
+            learning_origins=learning_origins,
+        )
+        history_blobs.update(proof_blobs)
     pixels = PixelContract.from_metadata(bc_manifest["numeric_contract"])
     bc = FrozenNumericActor(bc_dir, pixels, expected_manifest_sha256=warm["actor_manifest_sha256"])
     if (
@@ -260,6 +315,10 @@ def _train(
         saved["target" if restored is None else "target_critic"], strict=True
     )
     target_encoder = deepcopy(encoder)
+    teacher_initial = _snapshot(bc.model) if imitation is not None else None
+    teacher_evaluations = 0
+    if imitation is not None:
+        bc.model.requires_grad_(False)
     if restored is not None:
         encoder.load_state_dict(saved["encoder"], strict=True)
         policy.load_state_dict(saved["policy"], strict=True)
@@ -386,6 +445,15 @@ def _train(
                 .values
             )
             actor_loss = (log_alpha.exp().detach() * sampled["log_probability"] - q).mean()
+            if imitation is not None:
+                entry["sac_actor_loss"] = float(actor_loss.detach())
+                entry["imitation_weight"] = imitation["weight"]
+                entry["imitation_loss"] = 0.0
+                if imitation["weight"]:
+                    prior_loss = guidance_loss(torch, bc.model, inputs, context, sampled["mean"])
+                    teacher_evaluations += 1
+                    entry["imitation_loss"] = float(prior_loss.detach())
+                    actor_loss = actor_loss + imitation["weight"] * prior_loss
             actor_optimizer.zero_grad(set_to_none=True)
             actor_loss.backward()
             actor_optimizer.step()
@@ -450,8 +518,25 @@ def _train(
         "real_driving_validated": False,
     }
     config = {k: v for k, v in asdict(request).items() if not isinstance(v, Path)}
+    config.pop("imitation_protocol_batch", None)
+    if imitation_review is not None:
+        summary["imitation_review"] = imitation_review
+    if imitation is None:
+        config.pop("imitation_weights")
+    else:
+        config["imitation_weights"] = imitation["weights"]
+        assert teacher_initial is not None
+        teacher_change = _difference(torch, teacher_initial, bc.model)
+        if teacher_change:
+            raise ValueError("Temporary imitation changed its frozen teacher")
+        summary["imitation"] = {
+            **imitation,
+            "teacher_evaluations": teacher_evaluations,
+            "teacher_change_max": teacher_change,
+        }
+    version = 4 if imitation is not None else 3 if request.demonstration_fraction is not None else 2
     metadata = {
-        "version": 3 if request.demonstration_fraction is not None else 2,
+        "version": version,
         "stage": "sac_updates",
         "architecture": "conditional-temporal-sac-v1",
         "configuration": config,
@@ -467,10 +552,10 @@ def _train(
         "experience": experience,
         "continuation": continuation,
         "history": history,
-        "resume_contract": resume_contract(
-            torch, 3 if request.demonstration_fraction is not None else 2
-        ),
+        "resume_contract": resume_contract(torch, version),
     }
+    if imitation is not None:
+        metadata["imitation"] = imitation
     state = {
         "encoder": encoder.state_dict(),
         "policy": policy.state_dict(),
@@ -495,6 +580,7 @@ def _train(
         + "</pre>",
         encoding="utf-8",
     )
+    imitation_evidence(output, imitation)
     publish_checkpoint(torch, output, metadata, state, report_bytes)
     return RunResult({}, [], [], {"sac_learning": summary}, report)
 

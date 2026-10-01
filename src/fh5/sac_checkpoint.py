@@ -11,6 +11,7 @@ from typing import Any
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.numeric_images import asset
 from fh5.numeric_recording import read_numeric_frame
+from fh5.sac_imitation import checkpoint_imitation, imitation_evidence
 
 MANIFEST_LIMIT_BYTES = 1024**2
 WEIGHTS_LIMIT_BYTES = 256 * 1024**2
@@ -69,19 +70,25 @@ def resume_contract(torch: Any, version: int = 2) -> dict[str, Any]:
     }
     if version == 3:
         contract["replay_sampling"] = "source-quotas-v1; shrink without replacement or backfill"
+    if version == 4:
+        contract["replay_sampling"] = "uniform or explicit source-quotas-v1"
+        contract["imitation_schedule"] = (
+            "frozen-bc-interval-distance-v1; explicit phases ending at zero"
+        )
     return contract
 
 
 def read_checkpoint(torch: Any, root: Path) -> tuple[dict[str, Any], dict[str, Any], bytes]:
     raw = read_bounded(root / "policy.json", MANIFEST_LIMIT_BYTES)
     manifest = json.loads(raw)
-    if manifest.get("version") not in (1, 2, 3) or (
+    if manifest.get("version") not in (1, 2, 3, 4) or (
         manifest.get("architecture"),
         manifest.get("stage"),
     ) != ("conditional-temporal-sac-v1", "sac_updates"):
         raise ValueError("Unsupported SAC policy checkpoint")
     saved = _read_state(torch, root, manifest, "policy.pt")
-    if manifest["version"] in (2, 3):
+    imitation_evidence(root, checkpoint_imitation(manifest))
+    if manifest["version"] in (2, 3, 4):
         if manifest["resume_contract"] != resume_contract(torch, manifest["version"]):
             raise ValueError("Unsupported SAC continuation contract or Torch runtime")
         _verify_training_state(torch, root, manifest, saved)
