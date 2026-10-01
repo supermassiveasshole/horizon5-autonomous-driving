@@ -11,10 +11,31 @@ from typing import Any
 from fh5.sac_checkpoint import source_replays
 
 
+def check_compatible(replay: dict[str, Any], anchor: dict[str, Any]) -> None:
+    for key in ("pixel_contract", "task_context", "task_state_role"):
+        if replay[key] != anchor[key]:
+            raise ValueError("Incompatible SAC experience: " + key)
+    for key in ("route", "reward"):
+        if replay["source_hashes"][key] != anchor["source_hashes"][key]:
+            raise ValueError("Incompatible SAC experience: " + key)
+    current_task, prior_task = replay.get("task_contract"), anchor.get("task_contract")
+    if current_task is not None and prior_task is not None:
+        if {k: v for k, v in current_task.items() if k != "control_owner"} != {
+            k: v for k, v in prior_task.items() if k != "control_owner"
+        }:
+            raise ValueError("Incompatible SAC experience: task")
+    elif replay["source_hashes"]["task"] != anchor["source_hashes"]["task"]:
+        raise ValueError("Incompatible SAC experience: task")
+
+
 def _leaf_roles(replay: dict[str, Any]) -> list[str]:
     if replay["version"] == 1:
-        if "source_role" in replay:
-            raise ValueError("Legacy SAC replay cannot declare a new source role")
+        if (
+            "source_role" in replay
+            or "task_contract" in replay
+            or any("control_owner" in row for row in replay["transitions"])
+        ):
+            raise ValueError("Legacy SAC replay cannot declare new role or owner fields")
         return ["online"] * len(replay["transitions"])
     owner = {"demonstration": "human", "online": "policy"}.get(replay.get("source_role", ""))
     if (
@@ -44,6 +65,8 @@ def replay_roles(root: Path, replay: dict[str, Any]) -> list[str]:
         or replay.get("source_kind") != "synthetic"
         or not isinstance(replay.get("transitions"), list)
         or not 1 <= len(replay["transitions"]) <= 10_000
+        or replay.get("version") == 2
+        and not isinstance(replay.get("task_contract"), dict)
     ):
         raise ValueError("SAC requires a bounded prepared synthetic replay")
     required = {"id", "current", "next", "action", "reward", "discount", "bootstrap", "terminated"}
@@ -60,6 +83,7 @@ def replay_roles(root: Path, replay: dict[str, Any]) -> list[str]:
         if source.get("source_inventory"):
             raise ValueError("SAC source inventory must contain original leaf replays")
         roles = replay_roles(root, source)
+        check_compatible(replay, source)
         for row, role in zip(source["transitions"], roles):
             originals[(entry["replay_sha256"], row["id"])] = (row, role)
     result = []

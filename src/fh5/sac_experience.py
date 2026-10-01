@@ -14,6 +14,7 @@ from fh5.numeric_recording import read_numeric_frame
 from fh5.sac_actions import ActionBounds
 from fh5.sac_checkpoint import source_replays
 from fh5.sac_data import LearningReplay
+from fh5.sac_sources import check_compatible
 
 
 def expand_experience(
@@ -40,23 +41,7 @@ def expand_experience(
         replay = json.loads(data.raw)
         if combined is None:
             combined = deepcopy(replay)
-        for key in ("pixel_contract", "task_context", "task_state_role"):
-            if replay[key] != combined[key]:
-                raise ValueError("Incompatible SAC experience: " + key)
-        for key in ("route", "reward"):
-            if replay["source_hashes"][key] != combined["source_hashes"][key]:
-                raise ValueError("Incompatible SAC experience: " + key)
-        if replay["source_hashes"]["task"] != combined["source_hashes"]["task"]:
-            current_task, prior_task = replay.get("task_contract"), combined.get("task_contract")
-            if (
-                current_task is None
-                or prior_task is None
-                or (
-                    {k: v for k, v in current_task.items() if k != "control_owner"}
-                    != {k: v for k, v in prior_task.items() if k != "control_owner"}
-                )
-            ):
-                raise ValueError("Incompatible SAC experience: task")
+        check_compatible(replay, combined)
         entries = replay.get("source_inventory") or [
             {
                 "replay_sha256": sha,

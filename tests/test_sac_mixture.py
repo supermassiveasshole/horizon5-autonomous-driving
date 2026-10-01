@@ -226,3 +226,44 @@ def test_out_of_support_demonstration_is_rejected_without_clipping_its_action(tm
             )
         )
     assert path.read_bytes() == original
+
+
+def test_declaring_legacy_format_does_not_relabel_known_human_actions_as_online(tmp_path):
+    pytest.importorskip("torch")
+    initial, (path, _) = mixture_inputs(tmp_path)
+    replay = json.loads(path.read_bytes())
+    replay.update(version=1, kind="sac-numeric-replay-v1")
+    del replay["source_role"]
+    path.write_text(json.dumps(replay))
+    with pytest.raises(ValueError, match="Legacy SAC replay"):
+        run_experiment(
+            SACResume(
+                initial,
+                tmp_path / "invalid",
+                steps=0,
+                additions=((path, hashlib.sha256(path.read_bytes()).hexdigest()),),
+            )
+        )
+
+
+def test_mixed_replay_cannot_change_the_original_task_context_for_q_warmup(tmp_path):
+    pytest.importorskip("torch")
+    from fh5.sac import SACCriticWarmup
+
+    initial, demo = mixture_inputs(tmp_path)
+    seed = tmp_path / "seed"
+    run_experiment(SACResume(initial, seed, steps=0, additions=(demo,), demonstration_fraction=0.5))
+    path = seed / "experience/replay.json"
+    replay = json.loads(path.read_bytes())
+    replay["task_context"]["route_length_m"] = 300
+    path.write_text(json.dumps(replay))
+    with pytest.raises(ValueError, match="Incompatible SAC experience: task_context"):
+        run_experiment(
+            SACCriticWarmup(
+                tmp_path / "bc/model",
+                path,
+                hashlib.sha256(path.read_bytes()).hexdigest(),
+                tmp_path / "invalid",
+                steps=1,
+            )
+        )
