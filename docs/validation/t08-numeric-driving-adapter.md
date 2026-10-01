@@ -17,7 +17,9 @@
 
 控制与实时调度既有回归 **62 passed in 4.10s**，JUnit：`runs/t08-adapter-regression-20261002-results.xml`。Ruff 与 mypy（118 源文件）通过。主线全量任务仍运行在冻结的旧提交上，不覆盖本增量。
 
-双轴审查对 `8dce7af...dc006ee`：Standards 0；Spec 2 项发送/释放报告缺陷。均先复现失败再修正：`t08-shutdown-count-red/green-20261002` 检查仅收尾发送归零也计入总数；`t08-acquisition-red/green-20261002` 模拟设备成功取得后操作系统无法启动线程、设备断开也失败，仍须保留设备所有权并报告未释放。总发送统计包含运行时、独立看门狗和收尾，运行时计数另列。复核结果待记录。
+双轴审查对 `8dce7af...dc006ee`：Standards 0；Spec 2 项发送/释放报告缺陷。均先复现失败再修正：`t08-shutdown-count-red/green-20261002` 检查仅收尾发送归零也计入总数；`t08-acquisition-red/green-20261002` 模拟设备成功取得后操作系统无法启动线程、设备断开也失败，仍须保留设备所有权并报告未释放。总发送统计包含运行时、独立看门狗和收尾，运行时计数另列。
+
+复核固定范围 `8dce7af...75eaffc`：Standards 0 项违反/0 项建议，Spec 0 项当前增量遗留缺陷。修正后的完整原型 `runs/t08-numeric-drive-reviewed-20261002` 以 `time_limit` 正常结束、全部资源释放，22 个真实模型预测通过实验入口及 CLI 独立重放；未新增梯度更新。Ruff/308 文件格式检查通过。上述复核不替代仍未运行的 fresh fixture 或完整套件。
 
 ## 仍需推进
 
