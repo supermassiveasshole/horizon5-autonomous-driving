@@ -148,6 +148,24 @@ def main(argv: Sequence[str] | None = None) -> int:
     candidate_compare.add_argument("--config", type=Path, required=True)
     candidate_compare.add_argument("--output", type=Path, required=True)
     candidate_compare.add_argument("--registry", type=Path)
+    candidate_record = commands.add_parser(
+        "candidate-record", help="Retain candidate roles and evidence in a synthetic version store"
+    )
+    candidate_record.add_argument("--config", type=Path, required=True)
+    candidate_record.add_argument("--expected-revision")
+    candidate_rollback = commands.add_parser(
+        "candidate-rollback", help="Re-audit a retained synthetic default; keep exploration state"
+    )
+    candidate_rollback.add_argument("--expected-revision", required=True)
+    candidate_rollback.add_argument("--target-revision", required=True)
+    candidate_rollback.add_argument("--reason", required=True)
+    candidate_history = commands.add_parser(
+        "candidate-history", help="Read committed synthetic candidate roles and history"
+    )
+    for command in (candidate_record, candidate_rollback, candidate_history):
+        command.add_argument("--store", type=Path, required=True)
+    for command in (candidate_record, candidate_rollback):
+        command.add_argument("--registry", type=Path, required=True)
     evaluation_prepare = commands.add_parser(
         "evaluation-prepare", help="Freeze a policy, local task and evaluation protocol; no devices"
     )
@@ -575,6 +593,28 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             result = retained.summary[args.mode.replace("-", "_")]
             print(json.dumps({k: v for k, v in result.items() if k != "files"}, ensure_ascii=False))
+            return 0
+        if args.mode in ("candidate-record", "candidate-rollback", "candidate-history"):
+            from fh5.candidate_store import CandidateHistory, CandidateRecord, CandidateRollback
+
+            operation: CandidateRecord | CandidateRollback | CandidateHistory
+            if args.mode == "candidate-record":
+                operation = CandidateRecord(
+                    args.config, args.store, args.expected_revision, args.registry
+                )
+            elif args.mode == "candidate-rollback":
+                operation = CandidateRollback(
+                    args.store,
+                    args.expected_revision,
+                    args.target_revision,
+                    args.reason,
+                    args.registry,
+                )
+            else:
+                operation = CandidateHistory(args.store)
+            print(
+                json.dumps(run_experiment(operation).summary["candidate_store"], ensure_ascii=False)
+            )
             return 0
         if args.mode == "candidate-compare":
             from fh5.candidate_selection import CandidateCompare

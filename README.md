@@ -14,7 +14,7 @@ T06 / #7 已加入 `fh5 attempt-review`：完整尝试、前向片段和恢复�
 
 T09 / #10 新增[冻结评估与全部尝试统计](docs/evaluation.md)：`fh5 evaluation-prepare` 固定 BC 或 SAC、任务和批次条件，`fh5 evaluation-review` 汇总完整录制中的五类结果及未开始计划，并核对数值执行证据。已有[冻结 SAC 的合成重复运行与回放](docs/validation/t09-sac-evaluation.md)，独立验证决策时和发送前的命令上下文。真实重复驾驶与独立最终验收仍待完成，不据此晋升版本。
 
-T13 / #14 的[候选比较](docs/candidate-selection.md)可从原始证据重新审核两个冻结开发批次，先有效性、后可靠性与用时，逐参考条件保留激进候选建议。`fh5 candidate-compare` 不修改默认版本或训练状态；实际自动晋升、历史回退及真实驾驶资格仍待完成。
+T13 / #14 的[候选比较](docs/candidate-selection.md)可从原始证据重新审核两个冻结开发批次，先有效性、后可靠性与用时，逐参考条件保留激进候选建议。[持久候选版本](docs/candidate-store.md)通过完整归档分别保留合成默认版本、探索进度、激进候选和回退历史，支持跨进程读取及过期写入保护。实际 FH5 自动晋升和独立驾驶资格仍待完成。
 
 ## 安装与运行
 

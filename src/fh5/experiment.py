@@ -21,6 +21,14 @@ from fh5.candidate_archive import (
     restore_candidate,
 )
 from fh5.candidate_selection import CandidateCompare, compare_candidates
+from fh5.candidate_store import (
+    CandidateHistory,
+    CandidateRecord,
+    CandidateRollback,
+    read_candidate_history,
+    record_candidate,
+    rollback_candidate,
+)
 from fh5.capture import CaptureReplay, CaptureRun, replay_capture
 from fh5.capture_runtime import CaptureSource, run_capture
 from fh5.capture_trace import CaptureTraceReview, review_capture_trace
@@ -252,6 +260,9 @@ def run_experiment(
     | CandidateArchive
     | CandidateRestore
     | CandidateCompare
+    | CandidateHistory
+    | CandidateRecord
+    | CandidateRollback
     | EvaluationPrepare
     | EvaluationReview
     | EvaluationRun
@@ -337,6 +348,12 @@ def run_experiment(
         return restore_candidate(request)
     if isinstance(request, CandidateCompare):
         return compare_candidates(request)
+    if isinstance(request, CandidateRecord):
+        return record_candidate(request)
+    if isinstance(request, CandidateRollback):
+        return rollback_candidate(request)
+    if isinstance(request, CandidateHistory):
+        return read_candidate_history(request)
     if isinstance(request, EvaluationPrepare):
         return prepare_evaluation(request)
     if isinstance(request, EvaluationReview):
