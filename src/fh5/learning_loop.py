@@ -9,6 +9,7 @@ import math
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from fh5.candidate_archive import CandidateRestore
@@ -207,6 +208,7 @@ class _Loop:
                     verify_sampling_sources(attempt.get("source_assets", {}))
             if "candidate_evaluation" in row:
                 _input(self.root, row["candidate_evaluation"]).verify()
+        self.reconcile_commit()
         self.verify()
         if state["stop_reason"] != "budget_completed":
             state["interruptions"].append(
@@ -367,33 +369,30 @@ class _Loop:
             raise ValueError("Evaluation lease did not release its resources")
         return binding
 
-    def retain(self, number: int, row: dict[str, Any], binding: dict[str, Any]) -> None:
-        from fh5.experiment import run_experiment
-
+    def retention_files(self, number: int, binding: dict[str, Any]) -> dict[Path, bytes]:
         root = self.root / f"round-{number:03d}"
         comparison = root / "comparison.json"
-        write_file(
-            comparison,
-            encode({"version": 1, "incumbent": self.state["incumbent"], "candidate": binding}),
-        )
-        config_file = root / "retain.json"
-        write_file(
-            config_file,
-            encode(
+        payload = encode({"version": 1, "incumbent": self.state["incumbent"], "candidate": binding})
+        return {
+            comparison: payload,
+            root / "retain.json": encode(
                 {
                     "version": 1,
-                    "comparison": {"file": str(comparison.resolve()), "sha256": _sha(comparison)},
+                    "comparison": {
+                        "file": str(comparison.resolve()),
+                        "sha256": hashlib.sha256(payload).hexdigest(),
+                    },
                     "checkpoints": {
                         "incumbent": self.state["default"]["directory"],
                         "candidate": self.state["latest_learner"]["directory"],
                     },
                 }
             ),
-        )
-        self.save("saving_versions")
-        saved = run_experiment(
-            CandidateRecord(config_file, self.store, self.state["store_revision"], self.registry)
-        ).summary["candidate_store"]
+        }
+
+    def accept_selection(
+        self, row: dict[str, Any], binding: dict[str, Any], saved: dict[str, Any]
+    ) -> None:
         self.state["store_revision"] = saved["revision"]
         self.state["explorer"] = self.state["latest_learner"]
         if saved["selection"] == "prefer_candidate_locally":
@@ -406,6 +405,101 @@ class _Loop:
             complete=True,
         )
         self.state["rounds_completed"] += 1
+
+    def reconcile_commit(self) -> None:
+        from fh5.experiment import run_experiment
+
+        history = run_experiment(CandidateHistory(self.store)).summary["candidate_store"]
+        if history["revision"] == self.state["store_revision"]:
+            return
+        rows = self.state["rounds"]
+        if (
+            self.state["phase"] != "saving_versions"
+            or not rows
+            or rows[-1]["complete"]
+            or self.state["rounds_completed"] != len(rows) - 1
+            or not all(row["complete"] for row in rows[:-1])
+            or history["parent"] != self.state["store_revision"]
+            or history["operation"] != "selection"
+            or history["selection"] not in ("prefer_candidate_locally", "retain_incumbent")
+        ):
+            raise ValueError("Learning store changed outside the pending candidate commit")
+        row = rows[-1]
+        binding = row["candidate_evaluation"]
+        number = len(rows) - 1
+        files = self.retention_files(number, binding)
+        root = self.root / f"round-{number:03d}"
+        expected = {
+            "comparison_file": str(root / "comparison.json"),
+            "comparison_sha256": hashlib.sha256(files[root / "comparison.json"]).hexdigest(),
+            "side": "candidate"
+            if history["selection"] == "prefer_candidate_locally"
+            else "incumbent",
+        }
+        if (
+            any(read_bounded(path, 1024**2) != raw for path, raw in files.items())
+            or read_bounded(self.store / history["request"], 1024**2) != files[root / "retain.json"]
+            or history["qualification"] != expected
+            or row["candidate_sha256"] != self.state["latest_learner"]["sha256"]
+            or not self.state["child_resources_released"]
+        ):
+            raise ValueError("Pending candidate commit differs from this learning round")
+        chosen = (
+            self.state["latest_learner"]
+            if history["selection"] == "prefer_candidate_locally"
+            else self.state["default"]
+        )
+        # Authenticate retained complete archives, not just history's model names.
+        with TemporaryDirectory(prefix="commit-recovery-", dir=self.root) as temporary:
+            for role, learner in (("default", chosen), ("explorer", self.state["latest_learner"])):
+                archive = history[role]
+                restored = run_experiment(
+                    CandidateRestore(
+                        self.store / archive["archive"],
+                        Path(temporary) / role,
+                        archive["archive_sha256"],
+                        "Verify committed learning selection after process exit",
+                    )
+                ).summary["candidate_restore"]
+                if (
+                    archive["model_sha256"] != learner["sha256"]
+                    or restored["checkpoint_sha256"] != learner["sha256"]
+                    or restored["learner_state_sha256"] != learner["learner_state_sha256"]
+                ):
+                    raise ValueError("Pending candidate archive differs from the saved learner")
+        if _qualification(history) != (
+            binding if expected["side"] == "candidate" else self.state["incumbent"]
+        ):
+            raise ValueError("Pending candidate qualification changed")
+        self.state.setdefault("recoveries", []).append(
+            {
+                "kind": "candidate_commit",
+                "round": number,
+                "previous_revision": self.state["store_revision"],
+                "committed_revision": history["revision"],
+            }
+        )
+        self.accept_selection(row, binding, history)
+
+    def retain(self, number: int, row: dict[str, Any], binding: dict[str, Any]) -> None:
+        from fh5.experiment import run_experiment
+
+        for path, raw in self.retention_files(number, binding).items():
+            if path.exists():
+                if read_bounded(path, 1024**2) != raw:
+                    raise ValueError("Prepared candidate selection changed")
+            else:
+                write_file(path, raw)
+        self.save("saving_versions")
+        saved = run_experiment(
+            CandidateRecord(
+                self.root / f"round-{number:03d}" / "retain.json",
+                self.store,
+                self.state["store_revision"],
+                self.registry,
+            )
+        ).summary["candidate_store"]
+        self.accept_selection(row, binding, saved)
         self.save("ready")
 
     def run(self) -> None:
