@@ -162,6 +162,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     candidate_history = commands.add_parser(
         "candidate-history", help="Read committed synthetic candidate roles and history"
     )
+    storage_plan = commands.add_parser(
+        "learning-storage-plan", help="Account for retained learning dependencies without deletion"
+    )
+    storage_plan.add_argument("--config", type=Path, required=True)
+    storage_plan.add_argument("--output", type=Path, required=True)
     for command in (candidate_record, candidate_rollback, candidate_history):
         command.add_argument("--store", type=Path, required=True)
     for command in (candidate_record, candidate_rollback):
@@ -594,6 +599,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             result = retained.summary[args.mode.replace("-", "_")]
             print(json.dumps({k: v for k, v in result.items() if k != "files"}, ensure_ascii=False))
             return 0
+        if args.mode == "learning-storage-plan":
+            from fh5.storage import LearningStoragePlan
+
+            storage = run_experiment(LearningStoragePlan(args.config, args.output)).summary[
+                "storage"
+            ]
+            print(
+                json.dumps({k: v for k, v in storage.items() if k != "files"}, ensure_ascii=False)
+            )
+            return 0 if storage["status"] == "within_budget" else 4
         if args.mode in ("candidate-record", "candidate-rollback", "candidate-history"):
             from fh5.candidate_store import CandidateHistory, CandidateRecord, CandidateRollback
 

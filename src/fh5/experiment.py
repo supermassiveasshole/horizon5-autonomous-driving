@@ -113,6 +113,7 @@ from fh5.sac_learning import (
     run_sac_training,
 )
 from fh5.sac_replay import SACReplayPrepare, prepare_sac_replay
+from fh5.storage import LearningStoragePlan, plan_learning_storage
 from fh5.temporal_bc import TemporalBCReplay, TemporalBCTrain, run_temporal_bc
 from fh5.temporal_import import TemporalBCPrepare, prepare_temporal
 from fh5.tracking import TrackingDrive, read_tracking_route, run_tracking
@@ -300,6 +301,7 @@ def run_experiment(
     | SACCycle
     | LearningLoop
     | LearningContinue
+    | LearningStoragePlan
     | SACResume
     | SACPolicyReplay
     | RewardAudit
@@ -346,6 +348,8 @@ def run_experiment(
     collection_installer: CollectionInstaller | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, LearningStoragePlan):
+        return plan_learning_storage(request)
     if isinstance(request, (LearningLoop, LearningContinue)):
         if learning_environment is None:
             raise ValueError("Learning loop requires an explicit synthetic environment")
