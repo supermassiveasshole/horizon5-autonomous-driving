@@ -23,6 +23,7 @@ from fh5.evaluation_completion import completed_evaluation
 from fh5.evaluation_run import EvaluationEnvironment, EvaluationRun
 from fh5.learning_capacity import capacity_decision, validate_storage_budget
 from fh5.learning_io import EvaluationLease, LearningUnavailable, RejectedLease, SamplingLease
+from fh5.learning_monitor import StorageMonitor, validate_monitor
 from fh5.learning_recovery import completed_sampling
 from fh5.sac_cycle import SACCycle, SACEnvironment
 from fh5.sac_learning import validate_sac_candidate
@@ -64,7 +65,9 @@ def _sha(path: Path, limit: int = 4 * 1024**2) -> str:
 def _configuration(path: Path) -> dict[str, Any]:
     config: dict[str, Any] = json.loads(read_bounded(path, 1024**2))
     if (
-        set(config) - {"acquisition_retry"} - ({"storage"} if config.get("version") == 2 else set())
+        set(config)
+        - {"acquisition_retry"}
+        - ({"storage", "storage_monitor"} if config.get("version") == 2 else set())
         != {
             "version",
             "store",
@@ -83,6 +86,8 @@ def _configuration(path: Path) -> dict[str, Any]:
         raise ValueError("Unsupported learning loop configuration")
     if config["version"] == 2:
         config["storage"] = validate_storage_budget(config.get("storage"), path.parent)
+        if "storage_monitor" in config:
+            config["storage_monitor"] = validate_monitor(config["storage_monitor"])
     if "acquisition_retry" in config:
         retry = config["acquisition_retry"]
         if (
@@ -139,6 +144,7 @@ def _learner(path: Path, expected: str) -> dict[str, Any]:
 class _Loop:
     def __init__(self, root: Path, config: dict[str, Any], environment: LearningEnvironment):
         self.root, self.config, self.environment = root, config, environment
+        self.monitor: StorageMonitor | None = None
         self.store = Path(config["store"]["directory"])
         self.registry = Path(config["registry"])
         self.state: dict[str, Any] = {
@@ -227,8 +233,8 @@ class _Loop:
     ) -> _Lease | None:
         retry = self.config.get("acquisition_retry", {"max_retries": 0, "delay_seconds": 0})
         for attempt in range(1, retry["max_retries"] + 2):
-            if (self.root / "stop.request").exists():
-                self.state["stop_reason"] = "stop_requested"
+            if self.stopped():
+                self.state["stop_reason"] = self.stopping_reason()
                 return None
             self.save("opening_" + kind)
             try:
@@ -251,8 +257,8 @@ class _Loop:
                 if not safe_to_retry:
                     self.state["stop_reason"] = "release_fault"
                     return None
-                if (self.root / "stop.request").exists():
-                    self.state["stop_reason"] = "stop_requested"
+                if self.stopped():
+                    self.state["stop_reason"] = self.stopping_reason()
                     return None
                 if attempt > retry["max_retries"]:
                     self.state["stop_reason"] = "acquisition_retries_exhausted"
@@ -260,8 +266,8 @@ class _Loop:
                 self.save("waiting_for_interface")
                 deadline = time.monotonic() + retry["delay_seconds"]
                 while time.monotonic() < deadline:
-                    if (self.root / "stop.request").exists():
-                        self.state["stop_reason"] = "stop_requested"
+                    if self.stopped():
+                        self.state["stop_reason"] = self.stopping_reason()
                         return None
                     time.sleep(min(0.05, max(0, deadline - time.monotonic())))
                 self.verify()
@@ -277,7 +283,7 @@ class _Loop:
                 if not self.capacity(kind):
                     return None
             else:
-                if (self.root / "stop.request").exists():
+                if self.stopped():
                     previous = self.state["child_resources_released"]
                     self.state["child_resources_released"] = False
                     released = source.close()
@@ -287,10 +293,18 @@ class _Loop:
                     self.state["child_resources_released"] = previous and (
                         released.get("resources_released") is True
                     )
-                    self.state["stop_reason"] = "stop_requested"
+                    self.state["stop_reason"] = self.stopping_reason()
                     return None
                 return source
         return None
+
+    def stopping_reason(self) -> str | None:
+        if (self.root / "stop.request").exists():
+            return "stop_requested"
+        return self.monitor.reason() if self.monitor is not None else None
+
+    def stopped(self) -> bool:
+        return self.stopping_reason() is not None
 
     def restore(self, expected: str) -> bool:
         path = self.root / "state.json"
@@ -306,6 +320,8 @@ class _Loop:
         self.state = state
         if state["child_resources_released"] is not True:
             raise ValueError("Learning continuation refuses unreleased child resources")
+        if any(not row["resources_released"] for row in state.get("storage_monitors", [])):
+            raise ValueError("Learning continuation refuses an unreleased storage monitor")
         if state.get("initialized", True) is False:
             if (
                 "storage" not in self.config
@@ -458,13 +474,13 @@ class _Loop:
         summary = run_experiment(
             request,
             sac_environment=SamplingLease(source, self.save),
-            sac_stop_requested=lambda _: (self.root / "stop.request").exists(),
+            sac_stop_requested=lambda _: self.stopped(),
         ).summary["sac_cycle"]
         self.accept_sampling(row, request.output_dir, summary)
         self.save("learned")
         if not summary["resources_released"] or summary["stop_reason"] != "budget_completed":
             self.state["stop_reason"] = (
-                "stop_requested"
+                self.stopping_reason() or "stop_requested"
                 if summary["stop_reason"] == "stop_requested"
                 else "sampling_" + summary["stop_reason"]
             )
@@ -605,7 +621,7 @@ class _Loop:
                 evaluation_environment=EvaluationLease(
                     source,
                     self.save,
-                    lambda: (self.root / "stop.request").exists(),
+                    self.stopped,
                 ),
             ).summary["evaluation_run"]
             completion = root / "evaluation/completion.json"
@@ -613,6 +629,10 @@ class _Loop:
                 row["evaluation_completion_sha256"] = _sha(completion)
         row["evaluation_run"] = execution
         row.setdefault("evaluation_interrupted_by_stop", (self.root / "stop.request").exists())
+        row.setdefault(
+            "evaluation_interrupted_by_resource",
+            self.monitor is not None and self.monitor.reason() is not None,
+        )
         self.state["child_resources_released"] &= execution["resources_released"]
         for attempt in range(10):
             review_output = root / ("reviewed" if attempt == 0 else f"reviewed-{attempt:03d}")
@@ -781,8 +801,8 @@ class _Loop:
 
     def run(self) -> None:
         for number in range(self.config["rounds"]):
-            if (self.root / "stop.request").exists():
-                self.state["stop_reason"] = "stop_requested"
+            if self.stopped():
+                self.state["stop_reason"] = self.stopping_reason()
                 return
             self.verify()
             if number < len(self.state["rounds"]):
@@ -801,8 +821,8 @@ class _Loop:
                     return
                 if not self.sample(number, row):
                     return
-            if (self.root / "stop.request").exists():
-                self.state["stop_reason"] = "stop_requested"
+            if self.stopped():
+                self.state["stop_reason"] = self.stopping_reason()
                 return
             binding = row.get("candidate_evaluation")
             if binding is None:
@@ -811,15 +831,19 @@ class _Loop:
                 binding = self.evaluate(number, row)
                 if binding is None:
                     return
-            if (self.root / "stop.request").exists():
-                self.state["stop_reason"] = "stop_requested"
+            if self.stopped():
+                self.state["stop_reason"] = self.stopping_reason()
                 return
             self.verify()
             if not self.capacity("retention"):
                 return
             self.retain(number, row, binding)
-            if row["evaluation_run"]["stop_reason"] != "plan_complete" and not row.get(
-                "evaluation_interrupted_by_stop"
+            if self.stopped():
+                self.state["stop_reason"] = self.stopping_reason()
+                return
+            if row["evaluation_run"]["stop_reason"] != "plan_complete" and not (
+                row.get("evaluation_interrupted_by_stop")
+                or row.get("evaluation_interrupted_by_resource")
             ):
                 self.state["stop_reason"] = "evaluation_" + row["evaluation_run"]["stop_reason"]
                 return
@@ -861,6 +885,9 @@ def run_learning_loop(
             write_file(root / "config.json", encode(config))
             ready = loop.initialize()
         if ready:
+            if "storage_monitor" in config:
+                loop.monitor = StorageMonitor(root, config["storage"], config["storage_monitor"])
+                loop.monitor.start()
             loop.run()
     except (Exception, KeyboardInterrupt) as error:
         if not publish:
@@ -882,6 +909,10 @@ def run_learning_loop(
             ) and loop.state["child_resources_released"]
         except Exception as error:
             loop.state["release_error"] = str(error)
+        if loop.monitor is not None:
+            monitored = loop.monitor.close()
+            loop.state.setdefault("storage_monitors", []).append(monitored)
+            loop.state["resources_released"] &= monitored["resources_released"]
         lease.close()
         if not loop.state["resources_released"]:
             loop.state["stop_reason"] = "release_fault"
