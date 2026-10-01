@@ -11,7 +11,7 @@ uv run --locked fh5 sac-train --config configs/sac-learning.example.json --outpu
 uv run --locked fh5 sac-resume --checkpoint runs/sac-001 --output runs/sac-002 --steps 100
 ```
 
-`--steps` 是本次追加更新数，范围 0–10000；累计计数上限 100 万。输出须为源模型和经验目录以外的新目录。续训沿用冻结的学习率、batch、actor 更新间隔、动作包络和模型配置，不接受隐式覆盖；`--steps 0` 可核验恢复并导出新快照。
+`--steps` 是本次追加更新数，范围 0–10000；累计计数上限 100 万。输出须为源模型和经验目录以外的新目录。续训沿用冻结的学习率、batch、actor 更新间隔、动作包络和模型配置，不接受隐式覆盖；`--steps 0` 可核验恢复并导出新快照。示范抽样比例默认继承，可通过显式 `--demonstration-fraction` 改变；采用配额的版本 3 另见[混合经验契约](sac-mixture.md)。
 
 训练开始后，在输出目录新建 `stop.request` 可请求停止。当前一次完整 critic/actor/温度及目标网络更新结束后才检查下一次请求，保存可恢复状态并返回退出码 4。正常完成预算返回 0，输入错误返回 2。Python 调用可通过实验入口的 `sac_stop_requested(completed)` 提供外部停止信号；参数为累计已完成更新数。
 

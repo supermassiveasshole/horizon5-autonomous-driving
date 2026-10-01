@@ -14,12 +14,12 @@ from fh5.experiment import Packet, Record, run_experiment
 from fh5.numeric_images import PixelContract
 
 
-def experience(tmp_path, *, terminal=True, host_factor=1, timeline=None):
+def experience(tmp_path, *, terminal=True, host_factor=1, timeline=None, owner="policy"):
     bundle = route(tmp_path)
     config = tmp_path / "record.json"
     config.write_text(
         json.dumps(
-            {**json.loads((tmp_path / "reference.json").read_bytes()), "control_source": "policy"}
+            {**json.loads((tmp_path / "reference.json").read_bytes()), "control_source": owner}
         )
     )
     images = bytes([51, 17, 34] * 64 * 36)
@@ -92,7 +92,11 @@ def experience(tmp_path, *, terminal=True, host_factor=1, timeline=None):
         json.dumps(
             {
                 "version": 1,
-                "kind": "synthetic-synchronous-action-trace-v1",
+                "kind": (
+                    "synthetic-synchronous-demonstration-trace-v1"
+                    if owner == "human"
+                    else "synthetic-synchronous-action-trace-v1"
+                ),
                 "pixel_contract": PixelContract(size=(64, 36)).metadata(),
                 "initial_command": {"steer_i16": 0, "throttle_u8": 0, "brake_u8": 0},
                 "initial_issued_ns": 900_000_000,
@@ -103,7 +107,7 @@ def experience(tmp_path, *, terminal=True, host_factor=1, timeline=None):
                         "from_packet_index": i,
                         "to_packet_index": i + 1,
                         "epoch": "attempt-0",
-                        "owner": "policy",
+                        "owner": owner,
                         "status": "sent",
                         "sent": {"steer_i16": 0, "throttle_u8": 51, "brake_u8": 0},
                     }
@@ -115,7 +119,7 @@ def experience(tmp_path, *, terminal=True, host_factor=1, timeline=None):
     from fh5.sac_replay import SACReplayPrepare
 
     task = protocol(tmp_path, bundle)
-    task.write_text(json.dumps({**json.loads(task.read_bytes()), "control_owner": "policy"}))
+    task.write_text(json.dumps({**json.loads(task.read_bytes()), "control_owner": owner}))
 
     return SACReplayPrepare(
         recording,

@@ -115,13 +115,9 @@ def _run(request: SACCriticWarmup | SACCriticReplay, torch: Any) -> RunResult:
     if hashlib.sha256(raw).hexdigest() != expected:
         raise ValueError("SAC replay changed from its frozen digest")
     replay = json.loads(raw)
-    if (
-        replay.get("version") != 1
-        or replay.get("kind") != "sac-numeric-replay-v1"
-        or replay.get("source_kind") != "synthetic"
-        or not 1 <= len(replay["transitions"]) <= 10_000
-    ):
-        raise ValueError("Critic warm-up requires a bounded prepared synthetic replay")
+    from fh5.sac_sources import replay_roles
+
+    replay_roles(request.replay_file.parent, replay)
     pixels = PixelContract.from_metadata(replay["pixel_contract"])
     model_payload = {
         name: read_bounded(model_dir / name, 256 * 1024**2) for name in ("model.json", "actor.pt")

@@ -137,8 +137,13 @@ def prepare_sac_replay(request: SACReplayPrepare) -> RunResult:
 
     raw = read_bounded(request.trace_file, 32 * 1024**2)
     trace = json.loads(raw)
-    if trace.get("version") != 1 or trace.get("kind") != "synthetic-synchronous-action-trace-v1":
+    trace_owners = {
+        "synthetic-synchronous-action-trace-v1": "policy",
+        "synthetic-synchronous-demonstration-trace-v1": "human",
+    }
+    if trace.get("version") != 1 or trace.get("kind") not in trace_owners:
         raise ValueError("SAC replay requires an explicit synthetic synchronous trace")
+    owner = trace_owners[trace["kind"]]
     if not 1 <= len(trace["actions"]) <= 10_000 or not 1 <= len(trace["observations"]) <= 20_000:
         raise ValueError("SAC trace exceeds bounded transition/observation counts")
     pixels = PixelContract.from_metadata(trace["pixel_contract"])
@@ -258,7 +263,7 @@ def prepare_sac_replay(request: SACReplayPrepare) -> RunResult:
         reason = "unknown_previous_command" if previous_action is None else None
         if action["owner"] != settled.metadata["control_source"]:
             reason = reason or "control_source_mismatch"
-        if action["owner"] != "policy" or action["status"] != "sent":
+        if action["owner"] != owner or action["status"] != "sent":
             reason = reason or "not_executed_policy_action"
         current, following = observations.get(start), observations.get(end)
         if not current:
@@ -310,6 +315,7 @@ def prepare_sac_replay(request: SACReplayPrepare) -> RunResult:
             transitions.append(
                 {
                     "id": f"transition-{number}",
+                    "control_owner": action["owner"],
                     "epoch": action["epoch"],
                     "current": current,
                     "next": following,
@@ -339,9 +345,11 @@ def prepare_sac_replay(request: SACReplayPrepare) -> RunResult:
         if action["status"] == "sent":
             previous_action, previous_issued = sent, now
     replay = {
-        "version": 1,
-        "kind": "sac-numeric-replay-v1",
+        "version": 2,
+        "kind": "sac-numeric-replay-v2",
         "source_kind": "synthetic",
+        "source_role": "demonstration" if owner == "human" else "online",
+        "task_contract": task,
         "pixel_contract": pixels.metadata(),
         "task_context": task_context,
         "task_state_role": "critic_only; frozen BC inputs unchanged",

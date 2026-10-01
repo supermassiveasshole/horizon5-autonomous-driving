@@ -13,8 +13,8 @@ from fh5.numeric_images import asset
 from fh5.numeric_recording import read_numeric_frame
 
 
-def resume_contract(torch: Any) -> dict[str, Any]:
-    return {
+def resume_contract(torch: Any, version: int = 2) -> dict[str, Any]:
+    contract = {
         "stage": "sac_updates",
         "device": "cpu",
         "torch_version": str(torch.__version__),
@@ -30,12 +30,15 @@ def resume_contract(torch: Any) -> dict[str, Any]:
         "auxiliary_components": [],
         "environment_state": "not_restored; new attempt required",
     }
+    if version == 3:
+        contract["replay_sampling"] = "source-quotas-v1; shrink without replacement or backfill"
+    return contract
 
 
 def read_checkpoint(torch: Any, root: Path) -> tuple[dict[str, Any], dict[str, Any], bytes]:
     raw = read_bounded(root / "policy.json", 1024**2)
     manifest = json.loads(raw)
-    if manifest.get("version") not in (1, 2) or (
+    if manifest.get("version") not in (1, 2, 3) or (
         manifest.get("architecture"),
         manifest.get("stage"),
     ) != ("conditional-temporal-sac-v1", "sac_updates"):
@@ -46,8 +49,8 @@ def read_checkpoint(torch: Any, root: Path) -> tuple[dict[str, Any], dict[str, A
     saved: dict[str, Any] = torch.load(BytesIO(payload), map_location="cpu", weights_only=True)
     if saved["metadata"] != {k: v for k, v in manifest.items() if k != "weights_sha256"}:
         raise ValueError("SAC policy metadata mismatch")
-    if manifest["version"] == 2:
-        if manifest["resume_contract"] != resume_contract(torch):
+    if manifest["version"] in (2, 3):
+        if manifest["resume_contract"] != resume_contract(torch, manifest["version"]):
             raise ValueError("Unsupported SAC continuation contract or Torch runtime")
         report = read_bounded(root / "training-report.json", 128 * 1024**2)
         if hashlib.sha256(report).hexdigest() != manifest["training_report_sha256"]:

@@ -43,9 +43,20 @@ def expand_experience(
         for key in ("pixel_contract", "task_context", "task_state_role"):
             if replay[key] != combined[key]:
                 raise ValueError("Incompatible SAC experience: " + key)
-        for key in ("task", "route", "reward"):
+        for key in ("route", "reward"):
             if replay["source_hashes"][key] != combined["source_hashes"][key]:
                 raise ValueError("Incompatible SAC experience: " + key)
+        if replay["source_hashes"]["task"] != combined["source_hashes"]["task"]:
+            current_task, prior_task = replay.get("task_contract"), combined.get("task_contract")
+            if (
+                current_task is None
+                or prior_task is None
+                or (
+                    {k: v for k, v in current_task.items() if k != "control_owner"}
+                    != {k: v for k, v in prior_task.items() if k != "control_owner"}
+                )
+            ):
+                raise ValueError("Incompatible SAC experience: task")
         entries = replay.get("source_inventory") or [
             {
                 "replay_sha256": sha,
@@ -94,6 +105,8 @@ def expand_experience(
                 raise ValueError("Expanded SAC replay exceeds 10000 transitions")
     assert combined is not None
     combined.update(transitions=rows, source_inventory=inventory)
+    if combined["version"] == 2:
+        combined["source_role"] = "mixed"
     # Recording-specific identities belong to each inventory entry, not to the union.
     combined["source_hashes"] = {
         k: combined["source_hashes"][k] for k in ("task", "route", "reward")

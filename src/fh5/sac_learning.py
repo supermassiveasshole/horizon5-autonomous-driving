@@ -34,6 +34,7 @@ from fh5.sac_checkpoint import (
 from fh5.sac_data import LearningReplay
 from fh5.sac_experience import expand_experience
 from fh5.sac_policy import encode_history, make_policy, soft_update
+from fh5.sac_sources import ReplaySampling
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -56,6 +57,7 @@ class SACTrain:
     actor_interval: int = 2
     tau: float = 0.005
     seed: int = 7
+    demonstration_fraction: float | None = None
 
 
 @dataclass(frozen=True)
@@ -73,6 +75,7 @@ class SACResume:
     steps: int = 100
     additions: tuple[tuple[Path, str], ...] = ()
     expected_checkpoint_sha256: str | None = None
+    demonstration_fraction: float | None = None
 
 
 def _difference(torch: Any, before: dict[str, Any], module: Any) -> float:
@@ -139,12 +142,14 @@ def _train(
             and hashlib.sha256(parent_bytes).hexdigest() != operation.expected_checkpoint_sha256
         ):
             raise ValueError("SAC continuation differs from its expected parent checkpoint")
-        if manifest["version"] != 2:
-            raise ValueError("SAC continuation requires a sealed version 2 checkpoint")
+        if manifest["version"] not in (2, 3):
+            raise ValueError("SAC continuation requires a sealed version 2 or 3 checkpoint")
         history, history_blobs = continuation_history(
             operation.checkpoint_dir, manifest, parent_bytes
         )
         configuration = dict(manifest["configuration"], steps=operation.steps)
+        if operation.demonstration_fraction is not None:
+            configuration["demonstration_fraction"] = operation.demonstration_fraction
         request = SACTrain(
             operation.checkpoint_dir,
             operation.checkpoint_dir / "experience/replay.json",
@@ -243,6 +248,7 @@ def _train(
         continuation["experience_additions"] = [sha for _, sha in operation.additions]
         continuation["new_transition_credit"] = added
     data = LearningReplay(torch, request.replay_file, warm["replay_sha256"], bc, bounds)
+    sampling = ReplaySampling(data.roles, request.batch_size, request.demonstration_fraction)
     feature_width = 64 * (bc.original_contract["image_count"] + 1)
     encoder = torch.nn.ModuleDict(
         {"images": deepcopy(bc.model.encoder), "state": deepcopy(bc.model.state)}
@@ -331,7 +337,7 @@ def _train(
         ):
             stop_reason = "stop_requested"
             break
-        indices = torch.randperm(len(data.rows))[: request.batch_size].tolist()
+        indices = sampling.sample(torch)
         context, task = data.context[indices], data.task[indices]
         next_context, next_task = data.next_context[indices], data.next_task[indices]
         inputs, next_inputs = data.inputs(indices), data.inputs(indices, following=True)
@@ -358,6 +364,7 @@ def _train(
         entry = {
             "step": step + 1,
             "transition_ids": [data.rows[i]["id"] for i in indices],
+            "source_roles": [data.roles[i] for i in indices],
             "critic_loss": float(critic_loss.detach()),
             "targets": expected.tolist(),
         }
@@ -435,6 +442,7 @@ def _train(
             torch, encoder, policy, data, request.normalized_target_entropy
         ),
         "updates": metrics,
+        "sampling": sampling.report(),
         "raw_frame_bytes": data.raw_bytes,
         "feature_cache": "none; re-encode after updates",
         "density_coordinates": "continuous command before integer quantization",
@@ -444,7 +452,7 @@ def _train(
     }
     config = {k: v for k, v in asdict(request).items() if not isinstance(v, Path)}
     metadata = {
-        "version": 2,
+        "version": 3 if request.demonstration_fraction is not None else 2,
         "stage": "sac_updates",
         "architecture": "conditional-temporal-sac-v1",
         "configuration": config,
@@ -460,7 +468,9 @@ def _train(
         "experience": experience,
         "continuation": continuation,
         "history": history,
-        "resume_contract": resume_contract(torch),
+        "resume_contract": resume_contract(
+            torch, 3 if request.demonstration_fraction is not None else 2
+        ),
     }
     state = {
         "encoder": encoder.state_dict(),

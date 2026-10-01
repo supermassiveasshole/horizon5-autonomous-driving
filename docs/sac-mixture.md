@@ -1,0 +1,58 @@
+# SAC 示范与在线经验混合
+
+对应 [#11](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/11)
+的离线软件切片。通过 `run_experiment` 和 CLI，完整示范与策略转移可混合参与实际 CPU
+SAC 更新。当前来源仍是显式合成记录；不支持把旧人类动作标签直接当成真实游戏 Q 经验，
+也不以此证明实机驾驶改善。
+
+## 转移资格与来源
+
+`sac-prepare` 接受两种版本 1 同步合成记录：
+
+- `synthetic-synchronous-action-trace-v1`：策略下发，控制归属为 `policy`。
+- `synthetic-synchronous-demonstration-trace-v1`：模拟人类示范输入，控制归属为 `human`。
+
+两者都必须具有实际成功命令、对应遥测响应、数值图像和因果历史，以及独立任务奖励、
+物理时长、终止或真实末观测；示范不豁免失败、恢复分段及动作支持检查。
+只有动作标签的 BC 数据不能进入这个 Q replay。动作超出当前可执行区间时拒绝，
+不会裁剪动作后继续沿用原来的下一状态。
+
+新生成的 `sac-numeric-replay-v2` 保存控制归属、示范/在线角色和任务定义。
+旧版本 1 仍可读取，其来源沿用原来的策略经验含义，不能添加标签把它改称示范。
+混合经验封存各原始清单并按原始摘要、转移编号追溯；除了打包产生的帧路径变化，
+每条转移内容必须与对应原始记录一致。
+
+混合时像素、任务上下文、路线、奖励及动作支持必须兼容。人类与策略任务可仅有
+`control_owner` 不同，其他任务字段必须一致；旧格式没有完整任务定义时只接受相同
+任务摘要。重复来源或同一包流再次审核不能获得新的更新额度。
+
+## 配额与小池行为
+
+`demonstration_fraction` 为 [0, 1]；未设置时保留原来均匀抽样。
+指定后，每批示范配额是 `floor(batch_size * fraction + 0.5)`，剩余为在线配额。
+非零配额要求对应池非空。每个池独立随机抽样，批内不放回；不足时缩小该部分，
+不从另一池补满，也不复制样本。不同更新可以再次抽到同一转移，更新总量仍由预算限制。
+
+例如 batch 4、示范比例 0.25、在线池只有两条时，实际批次为一条示范加两条在线经验。
+报告同时显示请求配额、可用数量、实际累计抽样数量和每步的来源/转移编号，不能把
+这个例子的实际比例声称为 25%。配额为零的来源完全不参加梯度更新。
+
+```powershell
+uv run --locked fh5 sac-resume --checkpoint runs/sac-001 --output runs/sac-mixed --steps 4 --add-replay runs/demo/prepared/replay.json <sha256> --demonstration-fraction 0.25
+uv run --locked fh5 sac-resume --checkpoint runs/sac-mixed --output runs/sac-next --steps 100
+uv run --locked fh5 sac-resume --checkpoint runs/sac-next --output runs/sac-online-only --steps 100 --demonstration-fraction 0
+```
+
+追加经验时沿用每条新转移最多一次更新的预算检查。`SACTrain` / `sac-train` 配置也支持
+该字段，但其输入必须与所用预热检查点的冻结经验一致。
+
+## 保存、恢复与能力边界
+
+采用显式配额的候选使用检查点版本 3，绑定抽样契约；未采用配额的版本 2 与旧版本 1
+冻结回放仍保留。恢复默认继承比例、优化器、RNG 和累计步数，只有显式参数才更改比例。
+配置和祖先报告保留改动前后条件，恢复不会悄悄重启示范阶段。完整候选仍在尝试边界换版，
+不会自动覆盖可靠默认版本。
+
+当前 actor 目标仍是 SAC 的熵/Q 目标。**示范 replay 配额不是模仿损失系数**，将配额降零
+不能称为已经实现基于驾驶表现的模仿约束退出。独立开发评估驱动的临时模仿约束、完整
+数据用途登记、原生示范时序适配、4K 资源共存和实机 BC/SAC 对照仍待完成，#11 保持开放。
