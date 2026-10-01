@@ -154,6 +154,44 @@ def test_missing_journal_event_fails_even_when_file_hash_is_updated(tmp_path):
     assert "Missing journal" in result["errors"][0]["error"]
 
 
+@pytest.mark.parametrize("change", ["reason", "missing", "duplicate", "after_end"])
+def test_replay_requires_one_original_stop_matching_the_report(tmp_path, change):
+    original = record(tmp_path)
+    assert original["stop_reason"] == "time_limit"
+    root = tmp_path / "run"
+    journal = root / "realtime-events.jsonl"
+    events = [json.loads(line) for line in journal.read_bytes().splitlines()]
+    stop = next(e for e in events if e["kind"] == "stop")
+    report = json.loads((root / "report.json").read_bytes())
+    if change == "reason":
+        report["stop_reason"] = "focus_lost"
+    elif change == "missing":
+        events.remove(stop)
+    elif change == "duplicate":
+        events.append(json.loads(json.dumps(stop)))
+    else:
+        stop["data"]["at_ns"] = report["ended_ns"] + 1
+    for index, event in enumerate(events):
+        event["sequence"] = index
+    journal.write_text("".join(json.dumps(e) + "\n" for e in events))
+    report["journal"].update(
+        sha256=hashlib.sha256(journal.read_bytes()).hexdigest(),
+        offered=len(events),
+        written=len(events),
+    )
+    payload = json.dumps(report).encode()
+    (root / "report.json").write_bytes(payload)
+    (root / "realtime-manifest.json").write_text(
+        json.dumps({"version": 1, "report_sha256": hashlib.sha256(payload).hexdigest()})
+    )
+    result = run_experiment(
+        RealtimeNumericReplay(root, tmp_path / "review.html"),
+        numeric_actor=PixelTimeActor(),
+    ).summary["realtime_numeric_replay"]
+    assert not result["verified"]
+    assert "stop" in result["errors"][0]["error"].lower()
+
+
 def test_cli_replays_real_frozen_time_model_without_an_environment(tmp_path, capsys):
     pytest.importorskip("torch")
     from test_temporal_bc import temporal_fixture

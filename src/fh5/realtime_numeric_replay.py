@@ -55,8 +55,10 @@ def read_realtime_recording(root: Path) -> dict[str, Any]:
     return report
 
 
-def read_realtime_journal(root: Path, report: dict[str, Any]) -> list[dict[str, Any]]:
-    """Verify decision/command coverage and return raw packets in receive order."""
+def read_realtime_journal(
+    root: Path, report: dict[str, Any], *, time_limit_s: float | None = None
+) -> list[dict[str, Any]]:
+    """Verify decisions, commands and stop; optionally enforce the requested deadline."""
     reference = report["journal"]
     if (
         reference["dropped"]
@@ -77,6 +79,7 @@ def read_realtime_journal(root: Path, report: dict[str, Any]) -> list[dict[str, 
     sequences: set[int] = set()
     commands = []
     packets = []
+    stops = []
     with path.open("rb") as stream:
         while line := stream.readline(1024**2 + 1):
             if len(line) > 1024**2 or len(sequences) >= 1_000_000:
@@ -103,8 +106,25 @@ def read_realtime_journal(root: Path, report: dict[str, Any]) -> list[dict[str, 
                 commands.append((sequence, row))
             elif event["kind"] == "packet":
                 packets.append((sequence, row))
+            elif event["kind"] == "stop":
+                stops.append(row)
     if len(sequences) != reference["offered"]:
         raise ValueError("Missing journal events")
+    if (
+        len(stops) != 1
+        or type(stops[0].get("at_ns")) is not int
+        or not 0 <= stops[0]["at_ns"] <= report["ended_ns"]
+        or not isinstance(stops[0].get("reason"), str)
+        or not stops[0]["reason"]
+        or stops[0]["reason"] != report["stop_reason"]
+    ):
+        raise ValueError("Original journal stop is missing, ambiguous or differs from report")
+    if (
+        time_limit_s is not None
+        and report["stop_reason"] == "time_limit"
+        and stops[0]["at_ns"] - report["started_ns"] < int(time_limit_s * 1e9)
+    ):
+        raise ValueError("Recorded time-limit duration is shorter than its request")
     if [r for _, r in sorted(commands)] != report["commands"]:
         raise ValueError("Recorded commands differ from journal")
     ids = [d["decision_id"] for d in report["decisions"]]

@@ -50,6 +50,9 @@ def replace(source, destination, *args, **kwargs):
             os._exit(73)
         if sys.argv[4] == 'before_evaluation_ack' and value['phase'] == 'reviewing_evaluation':
             os._exit(73)
+        if sys.argv[4] == 'before_evaluation_run' and value['phase'] == 'evaluating':
+            original_replace(source, destination, *args, **kwargs)
+            os._exit(73)
     return original_replace(source, destination, *args, **kwargs)
 os.replace = replace
 backend = SharedBackend(Path(sys.argv[3]))
@@ -237,6 +240,99 @@ def test_evaluation_recovery_requires_the_complete_original_child(tmp_path, seed
         finally:
             for path, payload in originals.items():
                 path.write_bytes(payload)
+
+
+def test_evaluation_recovery_rejects_start_in_place_of_the_requested_restart(tmp_path, seeded_loop):
+    from test_sac_imitation_evaluation import SteeringDragBatch
+
+    from fh5.evaluation_run import EvaluationRun
+
+    request = loop_request(tmp_path, seeded_loop, rounds=1)
+    interrupt_selection(request, seeded_loop[0], "before_evaluation_run")
+    state = request.output_dir / "state.json"
+    original_state = state.read_bytes()
+    root = request.output_dir / "round-000"
+    batch = root / "batch"
+    child = root / "evaluation"
+    result = run_experiment(
+        EvaluationRun(
+            batch,
+            sha(batch / "batch.json"),
+            batch / "start/event.json",
+            child,
+            1.0,
+            seeded_loop[3],
+            initial_operation="start_ready",
+        ),
+        evaluation_environment=SteeringDragBatch(),
+    ).summary
+    assert result["evaluation_run"]["stop_reason"] == "plan_complete"
+    assert result["evaluation"]["verified_starts"] == 2
+    assert result["evaluation"]["starts"][0]["operation"] == "start_ready"
+    protocol_path = child / "run-protocol.json"
+    protocol = json.loads(protocol_path.read_bytes())
+    protocol["initial_operation"] = "restart_ready"
+    protocol_path.write_text(json.dumps(protocol))
+    completion = child / "completion.json"
+    seal = json.loads(completion.read_bytes())
+    seal["files"]["run-protocol.json"] = sha(protocol_path)
+    completion.write_text(json.dumps(seal))
+    backend = SharedBackend(seeded_loop[0])
+    with pytest.raises(ValueError, match="operation"):
+        run_experiment(
+            LearningContinue(request.output_dir, sha(state)), learning_environment=backend
+        )
+    assert state.read_bytes() == original_state
+    assert not backend.leases and backend.closed
+
+
+def test_evaluation_recovery_rejects_a_shorter_execution_than_its_declared_time_limit(
+    tmp_path, seeded_loop
+):
+    from fh5.evaluation_run import EvaluationRun
+
+    request = loop_request(tmp_path, seeded_loop, rounds=1)
+    interrupt_selection(request, seeded_loop[0], "before_evaluation_run")
+    state = request.output_dir / "state.json"
+    original_state = state.read_bytes()
+    root = request.output_dir / "round-000"
+    batch = root / "batch"
+    child = root / "evaluation"
+    producer = SharedBackend(seeded_loop[0])
+    result = run_experiment(
+        EvaluationRun(
+            batch,
+            sha(batch / "batch.json"),
+            batch / "start/event.json",
+            child,
+            0.3,
+            seeded_loop[3],
+            initial_operation="restart_ready",
+        ),
+        evaluation_environment=producer.evaluation("shortened"),
+    ).summary
+    assert result["evaluation_run"]["stop_reason"] == "plan_complete"
+    assert result["evaluation"]["verified_starts"] == 2
+    assert producer.close()["resources_released"]
+    for index in range(2):
+        report = json.loads((child / f"attempt-{index:04d}/execution/report.json").read_bytes())
+        assert report["stop_reason"] == "time_limit"
+        assert report["ended_ns"] - report["started_ns"] < 1_000_000_000
+    protocol_path = child / "run-protocol.json"
+    protocol = json.loads(protocol_path.read_bytes())
+    protocol["seconds_per_attempt"] = 1.0
+    protocol_path.write_text(json.dumps(protocol))
+    completion = child / "completion.json"
+    seal = json.loads(completion.read_bytes())
+    seal["files"]["run-protocol.json"] = sha(protocol_path)
+    completion.write_text(json.dumps(seal))
+    backend = SharedBackend(seeded_loop[0])
+    with pytest.raises(ValueError, match="duration"):
+        run_experiment(
+            LearningContinue(request.output_dir, sha(state)), learning_environment=backend
+        )
+    assert state.read_bytes() == original_state
+    assert not backend.leases and backend.closed
 
 
 def test_sealed_sampling_is_adopted_after_exit_before_parent_acknowledgement(tmp_path, seeded_loop):

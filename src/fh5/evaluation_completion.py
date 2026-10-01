@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING, Any
 from fh5.collection_store import atomic_json, read_bounded
 from fh5.evaluation import EvaluationReview, _read, read_evaluation_batch
 from fh5.evaluation_start import event_payloads
-from fh5.realtime_numeric_replay import read_realtime_recording
+from fh5.realtime_numeric_replay import read_realtime_journal, read_realtime_recording
 
 if TYPE_CHECKING:
     from fh5.evaluation_run import EvaluationRun
@@ -98,7 +98,12 @@ def completed_evaluation(request: EvaluationRun) -> dict[str, Any]:
     for index, slot in enumerate(started):
         directory = root / f"attempt-{index:04d}"
         execution = read_realtime_recording(directory / "execution")
+        read_realtime_journal(directory / "execution", execution, time_limit_s=request.seconds)
         preparation = _read(directory / "ready/event-run.json")[0]["summary"]
+        if preparation.get("operation") != (
+            request.initial_operation if index == 0 else "restart_ready"
+        ):
+            raise ValueError("Completed evaluation ready operation differs from its request")
         stopped = (
             execution["stop_reason"] not in ("time_limit", "local_end")
             or not execution["evidence"]["recording_complete"]
