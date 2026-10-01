@@ -23,11 +23,13 @@
 
 配置反例通过：`tests/test_learning_retry.py::test_unbounded_or_ambiguous_retry_policy_is_rejected_before_opening` **3 passed / 1.24 秒**。过大次数、无穷等待和布尔次数在创建输出目录/连接前拒绝。Ruff、格式（286 文件）、严格类型检查（115 源文件）通过。
 
-## 待完成验证
+## 完成的增量验证与剩余检查
 
-`tests/test_learning_retry.py` 共 16 项，包含从头生成实际 CPU 模型、采样与评估首次获取分别失败后自动完成一轮的验证。整文件尚未运行。主分支 `feb1ca2` 的完整回归不覆盖本增量：458 项通过后，候选夹具遇到停止时遗留推理的 `Incomplete decision outcome journal`，导致后续记录缺失；原件保留在 `runs/t14-parent-capacity-final-full-20261001/`，尚不能报告完整回归通过。
+`tests/test_learning_retry.py` **16 passed / 226.41 秒**，原件在 `runs/t14-acquisition-fresh-20261001/`。包含从头生成实际 CPU 模型，采样与评估首次获取分别失败后自动完成一轮：实际更新 3 次、冻结评估 2 次，不替换模型计算。最终 Ruff、格式（287 文件）与严格类型检查（115 源文件）通过。
 
-Standards 审查无发现；Spec 审查发现上述未释放接续及候选重验两项缺口，均已有红绿原型，等待复核及增量完整回归。以上原型不证明真实游戏可恢复或驾驶能力改善；没有启动 FH5、Steam、原生捕获或控制器。
+主分支 `feb1ca2` 的完整回归不覆盖本增量：458 项通过后，候选夹具遇到停止时遗留推理的 `Incomplete decision outcome journal`，导致后续记录缺失；原件保留在 `runs/t14-parent-capacity-final-full-20261001/`。该停止封存问题另行修复，随后进行整合回归，尚不能报告完整回归通过。
+
+Standards 审查无发现；Spec 审查发现上述未释放接续及候选重验两项缺口，均已修复并复核至 `3039874`，无剩余发现。以上证据不证明真实游戏可恢复或驾驶能力改善；没有启动 FH5、Steam、原生捕获或控制器。
 
 ## 剩余范围
 
