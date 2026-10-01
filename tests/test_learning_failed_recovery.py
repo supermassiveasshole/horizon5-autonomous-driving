@@ -92,7 +92,7 @@ def test_pending_second_failure_does_not_restore_spent_retry_credit(tmp_path, se
     assert recovered["rounds"][0]["sampling_attempt"] == 1
 
 
-@pytest.mark.parametrize("fault", ["false_packet_count", "empty_attempts"])
+@pytest.mark.parametrize("fault", ["false_packet_count", "empty_attempts", "missing_attempt"])
 def test_pending_failure_cannot_hide_recorded_input_or_the_original_attempt(
     tmp_path, seeded_loop, fault
 ):
@@ -111,6 +111,12 @@ def test_pending_failure_cannot_hide_recorded_input_or_the_original_attempt(
     else:
         summary["attempts"] = []
         summary["stop_reason"] = "stop_requested"
+        if fault == "missing_attempt":
+            original = (child / "attempt-000").resolve()
+            unavailable = (tmp_path / "unavailable-attempt").resolve()
+            assert original.is_relative_to(tmp_path.resolve())
+            assert unavailable.is_relative_to(tmp_path.resolve())
+            original.rename(unavailable)
     summary_file.write_text(json.dumps(summary))
     backend = SharedBackend(seeded_loop[0])
     backend.stop_sampling_file = request.output_dir / "stop.request"

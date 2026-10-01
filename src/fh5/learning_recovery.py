@@ -82,6 +82,8 @@ def retryable_sampling(
         or summary.get("error")
         or summary.get("release_error")
         or len(attempts) > 1
+        or pending
+        and len(attempts) != 1
         or not attempts
         and reason != "stop_requested"
         or any(root.glob("candidate-*"))
