@@ -13,7 +13,8 @@
 | 原型红/绿 | `runs/t34-stop-drain-red-v2-20261001/`、`red-v3` 重现；`runs/t34-stop-drain-green-20261001/` 通过 |
 | 从头生成模型与实时回归 | `tests/test_realtime_stop.py tests/test_realtime.py tests/test_realtime_numeric_replay.py`：56 项通过，17.04 秒 |
 | 原件 | `runs/t34-stop-drain-fresh-20261001/` |
+| 原完整回归失败模块 | `tests/test_learning_review_recovery.py`：5 项通过，415.52 秒；`runs/t34-stop-parent-regression-20261001/` |
 
 新增测试核对：第一次预测正常执行，第二次预测停止后记录且不发送，最后命令归零，两次真实预测均可独立重放。已有迟到/挂起、写盘停滞、释放与数值完整性测试同时通过。仍未返回的推理保持原有隔离规则，没有扩大等待预算。
 
-原始失败记录不会重写或追认为完整。双轴审查 `feb1ca2...14182ee`：Standards 无硬性违规或启发式问题，Spec 无遗漏或错误。Ruff、格式与严格类型检查通过；原失败模块和整合完整回归继续执行，未把专项结果当成完整通过。本次没有启动 FH5、Steam、原生截屏或控制器，不证明实机性能或驾驶能力。
+原始失败记录不会重写或追认为完整。双轴审查 `feb1ca2...14182ee`：Standards 无硬性违规或启发式问题，Spec 无遗漏或错误。Ruff、格式与严格类型检查通过；原失败模块复测通过。包括学习重试的整合完整回归另存 `runs/t14-acquisition-stop-final-full-20261001/`，尚未取得完整结果，未把专项结果当成完整通过。本次没有启动 FH5、Steam、原生截屏或控制器，不证明实机性能或驾驶能力。
