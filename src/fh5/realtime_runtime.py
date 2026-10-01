@@ -50,6 +50,18 @@ def run_realtime(
     worker = InferenceWorker(factory, request.config)
     latest: RealtimeObservation | None = None
 
+    def collect_result() -> None:
+        try:
+            reply = worker.results.get_nowait()
+        except Empty:
+            return
+        reply.work.row.update(
+            worker_started_ns=reply.started_ns,
+            worker_returned_ns=reply.returned_ns,
+            features=reply.features,
+        )
+        state.complete(time.perf_counter_ns(), reply.work, reply.prediction, reply.error)
+
     def receive() -> None:
         nonlocal latest
         try:
@@ -85,19 +97,7 @@ def run_realtime(
                         state.stop(time.perf_counter_ns(), "user_stop")
                     now = time.perf_counter_ns()
                     state.supervise(now)
-                    try:
-                        reply = worker.results.get_nowait()
-                    except Empty:
-                        pass
-                    else:
-                        reply.work.row.update(
-                            worker_started_ns=reply.started_ns,
-                            worker_returned_ns=reply.returned_ns,
-                            features=reply.features,
-                        )
-                        state.complete(
-                            time.perf_counter_ns(), reply.work, reply.prediction, reply.error
-                        )
+                    collect_result()
                     if worker.error:
                         state.stop(time.perf_counter_ns(), "inference_worker_error")
                     if state.stop_reason:
@@ -160,9 +160,12 @@ def run_realtime(
         for thread in threads:
             thread.join(timeout=0.5)
         inference = worker.close()
-        if state.pending:
-            state.pending.row["status"] = "abandoned_inference"
-            journal.submit("decision_abandoned", dict(state.pending.row))
+        with lock:
+            # Stop is already latched: retain a returned result without sending it.
+            collect_result()
+            if state.pending:
+                state.pending.row["status"] = "abandoned_inference"
+                journal.submit("decision_abandoned", dict(state.pending.row))
         try:
             environment_result = environment.close()
         except Exception as error:
