@@ -236,32 +236,6 @@ def _train(
         assert isinstance(operation, SACResume)
         history_blobs.update(imitation_evidence(operation.checkpoint_dir, imitation))
     imitation_review = None
-    if isinstance(operation, SACResume) and operation.imitation_comparison is not None:
-        if imitation is None or imitation["protocol_sha256"] is None:
-            raise ValueError("Imitation exit requires a protocol frozen before training")
-        from fh5.sac_checkpoint import source_replays
-        from fh5.sac_imitation_review import review_imitation
-
-        root = Path(resources.enter_context(TemporaryDirectory(prefix="fh5-imitation-")))
-        replay = json.loads(read_bounded(request.replay_file, 128 * 1024**2))
-        learning_replays = [
-            replay,
-            *(
-                json.loads(raw)
-                for raw in source_replays(request.replay_file.parent, replay).values()
-            ),
-        ]
-        learning_origins = {item["source_hashes"]["packets"] for item in learning_replays}
-        imitation, imitation_review, proof_blobs = review_imitation(
-            imitation,
-            operation.imitation_comparison,
-            operation.imitation_registry,
-            root / "comparison",
-            parent_sha256=hashlib.sha256(parent_bytes).hexdigest(),
-            bc_manifest=bc_manifest,
-            learning_origins=learning_origins,
-        )
-        history_blobs.update(proof_blobs)
     pixels = PixelContract.from_metadata(bc_manifest["numeric_contract"])
     bc = FrozenNumericActor(bc_dir, pixels, expected_manifest_sha256=warm["actor_manifest_sha256"])
     if (
@@ -302,6 +276,26 @@ def _train(
         continuation["experience_additions"] = [sha for _, sha in operation.additions]
         continuation["new_transition_credit"] = added
     data = LearningReplay(torch, request.replay_file, warm["replay_sha256"], bc, bounds)
+    if isinstance(operation, SACResume) and operation.imitation_comparison is not None:
+        if imitation is None or imitation["protocol_sha256"] is None:
+            raise ValueError("Imitation exit requires a protocol frozen before training")
+        from fh5.sac_checkpoint import source_replays
+        from fh5.sac_imitation_review import review_imitation
+
+        root = Path(resources.enter_context(TemporaryDirectory(prefix="fh5-imitation-")))
+        replay = json.loads(data.raw)
+        sources = source_replays(request.replay_file.parent, replay)
+        leaves = [json.loads(raw) for raw in sources.values()] if sources else [replay]
+        imitation, imitation_review, proof_blobs = review_imitation(
+            imitation,
+            operation.imitation_comparison,
+            operation.imitation_registry,
+            root / "comparison",
+            parent_sha256=hashlib.sha256(parent_bytes).hexdigest(),
+            bc_manifest=bc_manifest,
+            learning_origins={item["source_hashes"]["packets"] for item in leaves},
+        )
+        history_blobs.update(proof_blobs)
     sampling = ReplaySampling(data.roles, request.batch_size, request.demonstration_fraction)
     feature_width = 64 * (bc.original_contract["image_count"] + 1)
     encoder = torch.nn.ModuleDict(

@@ -69,7 +69,12 @@ def review_imitation(
         if review["independence"]["status"] != "no_known_overlap":
             reasons.append(side + ":development_origins_not_separate_in_registry")
         ledger = json.loads(read_bounded(output / side / "ledger.json", 4 * 1024**2))
-        origins.update(entry["files"]["packets.jsonl"] for entry in ledger["entries"])
+        for entry in ledger["entries"]:
+            origin = entry["files"].get("packets.jsonl")
+            if origin is None:
+                reasons.append(side + ":recording_origin_missing")
+            else:
+                origins.add(origin)
     if bc_manifest.get("provenance", {}).get("kind") != "synthetic":
         reasons.append("teacher_training_lineage_not_supported_by_synthetic_gate")
     if origins & learning_origins:

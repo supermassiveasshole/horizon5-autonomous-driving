@@ -5,6 +5,19 @@ from copy import deepcopy
 from typing import Any
 
 
+def command_values(torch: Any, latent: Any, context: Any) -> dict[str, Any]:
+    """Map a latent action to the executable grid and its declared gradient surrogate."""
+    lower, upper = context[:, 3:5], context[:, 5:7]
+    continuous = (lower + upper) / 2 + (upper - lower) / 2 * torch.tanh(latent)
+    grid = latent.new_tensor([32767, 255])
+    rounded = torch.round(continuous * grid) / grid
+    return {
+        "continuous": continuous,
+        "rounded": rounded,
+        "straight_through": continuous + (rounded - continuous).detach(),
+    }
+
+
 def make_policy(torch: Any, fusion: Any, feature_width: int, initial_log_std: float) -> Any:
     nn = torch.nn
 
@@ -36,19 +49,16 @@ def make_policy(torch: Any, fusion: Any, feature_width: int, initial_log_std: fl
             sigma = log_std.exp()
             epsilon = torch.randn_like(mean) if noise is None else noise.expand_as(mean)
             latent = mean + sigma * epsilon
-            unit = torch.tanh(latent)
-            continuous = center + scale * unit
             # Forward Q values always see executable commands. Backprop uses
             # the explicitly declared straight-through quantization surrogate.
-            rounded = torch.round(continuous * grid) / grid
-            command = continuous + (rounded - continuous).detach()
+            values = command_values(torch, latent, context)
             normal_logp = -0.5 * (epsilon.square() + math.log(2 * math.pi)) - log_std
             log_tanh = 2 * (math.log(2) - latent - torch.nn.functional.softplus(-2 * latent))
             log_probability = (normal_logp - log_tanh - scale.log()).sum(dim=1)
-            deterministic = torch.round((center + scale * torch.tanh(mean)) * grid) / grid
+            deterministic = command_values(torch, mean, context)["rounded"]
             return {
-                "command": command,
-                "continuous": continuous,
+                "command": values["straight_through"],
+                "continuous": values["continuous"],
                 "deterministic": deterministic,
                 "mean": mean,
                 "log_std": log_std,

@@ -163,7 +163,63 @@ def test_development_review_keeps_all_attempts_and_preserves_resume_state(
     assert resumed.summary["sac_learning"]["imitation"] == summary["imitation"]
 
 
-@pytest.mark.parametrize("fault", ["missing_execution", "wall_riding", "no_registry"])
+def test_a_guided_candidate_with_mixed_experience_reaches_the_model_binding_check(
+    tmp_path, evaluated_guidance
+):
+    from test_sac import experience
+
+    root, comparison, registry, _ = evaluated_guidance
+    demo_root = tmp_path / "demo"
+    demo_root.mkdir()
+    operation = experience(
+        demo_root, owner="human", timeline=[(0, 0), (0.5, 100), (1, 200), (2, 300), (2.5, 400)]
+    )
+    task = json.loads((root / "task.json").read_bytes())
+    task["control_owner"] = "human"
+    operation.task_file.write_text(json.dumps(task))
+    prepared = run_experiment(replace(operation, reward_file=root / "reward.json")).summary[
+        "sac_replay"
+    ]
+    addition = (operation.output_dir / "replay.json", prepared["replay_sha256"])
+    result = run_experiment(
+        SACResume(
+            root / "candidate",
+            tmp_path / "mixed",
+            steps=0,
+            additions=(addition,),
+            demonstration_fraction=0.5,
+        )
+    ).summary["sac_learning"]
+    assert result["sampling"]["available"] == {"demonstration": 4, "online": 2}
+    with pytest.raises(ValueError, match="exact current candidate"):
+        run_experiment(
+            SACResume(
+                tmp_path / "mixed",
+                tmp_path / "wrong-model",
+                steps=0,
+                imitation_comparison=comparison,
+                imitation_registry=registry,
+            )
+        )
+    # The original evaluated policy may review and append a separate, valid demo together.
+    reviewed = run_experiment(
+        SACResume(
+            root / "candidate",
+            tmp_path / "together",
+            steps=0,
+            additions=(addition,),
+            demonstration_fraction=0.5,
+            imitation_comparison=comparison,
+            imitation_registry=registry,
+        )
+    ).summary["sac_learning"]
+    assert reviewed["imitation"]["weight"] == 0.5
+    assert reviewed["sampling"]["available"] == {"demonstration": 4, "online": 2}
+
+
+@pytest.mark.parametrize(
+    "fault", ["missing_execution", "missing_files", "wall_riding", "no_registry"]
+)
 def test_incomplete_or_invalid_development_evidence_cannot_weaken_guidance(
     tmp_path, evaluated_guidance, fault
 ):
@@ -180,6 +236,8 @@ def test_incomplete_or_invalid_development_evidence_cannot_weaken_guidance(
                 row[key]["directory"] = str((old_ledger.parent / row[key]["directory"]).resolve())
         if fault == "missing_execution":
             ledger["entries"][0].pop("execution")
+        elif fault == "missing_files":
+            ledger["entries"][0]["files"] = {}
         else:
             source = Path(ledger["entries"][0]["recording"])
             proof = evidence(
@@ -199,7 +257,7 @@ def test_incomplete_or_invalid_development_evidence_cannot_weaken_guidance(
             tmp_path / "retained",
             steps=0,
             imitation_comparison=path,
-            imitation_registry=None if fault == "no_registry" else registry,
+            imitation_registry=None if fault in ("no_registry", "missing_files") else registry,
         )
     ).summary["sac_learning"]
     assert summary["imitation_review"]["advanced"] is False

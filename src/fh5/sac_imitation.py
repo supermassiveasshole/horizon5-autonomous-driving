@@ -7,6 +7,8 @@ import math
 from pathlib import Path
 from typing import Any
 
+from fh5.sac_policy import command_values
+
 
 def initial_imitation(
     weights: tuple[float, ...] | list[float],
@@ -56,10 +58,7 @@ def guidance_loss(
     grid = mean.new_tensor([32767, 255])
     with torch.no_grad():
         target = torch.round(teacher(*inputs).clamp(lower, upper) * grid) / grid
-    continuous = (lower + upper) / 2 + (upper - lower) / 2 * torch.tanh(mean)
-    # The same straight-through approximation as SAC Q actions; this branch guides the mean.
-    rounded = torch.round(continuous * grid) / grid
-    command = continuous + (rounded - continuous).detach()
+    command = command_values(torch, mean, context)["straight_through"]
     return ((command - target) / (upper - lower)).square().mean()
 
 
