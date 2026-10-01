@@ -11,6 +11,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from threading import Lock
 from typing import TYPE_CHECKING, Any, Literal, Protocol, TypeVar
 
 from fh5.candidate_archive import CandidateRestore
@@ -146,6 +147,7 @@ class _Loop:
         self.root, self.config, self.environment = root, config, environment
         self.monitor: StorageMonitor | None = None
         self.requested_stop_reason: str | None = None
+        self.stop_lock = Lock()
         self.store = Path(config["store"]["directory"])
         self.registry = Path(config["registry"])
         self.state: dict[str, Any] = {
@@ -300,12 +302,22 @@ class _Loop:
         return None
 
     def stopping_reason(self) -> str | None:
-        if self.requested_stop_reason is None:
-            if (self.root / "stop.request").exists():
-                self.requested_stop_reason = "stop_requested"
-            elif self.monitor is not None:
-                self.requested_stop_reason = self.monitor.reason()
-        return self.requested_stop_reason
+        with self.stop_lock:
+            if self.requested_stop_reason is not None:
+                return self.requested_stop_reason
+        # Query outside the lock so a delayed filesystem read cannot block
+        # another observer from latching a stop or reading an existing one.
+        reason = (
+            "stop_requested"
+            if (self.root / "stop.request").exists()
+            else self.monitor.reason()
+            if self.monitor is not None
+            else None
+        )
+        with self.stop_lock:
+            if self.requested_stop_reason is None and reason is not None:
+                self.requested_stop_reason = reason
+            return self.requested_stop_reason
 
     def stopped(self) -> bool:
         return self.stopping_reason() is not None

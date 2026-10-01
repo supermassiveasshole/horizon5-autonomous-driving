@@ -14,6 +14,7 @@ from test_evaluation import sha
 from test_learning_loop import SharedBackend, loop_request
 from test_learning_loop import seeded_loop as seeded_loop
 
+from fh5.control import Command
 from fh5.experiment import run_experiment
 from fh5.learning_io import LearningUnavailable
 from fh5.learning_loop import LearningContinue, LearningLoop
@@ -346,6 +347,79 @@ def test_resource_stop_is_attributed_only_when_evaluation_observed_it(
     ), resumed.get("error")
     assert resumed["learner_updates"] == result["learner_updates"] == 3
     assert not resumed_backend.leases and resumed_backend.closed
+
+
+def test_an_older_file_query_cannot_clear_a_stop_observed_by_another_thread(
+    tmp_path, waiting_monitored_evaluation
+):
+    request, source = waiting_monitored_evaluation
+    state = request.output_dir / "state.json"
+    stop = request.output_dir / "stop.request"
+    reading, released = threading.Event(), threading.Event()
+    reader = []
+    operators = []
+    exists = Path.exists
+
+    def stale_query(path):
+        if path == stop and reader == [threading.get_ident()] and not reading.is_set():
+            assert not exists(path)
+            reading.set()
+            assert released.wait(2), "Concurrent stop did not release the external controls"
+            return False  # Query started before the stop file was created.
+        return exists(path)
+
+    class ConcurrentBackend(SharedBackend):
+        def evaluation(self, identity):
+            lease = super().evaluation(identity)
+            driving = lease.driving
+
+            def connect(slot, ready):
+                game = driving(slot, ready)
+                read = game.read
+
+                def observation(period):
+                    reader[:] = [threading.get_ident()]
+                    return read(period)
+
+                def signals():
+                    assert reading.wait(2)
+                    stop.write_text("External stop during a concurrent file query")
+                    observer = threading.current_thread()
+
+                    def clear_after_observer_exits():
+                        observer.join(timeout=1)
+                        if not observer.is_alive():
+                            stop.unlink()
+                            released.set()
+
+                    operator = threading.Thread(target=clear_after_observer_exits, daemon=True)
+                    operators.append(operator)
+                    operator.start()
+                    return True, False
+
+                game.read, game.signals = observation, signals
+                return game
+
+            lease.driving = connect
+            return lease
+
+    backend = ConcurrentBackend(source)
+    with pytest.MonkeyPatch.context() as filesystem:
+        filesystem.setattr(Path, "exists", stale_query)
+        result = run_experiment(
+            LearningContinue(request.output_dir, sha(state)), learning_environment=backend
+        ).summary["learning_loop"]
+    for operator in operators:
+        operator.join(timeout=2)
+        assert not operator.is_alive()
+    assert reading.is_set() and released.is_set()
+    assert result["stop_reason"] == "stop_requested", result.get("error")
+    assert result["rounds"][0]["evaluation_interrupted_by_stop"] is True
+    assert result["learner_updates"] == 3 and result["rounds_completed"] == 0
+    assert backend.closed and result["resources_released"]
+    assert all(
+        command == Command(0, 0, 0) for game in backend.leases[0].drives for _, command in game.sent
+    )
 
 
 @pytest.mark.parametrize(
