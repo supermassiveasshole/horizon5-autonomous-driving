@@ -14,6 +14,12 @@ from typing import Any, Literal
 
 from fh5.attempts import AttemptReplay, review_attempts
 from fh5.bc import BCReplay, BCTrain, run_bc
+from fh5.candidate_archive import (
+    CandidateArchive,
+    CandidateRestore,
+    archive_candidate,
+    restore_candidate,
+)
 from fh5.candidate_selection import CandidateCompare, compare_candidates
 from fh5.capture import CaptureReplay, CaptureRun, replay_capture
 from fh5.capture_runtime import CaptureSource, run_capture
@@ -243,6 +249,8 @@ def _validate_config(config: object) -> dict[str, Any]:
 
 def run_experiment(
     request: RealtimeReplay
+    | CandidateArchive
+    | CandidateRestore
     | CandidateCompare
     | EvaluationPrepare
     | EvaluationReview
@@ -323,6 +331,10 @@ def run_experiment(
     collection_installer: CollectionInstaller | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, CandidateArchive):
+        return archive_candidate(request)
+    if isinstance(request, CandidateRestore):
+        return restore_candidate(request)
     if isinstance(request, CandidateCompare):
         return compare_candidates(request)
     if isinstance(request, EvaluationPrepare):

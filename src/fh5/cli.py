@@ -128,6 +128,20 @@ def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Record and replay FH5 Data Out experiments")
     commands = parser.add_subparsers(dest="mode", required=True)
+    candidate_archive = commands.add_parser(
+        "candidate-archive", help="Retain an exact, complete SAC continuation package"
+    )
+    candidate_archive.add_argument("--checkpoint", type=Path, required=True)
+    candidate_archive.add_argument("--checkpoint-sha256", required=True)
+    candidate_restore = commands.add_parser(
+        "candidate-restore",
+        help="Restore an archived candidate into a new directory; no activation",
+    )
+    candidate_restore.add_argument("--archive", type=Path, required=True)
+    candidate_restore.add_argument("--archive-sha256", required=True)
+    for command in (candidate_archive, candidate_restore):
+        command.add_argument("--output", type=Path, required=True)
+        command.add_argument("--reason", required=True)
     candidate_compare = commands.add_parser(
         "candidate-compare", help="Compare frozen candidates from source evidence; no activation"
     )
@@ -550,6 +564,17 @@ def main(argv: Sequence[str] | None = None) -> int:
                 else CollectionDatasetReview(args.dataset, args.report)
             )
             print(json.dumps(selected.summary["collection_dataset"], ensure_ascii=False))
+            return 0
+        if args.mode in ("candidate-archive", "candidate-restore"):
+            from fh5.candidate_archive import CandidateArchive, CandidateRestore
+
+            retained = run_experiment(
+                CandidateArchive(args.checkpoint, args.output, args.checkpoint_sha256, args.reason)
+                if args.mode == "candidate-archive"
+                else CandidateRestore(args.archive, args.output, args.archive_sha256, args.reason)
+            )
+            result = retained.summary[args.mode.replace("-", "_")]
+            print(json.dumps({k: v for k, v in result.items() if k != "files"}, ensure_ascii=False))
             return 0
         if args.mode == "candidate-compare":
             from fh5.candidate_selection import CandidateCompare
