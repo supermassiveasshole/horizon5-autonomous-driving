@@ -9,6 +9,7 @@ from dataclasses import asdict
 from typing import Any
 
 from fh5.capture_config import parse_capture_config
+from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import DecisionActor, PixelContract
 from fh5.realtime import RealtimeConfig, RealtimeNumericReplay, RealtimeRun
 from fh5.realtime_model import ShadowNumericActor, shadow_model_contract
@@ -36,8 +37,12 @@ def replay_command(args: argparse.Namespace) -> int:
             args.device,
             allow_legacy_source_diagnostic=args.allow_legacy_source_diagnostic,
         )
+    elif recording["actor_kind"] == "frozen-numeric-temporal-bc-v2":
+        if args.allow_legacy_source_diagnostic:
+            raise ValueError("Driving replay requires the exact numerical source contract")
+        actor = FrozenNumericActor(args.model, pixels, args.device)
     else:
-        raise ValueError("CLI replay requires a supported frozen shadow or SAC actor")
+        raise ValueError("CLI replay requires a supported frozen numerical actor")
     result = run_experiment(
         RealtimeNumericReplay(args.recording, args.report, args.tolerance),
         numeric_actor=actor,

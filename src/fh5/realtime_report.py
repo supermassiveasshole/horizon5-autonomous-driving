@@ -25,6 +25,11 @@ def write_realtime_result(
     decisions = result["decisions"]
     result["configuration"] = {**asdict(config), "pixels": config.pixels.metadata()}
     accepted = [d for d in decisions if d["status"] == "accepted"]
+    sent = {
+        c["decision_id"]: c["returned_ns"]
+        for c in result["commands"]
+        if c["status"] == "sent" and c["decision_id"] is not None
+    }
     end = result["ended_ns"]
     longest = 0
     skip_start = None
@@ -41,7 +46,7 @@ def write_realtime_result(
     if skip_start is not None:
         longest = max(longest, end - skip_start)
     result["metrics"] = {
-        "interpretation": "sendable/simulated sink timing; never actual game action latency",
+        "interpretation": "inference and send-return timing; game application latency unverified",
         "decision_counts": dict(Counter(d["status"] for d in decisions)),
         "accepted_fraction": len(accepted) / len(decisions) if decisions else None,
         "effective_hz": len(accepted) / max(1e-9, (end - result["started_ns"]) / 1e9),
@@ -50,6 +55,13 @@ def write_realtime_result(
             [
                 (d["inference_returned_ns"] - d["frames"][-1]["source_time_ns"]) / 1e6
                 for d in accepted
+            ]
+        ),
+        "source_to_send_return_ms": percentiles(
+            [
+                (sent[d["decision_id"]] - d["frames"][-1]["source_time_ns"]) / 1e6
+                for d in accepted
+                if d["decision_id"] in sent
             ]
         ),
         "inference_to_result_ms": percentiles(

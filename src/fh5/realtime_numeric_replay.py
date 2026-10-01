@@ -48,8 +48,9 @@ def read_realtime_recording(root: Path) -> dict[str, Any]:
     if (
         not isinstance(report, dict)
         or report["version"] != 2
-        or report["commands_sent_to_game"] is not False
-        or report["evidence_kind"] not in ("synthetic", "shadow")
+        or type(report["commands_sent_to_game"]) is not bool
+        or (report["evidence_kind"] != "native" and report["commands_sent_to_game"])
+        or report["evidence_kind"] not in ("synthetic", "shadow", "native")
     ):
         raise ValueError("Unsupported real-time numerical recording")
     return report

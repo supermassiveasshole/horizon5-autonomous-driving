@@ -63,7 +63,7 @@ class LiveEnvironment:
 
     def __init__(
         self,
-        receiver: socket.socket,
+        receiver: socket.socket | None,
         controller: Controller,
         desktop: DesktopState,
         *,
@@ -82,6 +82,7 @@ class LiveEnvironment:
         self._closed = False
         self._release_failures = 0
         self._detached = False
+        self._detach_error: str | None = None
         self._worker = threading.Thread(target=self._watch, daemon=True, name="fh5-input-watchdog")
         self._worker.start()
 
@@ -93,6 +94,8 @@ class LiveEnvironment:
         return self._fault
 
     def read(self, period_s: float) -> ControlInput:
+        if self.receiver is None:
+            raise OSError("Input-only controller lease has no UDP receiver")
         deadline = time.monotonic() + period_s
         packets = []
         while (remaining := deadline - time.monotonic()) > 0:
@@ -155,6 +158,7 @@ class LiveEnvironment:
                 except Exception as close_error:
                     event["detach_status"] = "failed"
                     event["detach_error"] = str(close_error)
+                    self._detach_error = str(close_error)
                 finally:
                     self._detached = True
                     self._active = False
@@ -188,6 +192,8 @@ class LiveEnvironment:
             self._closed = True
             if not self._detached:
                 self.controller.close()
+            elif self._detach_error is not None:
+                raise OSError("Controller detach failed: " + self._detach_error)
 
 
 class WindowsDesktop:

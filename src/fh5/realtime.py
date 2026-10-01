@@ -162,8 +162,11 @@ class RealtimeRun:
     startup_timeout_s: float = 30
     journal_capacity: int = 512
     archive_limit_bytes: int = 512 * 1024**2
+    live: bool = False
 
     def __post_init__(self) -> None:
+        if type(self.live) is not bool or (self.live and self.seconds > 30):
+            raise ValueError("Live numerical driving requires a bounded run of at most 30 seconds")
         for value, maximum in ((self.seconds, 600), (self.startup_timeout_s, 60)):
             if (
                 type(value) not in (int, float)
@@ -197,10 +200,10 @@ class RealtimeNumericReplay:
 
 
 class RealtimeEnvironment(Protocol):
-    """External I/O seam. Shadow send is a no-op; actual game control belongs to #9."""
+    """External I/O seam. Shadow is read-only; native output requires explicit opt-in."""
 
     @property
-    def source_kind(self) -> Literal["synthetic", "shadow"]: ...
+    def source_kind(self) -> Literal["synthetic", "shadow", "native"]: ...
 
     def read(self, period_s: float) -> TimelineInput: ...
     def signals(self) -> tuple[bool, bool]: ...

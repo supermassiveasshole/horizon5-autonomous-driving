@@ -1,12 +1,22 @@
 # 容错数值决策（T34 / #36）
 
-状态：软件接入阶段。已有共享期限状态机、真实常驻推理线程、独立动作监督、有界旁路，以及 DXGI/UDP/独立任务几何与冻结 Δt 模型的只读影子适配器。**尚未获得 FH5 影子运行的实机证据，也未接入真实执行器**。#36 保持开放；#9 负责游戏中的实际发送和车辆响应。
+状态：软件接入阶段。已有共享期限状态机、真实常驻推理线程、独立动作监督、有界旁路，以及 DXGI/UDP/独立任务几何与冻结 Δt 模型的只读影子适配器。新增 #9 的数值控制适配接口，已用真实冻结模型和模拟外部设备验证；**没有完成新管线的 FH5 实机驾驶或影子性能验收**。#36、#9 继续保持开放。
 
 ## 实验接口
 
 `run_experiment(RealtimeReplay(...))` 输入带绝对时间的安全状态、数值历史和模拟推理服务返回时间，生成确定性期限/动作回放。推理挂起用 `InferenceReply(delay_ms=None)` 表示；它不加载模型、不采集屏幕、不连接手柄。
 
-`run_experiment(RealtimeRun(...), realtime_environment=..., numeric_actor_factory=...)` 启动真实线程。环境边界提供 `read`、独立 `signals`、模拟 `send` 和 `close`；生产游戏控制适配器不属于本切片。`source_kind` 只接受 `synthetic` 或 `shadow`。影子环境的 `send` 必须为空操作，候选动作不充当实际动作历史，缺少已验证真实输入时保持 action mask 为 false。
+`run_experiment(RealtimeRun(...), realtime_environment=..., numeric_actor_factory=...)` 启动真实线程。环境边界提供 `read`、独立 `signals`、`send` 和 `close`；`source_kind` 区分 `synthetic`、`shadow` 和显式控制的 `native`。影子环境的 `send` 必须为空操作，候选动作不充当实际动作历史，缺少已验证真实输入时保持 action mask 为 false。
+
+## 数值控制适配接口（#9 增量）
+
+`NumericDrivingEnvironment(observations, controller_factory, source_kind=...)` 复用 `ShadowEnvironment` 的原始像素、遥测与局部路线检查，组合既有独立手柄看门狗。模拟设备必须声明 `synthetic`。`native` 要求 `RealtimeRun(live=True)` 且最长 30 秒；不兼容、旧来源或 diagnostic-only 模型在启动采集之前拒绝。真实控制只支持匹配数值/历史维度的冻结时间特征 BC；SAC 的游戏适配留给 #11。
+
+控制器在模型加载和预热完成、观测与局部起点已就绪后才创建；创建后再次检查焦点、F8 和数据年龄，不发送创建期间过期的预测。策略命令沿用统一的时效/限幅检查，成功发送返回后才能进入后续动作历史。短时暂无完整的新图像不额外触发控制接口错误，旧预测仍须通过原有年龄与 epoch 检查。关闭时先归零和断开控制器，再关闭观测、存档；驱动断开失败必须保留为资源未释放。
+
+报告保存执行器发送次数、失败、独立看门狗与收尾事件，另增加 `source_to_send_return_ms`。原 `source_to_sendable_ms` 仍表示推理结果就绪时间。两者都不能代表游戏实际采用命令的时刻；`real_game_validation`、训练与晋升资格不会因 API 成功而置为真。原生来源的记录可以离线重放，重放始终不创建执行器。
+
+本增量提供实验入口适配器，**尚未提供 `realtime-drive` CLI**，旧 `policy --live` 仍未替换。下一步补齐候选/采集条件绑定、候选自己的只读时效记录及命令行接入，再做实机短段；不把机械接口接通当作 #9 完成。验证细节见 [数值驾驶适配记录](validation/t08-numeric-driving-adapter.md)。
 
 `ShadowEnvironment` 组合独立 DXGI 采集/预处理、单个回环 UDP 接收器和任务几何核验。每个包都检查，不能用同批末尾的正常包覆盖中间故障。准备前的菜单、时钟异常、失焦或遥测间断会清空历史；恢复后只接受边界之后的新帧。准备完成后硬故障锁存，不自动重试接管。采集 epoch 即使暂无完整历史也会传播，使旧推理及时失效。
 
