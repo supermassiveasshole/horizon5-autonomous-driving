@@ -51,8 +51,8 @@ uv run --locked fh5 sac-resume --checkpoint runs/sac-001 --output runs/sac-002 -
 
 一次运行限 1–10 次尝试，每次 1–1000 个同步动作；图像历史总预算每次 512 MiB，累计 replay 最多 10000 个转移。经验沿用 512 MiB 像素和 128 MiB 清单上限，来源清单另外限 128 MiB/1000 份。尝试的图像预算在采样前检查；追加经验达到容量上限时，保留采样记录并停止新更新。结果目录保存所有尝试和候选，因此磁盘总量可高于单份预算。
 
-在输出目录写 `stop.request`，采样在完整响应边界停止，学习在完整优化器更新边界保存。当前外部同步调用不能被抢占；强杀只保留此前封存的候选，不声称能恢复未保存的尝试或游戏状态。采样后未进入学习的数据保留供排查。
+在输出目录写 `stop.request`，采样在完整响应边界停止，学习在完整优化器更新边界保存。组合调度也可以通过实验入口的 `sac_stop_requested` 传入停止检查；`expected_checkpoint_sha256` 绑定首轮模型身份。当前外部同步调用不能被抢占；强杀只保留此前封存的候选，不声称能恢复未保存的尝试或游戏状态。采样后未进入学习的数据保留供排查。
 
 `summary.json` / `report.html` 汇总候选、尝试、有效/排除转移及故障；每次尝试保留 `sampling.json`、`trace.json`、数值帧、完整遥测和独立结算。`candidate-NNN/` 支持已有续训入口，搬走采样目录仍可继续其封存经验。原始来源清单用于追溯，运行所需数值帧按内容摘要保存在合并经验中。
 
-[示范/在线混合](sac-mixture.md)、[临时 BC 约束退出](sac-imitation.md)、[冻结 SAC 评估](evaluation.md)、[候选比较](candidate-selection.md)、[完整归档恢复](candidate-archive.md)及[合成版本历史/回退](candidate-store.md)已有各自的软件实现。仍需将这些环节集成为持久的无人值守调度，继续完善原生异步时序与自动重新入场，以及真实驾驶收益验证。实机验收待完成不阻止独立集成与故障测试；不能用此处的合成回报或 loss 变化宣布车辆已进化。
+[示范/在线混合](sac-mixture.md)、[临时 BC 约束退出](sac-imitation.md)、[冻结 SAC 评估](evaluation.md)、[候选比较](candidate-selection.md)、[完整归档恢复](candidate-archive.md)及[合成版本历史/回退](candidate-store.md)已有各自的软件实现。[连续学习调度](learning-loop.md)正在接入这些接口，保留已封存阶段与独立版本角色。完整故障恢复、原生异步时序、自动重新入场及真实驾驶收益仍需验证；不能用合成回报或 loss 变化宣布车辆已进化。

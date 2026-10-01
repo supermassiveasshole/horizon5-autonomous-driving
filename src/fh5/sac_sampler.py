@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import random
 import time
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -66,6 +67,7 @@ def sample_attempt(
     epoch: str,
     limit: int,
     seed: int,
+    stop_requested: Callable[[], bool] | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
     from fh5.experiment import Record, run_experiment
 
@@ -96,7 +98,7 @@ def sample_attempt(
         receipts = [(started.initial_issued_ns, [0.0, 0.0])]
         samples.append(_with_history(started.sample, receipts))
         for index in range(limit):
-            if (root.parent / "stop.request").exists():
+            if (root.parent / "stop.request").exists() or (stop_requested and stop_requested()):
                 result["stop_reason"] = "stop_requested"
                 break
             sample = samples[-1]

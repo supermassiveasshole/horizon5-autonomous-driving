@@ -231,7 +231,14 @@ def review_start(
         }
         if event_payloads(directory / "event-config.json") != expected:
             raise ValueError("Preparation event protocol differs from the frozen task")
-        operation = "start_ready" if slot == batch["config"]["plan"][0]["id"] else "restart_ready"
+        operation = read_event(directory)["summary"].get("operation")
+        allowed = (
+            ("start_ready", "restart_ready")
+            if slot == batch["config"]["plan"][0]["id"]
+            else ("restart_ready",)
+        )
+        if operation not in allowed:
+            raise ValueError("Preparation used an unsupported ready operation")
         observed_config = validate_event_file(directory / "event-config.json")["event_run"]
         output.parent.mkdir(parents=True, exist_ok=True)
         prepared = run_experiment(Replay(directory, output))

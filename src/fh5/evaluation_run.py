@@ -33,8 +33,11 @@ class EvaluationRun:
     output_dir: Path
     seconds: float = 15
     registry_file: Path | None = None
+    initial_operation: Literal["start_ready", "restart_ready"] = "start_ready"
 
     def __post_init__(self) -> None:
+        if self.initial_operation not in ("start_ready", "restart_ready"):
+            raise ValueError("Evaluation requires a declared initial ready operation")
         if (
             type(self.seconds) not in (int, float)
             or not math.isfinite(self.seconds)
@@ -108,6 +111,7 @@ def _freeze(request: EvaluationRun) -> tuple[dict[str, Any], Path, dict[str, Any
                 "source_kind": "synthetic",
                 "exploration": False,
                 "rewind": False,
+                "initial_operation": request.initial_operation,
             }
         ),
     )
@@ -182,7 +186,7 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
                 EventRun(
                     event_file,
                     directory / "ready",
-                    operation="start_ready" if i == 0 else "restart_ready",
+                    operation=request.initial_operation if i == 0 else "restart_ready",
                 ),
                 event_environment=menu_environment,
             ).summary["event_run"]

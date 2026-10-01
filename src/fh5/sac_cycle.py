@@ -6,6 +6,7 @@ import hashlib
 import html
 import importlib
 import json
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -38,6 +39,7 @@ class SACCycle:
     cycles: int = 2
     steps_per_attempt: int = 16
     seed: int = 19
+    expected_checkpoint_sha256: str | None = None
 
     def __post_init__(self) -> None:
         if (
@@ -51,10 +53,18 @@ class SACCycle:
             raise ValueError("SAC cycle requires finite attempts, steps and sampler seed")
 
 
-def run_sac_cycle(request: SACCycle, environment: SACEnvironment) -> RunResult:
+def run_sac_cycle(
+    request: SACCycle,
+    environment: SACEnvironment,
+    stop_requested: Callable[[int], bool] | None = None,
+) -> RunResult:
     from fh5.experiment import RunResult, run_experiment
 
     root = request.output_dir
+
+    def stopped() -> bool:
+        return (root / "stop.request").exists() or bool(stop_requested and stop_requested(0))
+
     if root.exists() or root.resolve().is_relative_to(request.checkpoint_dir.resolve()):
         raise ValueError("SAC cycle needs a fresh output outside its frozen checkpoint")
     summary: dict[str, Any] = {
@@ -72,7 +82,7 @@ def run_sac_cycle(request: SACCycle, environment: SACEnvironment) -> RunResult:
         if environment.source_kind != "synthetic":
             raise ValueError("SAC cycle currently requires synthetic external I/O")
         checkpoint = request.checkpoint_dir
-        expected_sampling_sha: str | None = None
+        expected_sampling_sha = request.expected_checkpoint_sha256
         files = (request.recording_config_file, request.task_file, request.reward_file)
         protocol_bytes = [read_bounded(p, 1024**2) for p in files]
         if json.loads(protocol_bytes[0])["control_source"] != "policy":
@@ -101,7 +111,7 @@ def run_sac_cycle(request: SACCycle, environment: SACEnvironment) -> RunResult:
             torch.set_num_threads(2)
             torch.use_deterministic_algorithms(True)
             for number in range(request.cycles):
-                if (root / "stop.request").exists():
+                if stopped():
                     summary["stop_reason"] = "stop_requested"
                     break
                 if any(read_bounded(p, 1024**2) != raw for p, raw in zip(files, protocol_bytes)):
@@ -122,9 +132,10 @@ def run_sac_cycle(request: SACCycle, environment: SACEnvironment) -> RunResult:
                     f"sac-attempt-{number}",
                     request.steps_per_attempt,
                     request.seed + number,
+                    stopped,
                 )
                 summary["attempts"].append(result)
-                if (root / "stop.request").exists():
+                if stopped():
                     summary["stop_reason"] = "stop_requested"
                     break
                 if result["error"]:
@@ -156,7 +167,7 @@ def run_sac_cycle(request: SACCycle, environment: SACEnvironment) -> RunResult:
                         additions=((replay, prepared["replay_sha256"]),),
                         expected_checkpoint_sha256=actor.sha,
                     ),
-                    sac_stop_requested=lambda _: (root / "stop.request").exists(),
+                    sac_stop_requested=lambda _: stopped(),
                 ).summary["sac_learning"]
                 # Reload a complete snapshot before making it the next sampling candidate.
                 restored = FrozenSAC(torch, candidate)

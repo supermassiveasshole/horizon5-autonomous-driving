@@ -1,0 +1,64 @@
+# 连续合成学习循环（T14 / #15）
+
+`LearningLoop` 将已交付的 SAC 采样与续训、冻结评估、候选保存串成有限轮次的运行。外部环境响应模型实际命令，Torch 实际更新网络；常规轮次不需要新增示范、人工重开或逐轮批准。当前只支持显式合成环境，不能用于连接 FH5，也不能据此宣称驾驶能力改善。#15 保持开放，实机及剩余故障恢复验收另行记录。
+
+## 启动
+
+输入已有[候选版本库](candidate-store.md)，其中默认版具备独立合成评估依据，探索版含完整续训状态。配置路径相对配置文件解析：
+
+```json
+{
+  "version": 1,
+  "store": {"directory": "../runs/versions", "revision": "<当前版本摘要>"},
+  "registry": "../runs/evidence-usage.sqlite",
+  "recording": "policy-record.json",
+  "task": "local-task.json",
+  "reward": "local-reward.json",
+  "rounds": 2,
+  "steps_per_attempt": 16,
+  "evaluation_seconds": 15,
+  "seed": 191
+}
+```
+
+```python
+from pathlib import Path
+from fh5.experiment import run_experiment
+from fh5.learning_loop import LearningLoop
+
+result = run_experiment(
+    LearningLoop(Path("configs/learning.json"), Path("runs/learning-001")),
+    learning_environment=environment,
+)
+```
+
+输出目录必须全新且在版本库之外。轮数限 1–10，单次采样限 1–1000 个动作；每个新接纳转移至多获得一次更新。评估沿用当前默认版的冻结条件、门槛、任务、原始起跑模板和无参考输入协议，关闭探索；当前重复执行器限每批 1–10 次。配置和原始依赖必须保留，不支持悄悄换奖励、路线或像素契约后继续原会话。
+
+## 一个外部环境，顺序交接
+
+`LearningEnvironment` 提供 `source_kind="synthetic"`，以及：
+
+- `sampling(identity)`：返回一个 `SACEnvironment` 租约，负责合成重置和响应实际策略动作。
+- `evaluation(identity)`：返回一个 `EvaluationEnvironment` 租约，使用原始菜单画面、遥测与动作执行完整重开，再运行冻结模型。首个评估槽位也从驾驶场景重开，不假设调用方已放回赛前页。
+- `review(recording_dir)`：返回独立观察者的证据文件，或 `None`。循环不会把执行完成、模型预测或训练奖励翻译成合法驾驶证明。
+- `close()`：释放该后端拥有的资源并报告结果。
+
+后端必须独占同一实例的采样/评估资源；每个子租约关闭后才能创建下一个。采样租约在更新之前释放，更新期间不持有驾驶输入。版本库另有 OS 锁，防止两个调度者同时推进同一会话；过期版本不能覆盖已提交选择。底层同步合成调用仍须有界，此入口不提供原生硬实时保障。
+
+## 探索进度与默认版分开
+
+每轮执行采样 → 独立结算 → 更新并重载完整模型 → 冻结评估 → 保存选择。新采样绑定确切模型摘要，工厂打开期间换成另一份合法模型也不能接管此次采样。
+
+候选证据不足或没有胜出时保留默认版，但下一轮使用刚完成更新的探索版。`latest_learner` 是最近封存的训练状态；`explorer` 是最近完成评估和版本保存的探索状态。两者可在评估故障时暂时不同，不能把旧的已评估版本当成最新学习成果。
+
+`state.json`、`summary.json`、`report.html` 保存阶段时刻、完整轮次、有效转移、更新数、模型身份和故障。每轮另保存采样原件、完整 learner、冻结批次、全部评估尝试及比较依据。未开始槽位仍列出；正式驾驶能力与提升标志始终为 false。
+
+## 停止与接续
+
+在输出目录写入 `stop.request`。采样在响应边界停止，训练在完整优化器更新边界封存；评估的菜单输入、状态读取、停止监视和下发前均检查停止，解除命令仍允许执行。子租约解除失败不能被后端的成功关闭掩盖。
+
+解除停止条件后，通过 `LearningContinue(run_dir, expected_state_sha256)` 和同一实验入口接续；摘要取自当前 `state.json` 的原始字节。过期请求拒绝且不改写原会话。接续会核验配置、完整 learner、已保存采样及评估绑定。
+
+目前支持已封存阶段的接续：训练完成但评估接口尚未打开时直接评估该模型；评估中停止且已封存的失败记录继续保留，不能用重跑替换。历史故障保存在 `interruptions`。不重复采样或给相同经验重复计算更新额度。
+
+接口故障与不能确认重开时受控停止；零次自动接口重试是当前明确策略。未封存的采样/评估目录不会自动覆盖或推断成功。强杀后的未提交阶段协调、自动有限重试、版本提交与会话状态写入之间的崩溃恢复仍待完善；已封存完整 learner 可使用既有续训/归档入口恢复。磁盘总预算和长期资源压力由 #16 继续覆盖。

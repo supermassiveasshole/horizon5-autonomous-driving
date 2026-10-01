@@ -67,6 +67,7 @@ from fh5.evaluation import (
 from fh5.evaluation_run import EvaluationEnvironment, EvaluationRun, run_evaluation
 from fh5.events import EventEnvironment, EventRun, read_event, run_event
 from fh5.evidence_usage import RecordUsage, record_usage
+from fh5.learning_loop import LearningContinue, LearningEnvironment, LearningLoop, run_learning_loop
 from fh5.learning_schedule import LearningResources, ScheduledBCTrain, run_scheduled_bc
 from fh5.numeric_images import (
     ContextualNumericActor,
@@ -297,6 +298,8 @@ def run_experiment(
     | SACCriticResume
     | SACTrain
     | SACCycle
+    | LearningLoop
+    | LearningContinue
     | SACResume
     | SACPolicyReplay
     | RewardAudit
@@ -338,10 +341,15 @@ def run_experiment(
     sac_stop_requested: Callable[[int], bool] | None = None,
     sac_environment: SACEnvironment | None = None,
     evaluation_environment: EvaluationEnvironment | None = None,
+    learning_environment: LearningEnvironment | None = None,
     collection_write: WriteFile | None = None,
     collection_installer: CollectionInstaller | None = None,
 ) -> RunResult:
     """Run one record/replay operation; injected packets are the environment seam."""
+    if isinstance(request, (LearningLoop, LearningContinue)):
+        if learning_environment is None:
+            raise ValueError("Learning loop requires an explicit synthetic environment")
+        return run_learning_loop(request, learning_environment)
     if isinstance(request, CandidateArchive):
         return archive_candidate(request)
     if isinstance(request, CandidateRestore):
@@ -431,7 +439,7 @@ def run_experiment(
     if isinstance(request, SACCycle):
         if sac_environment is None:
             raise ValueError("SAC cycle requires an explicit synthetic environment")
-        return run_sac_cycle(request, sac_environment)
+        return run_sac_cycle(request, sac_environment, sac_stop_requested)
     if isinstance(request, (SACCriticWarmup, SACCriticReplay, SACCriticResume)):
         return run_critic(request, sac_stop_requested)
     if isinstance(request, (SACTrain, SACResume)):
