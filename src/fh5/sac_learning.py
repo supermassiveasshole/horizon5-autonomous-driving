@@ -26,6 +26,7 @@ from fh5.sac_actor import FrozenSAC
 from fh5.sac_checkpoint import (
     checkpoint_history,
     continuation_history,
+    experience_frames,
     publish_checkpoint,
     read_checkpoint,
     read_critic_checkpoint,
@@ -224,7 +225,10 @@ def validate_sac_candidate(root: Path, expected_sha256: str) -> dict[str, Any]:
         data = LearningReplay(
             torch, replay_file, manifest["replay_sha256"], bc, ActionBounds(**manifest["bounds"])
         )
-        source_replays(replay_file.parent, json.loads(data.raw))
+        replay = json.loads(data.raw)
+        source_replays(replay_file.parent, replay)
+        for _ in experience_frames(replay_file.parent, replay):
+            pass
         ReplaySampling(data.roles, request.batch_size, request.demonstration_fraction)
         learner = _make_learner(torch, bc, saved, request, resume=True)
         # Exercise the actual numerical observation contract and reject non-finite output.

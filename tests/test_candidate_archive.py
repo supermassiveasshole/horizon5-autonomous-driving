@@ -312,3 +312,41 @@ def test_restore_rejects_changed_archive_inventory_without_exposing_output(tmp_p
             )
         )
     assert not (tmp_path / "missing").exists()
+
+
+def test_archive_checks_terminal_images_even_when_they_are_not_used_for_bootstrap(tmp_path):
+    from test_sac import experience
+    from test_temporal_bc import temporal_fixture
+
+    from fh5.sac import SACCriticWarmup
+    from fh5.temporal_bc import TemporalBCTrain
+
+    prepared_request = experience(tmp_path)
+    trace_file = tmp_path / "trace.json"
+    trace = json.loads(trace_file.read_bytes())
+    pixels = bytes([52, 18, 35] * 64 * 36)
+    (tmp_path / "terminal.rgb").write_bytes(pixels)
+    for frame in trace["observations"][-1]["frames"]:
+        frame.update(path="terminal.rgb", sha256=hashlib.sha256(pixels).hexdigest())
+    trace_file.write_text(json.dumps(trace))
+    prepared = run_experiment(prepared_request).summary["sac_replay"]
+    replay = prepared_request.output_dir / "replay.json"
+    bc = tmp_path / "bc"
+    bc.mkdir()
+    config, _ = temporal_fixture(bc)
+    run_experiment(TemporalBCTrain(config, bc / "model"))
+    run_experiment(
+        SACCriticWarmup(bc / "model", replay, prepared["replay_sha256"], tmp_path / "warm", steps=3)
+    )
+    checkpoint = tmp_path / "candidate"
+    run_experiment(SACTrain(tmp_path / "warm", replay, checkpoint, steps=1))
+    terminal = json.loads((checkpoint / "experience/replay.json").read_bytes())["transitions"][-1]
+    assert terminal["terminated"] is True
+    assert terminal["bootstrap"] is False
+    damaged = checkpoint / "experience" / terminal["next"]["frames"][0]["path"]
+    damaged.write_bytes(bytes([99] * len(pixels)))
+
+    identity = hashlib.sha256((checkpoint / "policy.json").read_bytes()).hexdigest()
+    with pytest.raises(ValueError, match="pixel hash mismatch"):
+        run_experiment(CandidateArchive(checkpoint, tmp_path / "archive", identity, "Retain"))
+    assert not (tmp_path / "archive").exists()

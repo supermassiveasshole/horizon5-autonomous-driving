@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from io import BytesIO
 from pathlib import Path
 from typing import Any
 
 from fh5.collection_store import encode, read_bounded, write_file
-from fh5.numeric_images import asset
+from fh5.numeric_images import NumericFrame, asset
 from fh5.numeric_recording import read_numeric_frame
 from fh5.sac_imitation import checkpoint_imitation, imitation_evidence
 
@@ -245,10 +246,8 @@ def state_digest(torch: Any, state: dict[str, Any]) -> str:
     return digest.hexdigest()
 
 
-def seal_experience(raw: bytes, source: Path, output: Path) -> dict[str, Any]:
-    replay = json.loads(raw)
-    sources = source_replays(source.parent, replay)
-    output.mkdir(parents=True)
+def experience_frames(root: Path, replay: dict[str, Any]) -> Iterator[tuple[str, NumericFrame]]:
+    """Check every referenced path, including terminal observations not used by the learner."""
     seen: dict[str, str] = {}
     total = 0
     for row in replay["transitions"]:
@@ -261,20 +260,31 @@ def seal_experience(raw: bytes, source: Path, output: Path) -> dict[str, Any]:
                     if seen[name] != sha:
                         raise ValueError("SAC frame path has conflicting contents")
                     continue
-                frame = read_numeric_frame(source.parent, entry)
+                frame = read_numeric_frame(root, entry)
                 total += frame.pixels.nbytes
                 if total > 512 * 1024**2:
                     raise ValueError("Sealed SAC experience exceeds 512 MiB")
-                target = asset(output, name)
-                target.parent.mkdir(parents=True, exist_ok=True)
-                write_file(target, bytes(frame.pixels))
                 seen[name] = sha
+                yield name, frame
+
+
+def seal_experience(raw: bytes, source: Path, output: Path) -> dict[str, Any]:
+    replay = json.loads(raw)
+    sources = source_replays(source.parent, replay)
+    output.mkdir(parents=True)
+    count, total = 0, 0
+    for name, frame in experience_frames(source.parent, replay):
+        target = asset(output, name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        write_file(target, bytes(frame.pixels))
+        count += 1
+        total += frame.pixels.nbytes
     write_file(output / "replay.json", raw)
     for name, payload in sources.items():
         target = asset(output, name)
         target.parent.mkdir(parents=True, exist_ok=True)
         write_file(target, payload)
-    return {"replay": "experience/replay.json", "frame_files": len(seen), "frame_bytes": total}
+    return {"replay": "experience/replay.json", "frame_files": count, "frame_bytes": total}
 
 
 def source_replays(root: Path, replay: dict[str, Any]) -> dict[str, bytes]:
