@@ -109,6 +109,28 @@ def test_state_change_while_waiting_for_first_prediction_prevents_driving(tmp_pa
     assert result.summary["evaluation"]["unstarted_slots"] == ["run-1"]
 
 
+def test_neutral_policy_commands_do_not_end_the_start_wait(tmp_path, policy):
+    operation = automatic_request(tmp_path, policy)
+    config_file = tmp_path / "evaluation.json"
+    config = json.loads(config_file.read_bytes())
+    config["runtime"].update(max_steer=0, max_throttle=0, max_brake=0)
+    config_file.write_text(json.dumps(config))
+    frozen = tmp_path / "neutral-batch"
+    run_experiment(EvaluationPrepare(config_file, frozen))
+    operation = replace(operation, batch_dir=frozen, batch_sha256=sha(frozen / "batch.json"))
+    result = run_experiment(operation, evaluation_environment=Batch())
+    recorded = json.loads(
+        (operation.output_dir / "attempt-0000/execution/report.json").read_bytes()
+    )
+    assert any(c["owner"] == "policy" and c["status"] == "sent" for c in recorded["commands"])
+    assert all(not any(c["sent"].values()) for c in recorded["commands"])
+    review = result.summary["evaluation"]
+    assert all(e["status"] == "bound_diagnostic" for e in review["executions"])
+    assert review["verified_starts"] == 0
+    assert review["metrics"]["all_attempts"] == 2
+    assert all("nonzero policy command" in str(s["reasons"]) for s in review["starts"])
+
+
 def test_failed_driver_open_retains_the_started_slot_and_its_unknown_start(tmp_path, policy):
     class FailedSecondDriver(Batch):
         def driving(self, slot_id, ready_state):
@@ -281,7 +303,7 @@ class CompletingGame(PacketGame):
 
     def read(self, period_s):
         point = super().read(period_s)
-        command = self.sent[-1][1] if self.sent else None
+        command = next((c for sent_ns, c in reversed(self.sent) if sent_ns <= point.at_ns), None)
         speed = 3.5 if command and command.throttle_u8 and self.position < 3 else 0.0
         if self.previous_ns is not None:
             self.position = min(3.0, self.position + speed * (point.at_ns - self.previous_ns) / 1e9)

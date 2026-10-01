@@ -256,13 +256,15 @@ def review_start(
             raise ValueError("First driving telemetry does not confirm a fresh stationary handoff")
         report = read_realtime_recording(ledger_dir / execution_binding["directory"])
         commands = [
-            c for c in report["commands"] if c["owner"] == "policy" and c["status"] == "sent"
+            c
+            for c in report["commands"]
+            if c["owner"] == "policy" and c["status"] == "sent" and any(c["sent"].values())
         ]
         if (
             not commands
             or not first["received_monotonic_ns"] <= commands[0]["issued_ns"] <= checked + bound
         ):
-            raise ValueError("No acknowledged policy command after the confirmed handoff")
+            raise ValueError("No acknowledged nonzero policy command within the handoff deadline")
         before_command = [
             s for s in recording.samples if s["received_monotonic_ns"] <= commands[0]["issued_ns"]
         ]

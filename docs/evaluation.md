@@ -112,7 +112,7 @@ uv run --locked fh5 evaluation-review --batch runs/evaluation-001 --ledger runs/
 
 独立 `evaluation-review` 从实际像素重新匹配菜单配方，核对每步操作前两张不同的新鲜画面、最后菜单动作之后的两张驾驶画面与停车遥测，并核对就绪之后的成功解除日志，不只相信汇总旗标。随后检查首个驾驶包至首个成功策略命令之间的全部已收遥测：原车、位置、中立输入、时间顺序、最后遥测年龄及交接期限。画面和准备遥测的年龄上限为 500 ms；这是有界菜单确认的规则，与实时 actor 图像契约分别处理。运行时和独立审核都会检查交接是否过期。
 
-报告 `starts` 和 `verified_starts` 区分 `not_required`、`verified`、`quarantined`。通过仅移除对应首次尝试的 `automatic_start_unverified` 缺口；墙壁、捷径、接管、条件和几何证据仍各自检查。缺失、改写、错槽或超时的准备记录不能得到有效自动起跑，尝试不从分母消失。单独 `attempt-review` 没有完整批次/执行绑定，自动起跑仍待核验。
+报告 `starts` 和 `verified_starts` 区分 `not_required`、`verified`、`quarantined`。其中 `first_policy_command_ns` 指首条成功非零策略命令；初始中立命令不结束检查窗口，只有中立命令的记录不认证自动起跑。通过仅移除对应首次尝试的 `automatic_start_unverified` 缺口；墙壁、捷径、接管、条件和几何证据仍各自检查。缺失、改写、错槽或超时的准备记录不能得到有效自动起跑，尝试不从分母消失。单独 `attempt-review` 没有完整批次/执行绑定，自动起跑仍待核验。
 
 自动起跑使用 `local-validity-v3`，人工置位继续使用 v2；旧结果不追认。`valid_complete` 和 `record_eligible` 仍只表示局部审核结果，`unattended`、`closed_loop_validated`、自动晋升及全程完赛能力不由此放行。当前运行适配器仅为合成来源，实际验证与局限见[自动起跑记录](validation/t09-automatic-start.md)。
 
