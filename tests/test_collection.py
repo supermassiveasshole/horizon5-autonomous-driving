@@ -8,6 +8,7 @@ import threading
 import time
 from dataclasses import replace
 from itertools import count
+from pathlib import Path
 
 import pytest
 from test_demonstrations import profile_file, raw_input
@@ -235,6 +236,35 @@ def test_crash_like_missing_final_and_partial_tail_keep_prior_blocks_readable(tm
     assert result["verified_blocks"] == 5 and result["errors"] == []
     assert result["active_blocks_ignored"] == 1 and not result["complete"]
     assert result["recovery"] == "sealed_blocks_only; final tail size unknown"
+
+
+@pytest.mark.parametrize("final_present", [False, True])
+def test_busy_progress_snapshot_preserves_sealed_blocks_without_claiming_completion(
+    tmp_path, monkeypatch, final_present
+):
+    req = request(tmp_path)
+    run_experiment(req, collection_environment=Stream(input_at(ms) for ms in range(250, 951, 50)))
+    if not final_present:
+        (req.output_dir / "final.json").rename(req.output_dir / "held-final.json")
+    original_open = Path.open
+
+    def sharing_conflict(path, mode="r", *args, **kwargs):
+        if path == req.output_dir / "index.json" and mode == "rb":
+            raise PermissionError("progress index is being atomically replaced")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", sharing_conflict)
+    result = run_experiment(CollectionReview(req.output_dir, tmp_path / "review.html")).summary[
+        "collection"
+    ]
+    assert result["verified_blocks"] == 5 and result["rows"] == 15
+    assert not result["complete"] and not result["training_eligible"]
+    if final_present:
+        assert result["errors"] and result["errors"][0]["file"] == "index.json"
+    else:
+        assert result["errors"] == []
+        assert result["unavailable_snapshots"][0]["file"] == "index.json"
+        assert result["recovery"] == "sealed_blocks_only; final tail size unknown"
 
 
 def test_status_and_stop_work_while_stream_is_running_and_flush_the_tail(tmp_path):

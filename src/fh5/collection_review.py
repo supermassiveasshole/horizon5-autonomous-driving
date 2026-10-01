@@ -107,6 +107,15 @@ def review_collection(request: CollectionReview) -> RunResult:
             references[name] = _references(document, binding)
             if name == "final.json":
                 final = document
+        except PermissionError as error:
+            if name == "index.json" and not result["final_status_present"]:
+                # Progress is replaceable while collection is open. Validate
+                # immutable blocks independently; the unsealed tail stays unknown.
+                result.setdefault("unavailable_snapshots", []).append(
+                    {"file": name, "error": str(error)}
+                )
+            else:
+                result["errors"].append({"file": name, "error": str(error)})
         except (OSError, ValueError, KeyError, TypeError) as error:
             result["errors"].append({"file": name, "error": str(error)})
     blocks = sorted((root / "blocks").iterdir())
