@@ -162,6 +162,7 @@ def test_slow_device_creation_never_sends_an_expired_prediction(tmp_path, numeri
     assert not controller.active.is_set()
     assert controller.closed and capture.closed and telemetry.closed and r["resources_released"]
     assert "stale_telemetry" in r["stop_reason"]
+    assert r["environment"]["controller_sends"] == len(controller.commands) == 1
 
 
 def test_native_control_requires_explicit_opt_in_before_opening_devices(
@@ -252,3 +253,40 @@ def test_native_recording_replay_never_reexecutes_driver_calls(tmp_path, numeric
     assert replay["source_evidence_kind"] == "native"
     assert replay["commands_sent_to_game"] is False
     assert controller.commands == before and controller.closed
+
+
+def test_device_acquisition_failure_retains_failed_release_evidence(
+    tmp_path, numeric_driving_model, monkeypatch
+):
+    acquired = threading.Event()
+    thread_start = threading.Thread.start
+
+    def unavailable_after_acquisition(thread):
+        if acquired.is_set():
+            raise OSError("OS thread capacity exhausted")
+        thread_start(thread)
+
+    class FailingDetach(Controller):
+        def close(self):
+            raise OSError("device still attached")
+
+    controller = FailingDetach()
+
+    def acquire():
+        acquired.set()
+        return controller
+
+    request, env, _, capture, telemetry = setup_drive(tmp_path, factory=acquire)
+    monkeypatch.setattr(threading.Thread, "start", unavailable_after_acquisition)
+    r = run_experiment(
+        request,
+        realtime_environment=env,
+        numeric_actor_factory=lambda: FrozenNumericActor(
+            numeric_driving_model, request.config.pixels
+        ),
+    ).summary["realtime"]
+    assert acquired.is_set() and not controller.active.is_set()
+    assert not r["resources_released"]
+    assert r["environment"]["controller_created"]
+    assert "device still attached" in r["environment"]["controller"]["close_error"]
+    assert capture.closed and telemetry.closed

@@ -28,6 +28,7 @@ class NumericDrivingEnvironment:
         self.controller_factory = controller_factory
         self.source_kind = source_kind
         self.control: LiveEnvironment | None = None
+        self.controller: Controller | None = None
         self.latest: TimelineInput | None = None
         self._lock = threading.Lock()
         self._closed = False
@@ -67,14 +68,12 @@ class NumericDrivingEnvironment:
             self.latest = value
             if self.control is None and value.observation is not None:
                 self._check_ready(creating=True)
-                controller = self.controller_factory()
-                try:
-                    self.control = LiveEnvironment(
-                        None, controller, self.observations.desktop, monitor_idle=True
-                    )
-                except BaseException:
-                    controller.close()
-                    raise
+                self.controller = self.controller_factory()
+                # Keep ownership even if watchdog thread creation fails. close()
+                # must still release this acquired device and preserve errors.
+                self.control = LiveEnvironment(
+                    None, self.controller, self.observations.desktop, monitor_idle=True
+                )
                 # Device creation can be slow. No prediction precedes this call,
                 # and the runner will check the returned observation's age again.
                 self._check_ready(creating=True)
@@ -108,11 +107,12 @@ class NumericDrivingEnvironment:
                 return self._result
             self._closed = True
             release: dict[str, Any] = {
-                "created": self.control is not None,
+                "created": self.controller is not None,
                 "resources_released": True,
                 "events": [],
             }
-            if self.control:
+            output = self.control or self.controller
+            if output:
                 for _ in range(3):
                     event: dict[str, Any] = {
                         "owner": "adapter_shutdown",
@@ -120,7 +120,7 @@ class NumericDrivingEnvironment:
                         "status": "failed",
                     }
                     try:
-                        self.control.send(NEUTRAL)
+                        output.send(NEUTRAL)
                         event["status"] = "sent"
                     except Exception as error:
                         event["error"] = str(error)
@@ -130,21 +130,26 @@ class NumericDrivingEnvironment:
                     if event["status"] == "sent":
                         break
                 try:
-                    self.control.close()
+                    output.close()
                 except Exception as error:
                     release.update(resources_released=False, close_error=str(error))
-                release["watchdog_events"] = list(self.control.events)
+                release["watchdog_events"] = list(self.control.events) if self.control else []
             # Release the actuator before joining capture workers or flushing data.
             try:
                 result = self.observations.close()
             except Exception as error:
                 result = {"resources_released": False, "close_error": str(error)}
+            release_events = release["events"] + release.get("watchdog_events", [])
             result.update(
                 mode="numeric_driving",
-                controller_created=self.control is not None,
+                controller_created=self.controller is not None,
                 controller=release,
-                controller_sends=self.sent_count,
-                controller_send_failures=self.failed_count,
+                controller_sends=self.sent_count
+                + sum(e["status"] == "sent" for e in release_events),
+                controller_send_failures=self.failed_count
+                + sum(e["status"] == "failed" for e in release_events),
+                runtime_send_returns=self.sent_count,
+                runtime_send_errors=self.failed_count,
                 resources_released=bool(
                     result["resources_released"] and release["resources_released"]
                 ),
