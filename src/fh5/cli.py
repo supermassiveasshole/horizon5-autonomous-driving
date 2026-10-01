@@ -32,7 +32,7 @@ from fh5.vision import VisionRecord
 
 
 def _sac(args: argparse.Namespace) -> int:
-    from fh5.sac import SACCriticReplay, SACCriticWarmup
+    from fh5.sac import SACCriticReplay, SACCriticResume, SACCriticWarmup
     from fh5.sac_actions import ActionBounds
     from fh5.sac_learning import SACPolicyReplay, SACResume, SACTrain
     from fh5.sac_replay import SACReplayPrepare
@@ -79,7 +79,11 @@ def _sac(args: argparse.Namespace) -> int:
         ).summary["sac_replay"]
         print(json.dumps(summary, ensure_ascii=False))
         return 0 if summary["eligible_transitions"] else 4
-    if args.mode == "sac-warmup":
+    if args.mode == "sac-warmup-resume":
+        result = run_experiment(
+            SACCriticResume(args.checkpoint, args.output, args.steps, args.checkpoint_sha256)
+        )
+    elif args.mode == "sac-warmup":
         bounds = (
             ActionBounds(**json.loads(args.bounds.read_text(encoding="utf-8-sig")))
             if args.bounds
@@ -101,7 +105,7 @@ def _sac(args: argparse.Namespace) -> int:
     else:
         result = run_experiment(SACCriticReplay(args.checkpoint, args.replay, args.report))
     print(json.dumps(result.summary["sac"], ensure_ascii=False))
-    return 0
+    return 4 if result.summary["sac"]["stop_reason"] == "stop_requested" else 0
 
 
 def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:
@@ -188,6 +192,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     sac_warmup.add_argument("--learning-rate", type=float, default=0.0001)
     sac_warmup.add_argument("--seed", type=int, default=7)
     sac_warmup.add_argument("--bounds", type=Path)
+    warm_resume = commands.add_parser(
+        "sac-warmup-resume", help="Resume remaining finite Q warm-up; no devices"
+    )
+    warm_resume.add_argument("--checkpoint", type=Path, required=True)
+    warm_resume.add_argument("--output", type=Path, required=True)
+    warm_resume.add_argument(
+        "--steps", type=int, help="Cap this segment's updates; omitted finishes remaining budget"
+    )
+    warm_resume.add_argument(
+        "--checkpoint-sha256", help="Require this exact parent manifest digest"
+    )
     sac_replay = commands.add_parser(
         "sac-critic-replay", help="Reload frozen BC and warmed critics without updating"
     )
@@ -565,6 +580,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.mode in (
             "sac-prepare",
             "sac-warmup",
+            "sac-warmup-resume",
             "sac-critic-replay",
             "sac-train",
             "sac-resume",

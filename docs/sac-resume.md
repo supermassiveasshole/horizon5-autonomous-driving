@@ -4,6 +4,8 @@
 
 跨进程停止、移动快照续训及连续训练对照见[本次验证记录](validation/t12-sac-resume.md)。
 
+尚处于 Q 预热阶段时，使用 [SACCriticResume / sac-warmup-resume](critic-resume.md)；该入口消耗原预热预算的剩余部分，不能像 SAC 续训那样追加总预算。完成预热后再交接 SAC，并保留预热历史。
+
 ## 使用
 
 ```powershell

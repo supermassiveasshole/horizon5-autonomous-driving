@@ -8,9 +8,9 @@ import importlib
 import json
 import math
 import time
+from collections.abc import Callable
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
-from io import BytesIO
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -20,6 +20,13 @@ from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import PixelContract
 from fh5.numeric_recording import read_numeric_frame
 from fh5.sac_actions import ActionBounds
+from fh5.sac_checkpoint import (
+    continuation_history,
+    critic_resume_contract,
+    read_critic_checkpoint,
+    seal_experience,
+    state_digest,
+)
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -43,6 +50,14 @@ class SACCriticReplay:
     checkpoint_dir: Path
     replay_file: Path
     report_path: Path
+
+
+@dataclass(frozen=True)
+class SACCriticResume:
+    checkpoint_dir: Path
+    output_dir: Path
+    steps: int | None = None
+    expected_checkpoint_sha256: str | None = None
 
 
 def _q_heads(torch: Any, width: int) -> Any:
@@ -81,34 +96,94 @@ def _task_features(state: dict[str, Any], context: dict[str, Any]) -> list[float
     return result
 
 
-def run_critic(request: SACCriticWarmup | SACCriticReplay) -> RunResult:
+def run_critic(
+    request: SACCriticWarmup | SACCriticReplay | SACCriticResume,
+    stop_requested: Callable[[int], bool] | None = None,
+) -> RunResult:
+    if isinstance(request, SACCriticReplay):
+        if request.report_path.exists() or request.report_path.is_symlink():
+            raise FileExistsError(request.report_path)
+        if request.report_path.suffix.lower() != ".html":
+            raise ValueError("Critic replay requires a new HTML report")
     torch = importlib.import_module("torch")
     with preserve_torch_state(torch):
         torch.set_num_threads(2)
-        return _run(request, torch)
+        torch.use_deterministic_algorithms(True)
+        return _run(request, torch, stop_requested)
 
 
-def _run(request: SACCriticWarmup | SACCriticReplay, torch: Any) -> RunResult:
+def _run(
+    operation: SACCriticWarmup | SACCriticReplay | SACCriticResume,
+    torch: Any,
+    stop_requested: Callable[[int], bool] | None,
+) -> RunResult:
     from fh5.experiment import RunResult
 
+    request: SACCriticWarmup | SACCriticReplay
+    saved = None
+    start_step = 0
+    history: list[dict[str, Any]] = []
+    history_blobs: dict[str, bytes] = {}
+    continuation = None
+    if isinstance(operation, SACCriticResume):
+        manifest, saved, parent_bytes = read_critic_checkpoint(torch, operation.checkpoint_dir)
+        parent_sha = hashlib.sha256(parent_bytes).hexdigest()
+        if operation.expected_checkpoint_sha256 is not None and (
+            operation.expected_checkpoint_sha256 != parent_sha
+        ):
+            raise ValueError("Critic continuation differs from its expected parent checkpoint")
+        if manifest["version"] != 2:
+            raise ValueError("Critic continuation requires a sealed version 2 checkpoint")
+        history, history_blobs = continuation_history(
+            operation.checkpoint_dir, manifest, parent_bytes
+        )
+        configuration = manifest["configuration"]
+        start_step, phase_budget = saved["step"], configuration["steps"]
+        remaining = phase_budget - start_step
+        steps = remaining if operation.steps is None else operation.steps
+        if type(steps) is not int or not 0 <= steps <= remaining:
+            raise ValueError("Critic continuation exceeds remaining warm-up budget")
+        request = SACCriticWarmup(
+            operation.checkpoint_dir / "actor",
+            operation.checkpoint_dir / "experience/replay.json",
+            manifest["replay_sha256"],
+            operation.output_dir,
+            steps,
+            configuration["batch_size"],
+            configuration["learning_rate"],
+            configuration["seed"],
+            ActionBounds(**manifest["bounds"]),
+        )
+        continuation = {"parent_checkpoint_sha256": parent_sha, "parent_step": start_step}
+    else:
+        request = operation
+        if isinstance(request, SACCriticReplay):
+            manifest, saved, _ = read_critic_checkpoint(torch, request.checkpoint_dir)
+            phase_budget = manifest["configuration"]["steps"]
+            start_step = saved.get("step", phase_budget)
+        else:
+            phase_budget = request.steps
     training = isinstance(request, SACCriticWarmup)
     if isinstance(request, SACCriticWarmup):
         if request.output_dir.exists():
             raise FileExistsError(request.output_dir)
         if (
             type(request.steps) is not int
-            or not 1 <= request.steps <= 10_000
+            or not 0 <= request.steps <= 10_000
+            or not 1 <= phase_budget <= 10_000
             or type(request.batch_size) is not int
             or not 1 <= request.batch_size <= 256
             or not 0 < request.learning_rate <= 0.01
         ):
             raise ValueError("Critic warm-up needs bounded steps, batch and learning rate")
+        sources = [request.model_dir, request.replay_file.parent]
+        if isinstance(operation, SACCriticResume):
+            sources.append(operation.checkpoint_dir)
+        if any(request.output_dir.resolve().is_relative_to(p.resolve()) for p in sources):
+            raise ValueError("Critic output must be outside its frozen sources")
         expected, model_dir, bounds = request.replay_sha256, request.model_dir, request.bounds
         torch.manual_seed(request.seed)
     else:
-        manifest = json.loads(read_bounded(request.checkpoint_dir / "critic.json", 1024**2))
-        if manifest.get("version") != 1 or manifest.get("stage") != "critic_warmup":
-            raise ValueError("Unsupported critic checkpoint version or stage")
         expected, model_dir = manifest["replay_sha256"], request.checkpoint_dir / "actor"
         bounds = ActionBounds(**manifest["bounds"])
     raw = read_bounded(request.replay_file, 128 * 1024**2)
@@ -123,7 +198,7 @@ def _run(request: SACCriticWarmup | SACCriticReplay, torch: Any) -> RunResult:
         name: read_bounded(model_dir / name, 256 * 1024**2) for name in ("model.json", "actor.pt")
     }
     model_digest = hashlib.sha256(model_payload["model.json"]).hexdigest()
-    if not training and model_digest != manifest["actor_manifest_sha256"]:
+    if saved is not None and model_digest != manifest["actor_manifest_sha256"]:
         raise ValueError("Critic's frozen BC manifest changed")
     actor = FrozenNumericActor(model_dir, pixels, expected_manifest_sha256=model_digest)
     if hashlib.sha256(model_payload["actor.pt"]).hexdigest() != actor.manifest["weights_sha256"]:
@@ -219,13 +294,39 @@ def _run(request: SACCriticWarmup | SACCriticReplay, torch: Any) -> RunResult:
     )
     critic = _q_heads(torch, state_tensor.shape[1])
     target = deepcopy(critic)
+    if saved is not None:
+        if set(saved["target_encoder"]) != set(original) or any(
+            not torch.equal(original[k], saved["target_encoder"][k]) for k in original
+        ):
+            raise ValueError("Warm-up target encoder differs from the frozen BC")
+        critic.load_state_dict(saved["critic"], strict=True)
+        target.load_state_dict(saved["target"], strict=True)
     with torch.no_grad():
         before_q = _values(torch, critic, state_tensor, command_tensor)
-    losses, target_values = [], []
+    losses, target_values, updates = [], [], []
     started = time.monotonic()
+    stop_reason = "budget_completed" if training else "frozen_replay"
     if isinstance(request, SACCriticWarmup):
+        output = request.output_dir
+        output.mkdir(parents=True)
+        experience = seal_experience(raw, request.replay_file, output / "experience")
+        (output / "actor").mkdir()
+        for name, value in model_payload.items():
+            write_file(output / "actor" / name, value)
+        for name, value in history_blobs.items():
+            destination = output / name
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            write_file(destination, value)
         optimizer = torch.optim.Adam(critic.parameters(), lr=request.learning_rate)
-        for _ in range(request.steps):
+        if saved is not None:
+            optimizer.load_state_dict(saved["optimizer"])
+            torch.set_rng_state(saved["rng"])
+        for step in range(start_step, start_step + request.steps):
+            if (output / "stop.request").exists() or (
+                stop_requested is not None and stop_requested(step)
+            ):
+                stop_reason = "stop_requested"
+                break
             indices = torch.randperm(len(current))[: request.batch_size]
             with torch.no_grad():
                 boot = (
@@ -246,17 +347,14 @@ def _run(request: SACCriticWarmup | SACCriticReplay, torch: Any) -> RunResult:
                     destination.lerp_(source, 0.005)
             losses.append(float(loss.item()))
             target_values.append(expected_value.tolist())
-    else:
-        checkpoint = read_bounded(request.checkpoint_dir / "critic.pt", 256 * 1024**2)
-        if hashlib.sha256(checkpoint).hexdigest() != manifest["weights_sha256"]:
-            raise ValueError("Critic checkpoint hash mismatch")
-        saved = torch.load(BytesIO(checkpoint), map_location="cpu", weights_only=True)
-        if set(saved["target_encoder"]) != set(original) or any(
-            not torch.equal(original[k], saved["target_encoder"][k]) for k in original
-        ):
-            raise ValueError("Warm-up target encoder differs from the frozen BC")
-        critic.load_state_dict(saved["critic"], strict=True)
-        target.load_state_dict(saved["target"], strict=True)
+            updates.append(
+                {
+                    "step": step + 1,
+                    "transition_ids": [replay["transitions"][i]["id"] for i in indices.tolist()],
+                    "loss": losses[-1],
+                    "targets": target_values[-1],
+                }
+            )
     with torch.no_grad():
         after_q = _values(torch, critic, state_tensor, command_tensor)
     if not torch.isfinite(after_q).all():
@@ -270,7 +368,14 @@ def _run(request: SACCriticWarmup | SACCriticReplay, torch: Any) -> RunResult:
         raise ValueError("Critic warm-up changed the frozen actor")
     summary = {
         "stage": "critic_warmup",
-        "steps_completed": request.steps if isinstance(request, SACCriticWarmup) else 0,
+        "steps_requested": request.steps if isinstance(request, SACCriticWarmup) else 0,
+        "steps_completed": len(updates),
+        "total_steps": start_step + len(updates),
+        "warmup_budget": phase_budget,
+        "warmup_remaining_steps": phase_budget - start_step - len(updates),
+        "phase_status": "complete" if start_step + len(updates) == phase_budget else "warming",
+        "stop_reason": stop_reason,
+        "updates": updates,
         "actor_optimizer_steps": 0,
         "actor_change_max": actor_change,
         "q_change_max": float((after_q - before_q).abs().max()) if training else None,
@@ -288,21 +393,14 @@ def _run(request: SACCriticWarmup | SACCriticReplay, torch: Any) -> RunResult:
         "real_driving_validated": False,
     }
     if isinstance(request, SACCriticWarmup):
-        output = request.output_dir
-        output.mkdir(parents=True)
-        (output / "actor").mkdir()
-        for name in ("actor.pt", "model.json"):
-            write_file(output / "actor" / name, model_payload[name])
-        torch.save(
-            {
-                "critic": critic.state_dict(),
-                "target": target.state_dict(),
-                "target_encoder": original,
-                "optimizer": optimizer.state_dict(),
-                "rng": torch.get_rng_state(),
-            },
-            output / "critic.pt",
-        )
+        state = {
+            "critic": critic.state_dict(),
+            "target": target.state_dict(),
+            "target_encoder": original,
+            "optimizer": optimizer.state_dict(),
+            "rng": torch.get_rng_state(),
+            "step": start_step + len(updates),
+        }
         reloaded = FrozenNumericActor(
             output / "actor", pixels, expected_manifest_sha256=model_digest
         )
@@ -314,38 +412,47 @@ def _run(request: SACCriticWarmup | SACCriticReplay, torch: Any) -> RunResult:
         if reloaded.manifest != actor.manifest or reload_error > 1e-6:
             raise ValueError("Frozen BC changed during checkpoint publication")
         summary["reload_max_abs_error"] = reload_error
+        summary["learner_state_sha256"] = state_digest(torch, state)
         # Training diagnostics grow with steps/transitions. Keep them outside
         # the small checkpoint manifest consumed by reload and later resume.
         diagnostic_payload = encode(summary)
         write_file(output / "training-report.json", diagnostic_payload)
         manifest = {
-            "version": 1,
+            "version": 2,
             "stage": "critic_warmup",
             "bounds": asdict(bounds),
             "command_quantization": "clamp-then-round-nearest-even-v1",
             "replay_sha256": expected,
             "actor_manifest_sha256": model_digest,
             "configuration": {
-                "steps": request.steps,
+                "steps": phase_budget,
                 "batch_size": request.batch_size,
                 "learning_rate": request.learning_rate,
                 "seed": request.seed,
                 "target_tau": 0.005,
                 "device": "cpu",
             },
-            "weights_sha256": hashlib.sha256((output / "critic.pt").read_bytes()).hexdigest(),
-            "report_file": "training-report.json",
-            "report_sha256": hashlib.sha256(diagnostic_payload).hexdigest(),
+            "training_report_sha256": hashlib.sha256(diagnostic_payload).hexdigest(),
+            "learner_state_sha256": summary["learner_state_sha256"],
+            "experience": experience,
+            "continuation": continuation,
+            "history": history,
+            "resume_contract": critic_resume_contract(torch),
         }
-        write_file(output / "critic.json", encode(manifest))
+        torch.save({"metadata": manifest, **state}, output / "critic.pt")
+        manifest["weights_sha256"] = hashlib.sha256((output / "critic.pt").read_bytes()).hexdigest()
         report = output / "report.html"
     else:
         report = request.report_path
     report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(
-        '<!doctype html><meta charset="utf-8"><h1>BC 冻结与双 Q 预热</h1><pre>'
-        + html.escape(json.dumps(summary, ensure_ascii=False, indent=2))
-        + "</pre>",
-        encoding="utf-8",
+    write_file(
+        report,
+        (
+            '<!doctype html><meta charset="utf-8"><h1>BC 冻结与双 Q 预热</h1><pre>'
+            + html.escape(json.dumps(summary, ensure_ascii=False, indent=2))
+            + "</pre>"
+        ).encode("utf-8"),
     )
+    if isinstance(request, SACCriticWarmup):
+        write_file(output / "critic.json", encode(manifest))
     return RunResult({}, [], [], {"sac": summary}, report)

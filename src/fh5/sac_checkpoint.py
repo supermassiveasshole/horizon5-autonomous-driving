@@ -63,6 +63,63 @@ def read_checkpoint(torch: Any, root: Path) -> tuple[dict[str, Any], dict[str, A
     return manifest, saved, raw
 
 
+def critic_resume_contract(torch: Any) -> dict[str, Any]:
+    return {
+        "stage": "critic_warmup",
+        "device": "cpu",
+        "torch_version": str(torch.__version__),
+        "threads": 2,
+        "deterministic_algorithms": True,
+        "optimizer_owners": {"critic": ["critic"]},
+        "actor": "entire BC frozen, including encoder and normalization",
+        "state_digest": "canonical-cpu-tensors-v1",
+        "phase_budget": "fixed total updates; resume consumes remaining budget",
+        "sampling": "uniform without replacement within each batch",
+        "imitation_schedule": "not_implemented",
+        "auxiliary_components": [],
+        "environment_state": "not_restored; new attempt required",
+    }
+
+
+def read_critic_checkpoint(torch: Any, root: Path) -> tuple[dict[str, Any], dict[str, Any], bytes]:
+    raw = read_bounded(root / "critic.json", 1024**2)
+    manifest = json.loads(raw)
+    if manifest.get("version") not in (1, 2) or manifest.get("stage") != "critic_warmup":
+        raise ValueError("Unsupported critic checkpoint version or stage")
+    payload = read_bounded(root / "critic.pt", 256 * 1024**2)
+    if hashlib.sha256(payload).hexdigest() != manifest["weights_sha256"]:
+        raise ValueError("Critic checkpoint hash mismatch")
+    saved: dict[str, Any] = torch.load(BytesIO(payload), map_location="cpu", weights_only=True)
+    if manifest["version"] == 2:
+        if saved.get("metadata") != {k: v for k, v in manifest.items() if k != "weights_sha256"}:
+            raise ValueError("Critic checkpoint metadata mismatch")
+        if manifest["resume_contract"] != critic_resume_contract(torch):
+            raise ValueError("Unsupported critic continuation contract or Torch runtime")
+        config = manifest["configuration"]
+        if (
+            set(config) != {"steps", "batch_size", "learning_rate", "seed", "target_tau", "device"}
+            or config["target_tau"] != 0.005
+            or config["device"] != "cpu"
+        ):
+            raise ValueError("Unsupported critic configuration")
+        report = read_bounded(root / "training-report.json", 128 * 1024**2)
+        if hashlib.sha256(report).hexdigest() != manifest["training_report_sha256"]:
+            raise ValueError("Critic training report changed")
+        if (
+            state_digest(torch, {k: v for k, v in saved.items() if k != "metadata"})
+            != manifest["learner_state_sha256"]
+        ):
+            raise ValueError("Critic learner state mismatch")
+        budget = manifest["configuration"]["steps"]
+        if (
+            type(budget) is not int
+            or not 1 <= budget <= 10_000
+            or (type(saved["step"]) is not int or not 0 <= saved["step"] <= budget)
+        ):
+            raise ValueError("Invalid finite critic warm-up progress")
+    return manifest, saved, raw
+
+
 def continuation_history(
     root: Path, manifest: dict[str, Any], raw: bytes
 ) -> tuple[list[dict[str, Any]], dict[str, bytes]]:

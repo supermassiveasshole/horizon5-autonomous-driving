@@ -12,7 +12,6 @@ from collections.abc import Callable
 from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
-from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
@@ -27,6 +26,7 @@ from fh5.sac_actor import FrozenSAC
 from fh5.sac_checkpoint import (
     continuation_history,
     read_checkpoint,
+    read_critic_checkpoint,
     resume_contract,
     seal_experience,
     state_digest,
@@ -188,10 +188,11 @@ def _train(
         raise ValueError("Invalid bounded SAC learning configuration")
     torch.manual_seed(request.seed)
     if restored is None:
-        warm_bytes = read_bounded(request.warmup_dir / "critic.json", 1024**2)
-        warm = json.loads(warm_bytes)
-        if (warm.get("version"), warm.get("stage")) != (1, "critic_warmup"):
-            raise ValueError("SAC updates require a frozen-BC critic warm-up")
+        warm, initial_critic, warm_bytes = read_critic_checkpoint(torch, request.warmup_dir)
+        if warm["version"] == 2 and initial_critic["step"] != warm["configuration"]["steps"]:
+            raise ValueError("Finish finite critic warm-up before starting SAC updates")
+        if warm["version"] == 2:
+            history, history_blobs = continuation_history(request.warmup_dir, warm, warm_bytes)
         warm_sha = hashlib.sha256(warm_bytes).hexdigest()
         bc_dir = request.warmup_dir / "actor"
     else:
@@ -213,10 +214,7 @@ def _train(
     ):
         raise ValueError("BC bytes changed while loading SAC initialization")
     if restored is None:
-        payload = read_bounded(request.warmup_dir / "critic.pt", 256 * 1024**2)
-        if hashlib.sha256(payload).hexdigest() != warm["weights_sha256"]:
-            raise ValueError("Warm-up checkpoint changed")
-        saved = torch.load(BytesIO(payload), map_location="cpu", weights_only=True)
+        saved = initial_critic
         if any(
             not torch.equal(v, saved["target_encoder"][k]) for k, v in bc.model.state_dict().items()
         ):

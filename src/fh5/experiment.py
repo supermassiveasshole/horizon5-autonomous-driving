@@ -88,7 +88,7 @@ from fh5.routes import (
     load_route,
     locate_route,
 )
-from fh5.sac import SACCriticReplay, SACCriticWarmup, run_critic
+from fh5.sac import SACCriticReplay, SACCriticResume, SACCriticWarmup, run_critic
 from fh5.sac_cycle import SACCycle, SACEnvironment, run_sac_cycle
 from fh5.sac_learning import (
     SACPolicyReplay,
@@ -275,6 +275,7 @@ def run_experiment(
     | SACReplayPrepare
     | SACCriticWarmup
     | SACCriticReplay
+    | SACCriticResume
     | SACTrain
     | SACCycle
     | SACResume
@@ -402,8 +403,8 @@ def run_experiment(
         if sac_environment is None:
             raise ValueError("SAC cycle requires an explicit synthetic environment")
         return run_sac_cycle(request, sac_environment)
-    if isinstance(request, (SACCriticWarmup, SACCriticReplay)):
-        return run_critic(request)
+    if isinstance(request, (SACCriticWarmup, SACCriticReplay, SACCriticResume)):
+        return run_critic(request, sac_stop_requested)
     if isinstance(request, (SACTrain, SACResume)):
         return run_sac_training(request, sac_stop_requested)
     if isinstance(request, SACPolicyReplay):

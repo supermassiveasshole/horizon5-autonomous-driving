@@ -22,7 +22,7 @@
 
 动作边界先按连续坐标计算，再沿用发送器的四舍六入五成双量化（Python `round`）；例如转向上限 0.5 实际发送 16384，对应约 0.5000153。replay 支持范围使用同一实际整数端点，不能因半格量化差异拒绝真实 BC 命令。连续或量化区间退化时显式拒绝，不构造不存在的分布。
 
-原始数值帧始终保存；预热缓存特征只属于当前冻结编码器。每次输出绑定 replay、BC 与 critic 权重摘要；保存 optimizer 和 RNG 供后续恢复接口使用。目前 `SACCriticReplay` 只加载核验，不继续训练。保存后重新加载 BC，比较同输入预测及所有原始模型状态，保证预热没有悄然改变驾驶输出。
+原始数值帧始终保存；预热缓存特征只属于当前冻结编码器。新预热快照版本 2 封存 replay、数值帧、BC、critic、optimizer、RNG 和训练历史，支持[停止后完成剩余预热预算](critic-resume.md)。`SACCriticReplay` 只加载核验，不继续训练。保存后重新加载 BC，比较同输入预测及所有原始模型状态，保证预热没有悄然改变驾驶输出。
 
 `critic.json` 只保存小型检查点清单；逐步 loss、目标和预测位于 `training-report.json`，避免诊断数据随训练增长后超过清单读取限制。暂停/恢复入口的独立终止调整归入最后一个可用转移；新的 epoch 或独立前向片段不继承旧命令约束。
 
@@ -33,6 +33,7 @@
 ```powershell
 uv run --locked fh5 sac-prepare --recording runs/synthetic/recording --trace runs/synthetic/trace.json --task runs/synthetic/task.json --reward runs/synthetic/reward.json --evidence runs/synthetic/evidence.json --output runs/sac-replay
 uv run --locked fh5 sac-warmup --model runs/temporal-bc --replay runs/sac-replay/replay.json --replay-sha256 <prepare返回的摘要> --output runs/critic-first --steps 100
+uv run --locked fh5 sac-warmup-resume --checkpoint runs/critic-first --output runs/critic-continued
 uv run --locked fh5 sac-critic-replay --checkpoint runs/critic-first --replay runs/sac-replay/replay.json --report runs/critic-reloaded.html
 uv run --locked fh5 sac-train --config configs/sac-learning.example.json --output runs/sac-candidate
 uv run --locked fh5 sac-resume --checkpoint runs/sac-candidate --output runs/sac-continued --steps 100
@@ -43,7 +44,7 @@ uv run --locked fh5 sac-policy-replay --checkpoint runs/sac-candidate --replay r
 
 ## 策略、温度与共享编码器更新
 
-`SACTrain` 从已保存的 BC/双 Q 预热检查点出发，采用固定经验和有限 CPU 更新预算。`steps=0` 可单独核对交接，不执行优化。新策略版本 `conditional-temporal-sac-v1` 保留原数值 Δt 输入，并向策略提供上一实际命令、实际间隔和可执行区间；任务进度/计时上下文仍只提供给 critic。
+`SACTrain` 从已保存的 BC/双 Q 预热检查点出发，采用固定经验和有限 CPU 更新预算。版本 2 预热必须完成原阶段预算后才允许交接；其历史清单与报告继续保留在 SAC 快照中。`steps=0` 可单独核对交接，不执行优化。新策略版本 `conditional-temporal-sac-v1` 保留原数值 Δt 输入，并向策略提供上一实际命令、实际间隔和可执行区间；任务进度/计时上下文仍只提供给 critic。
 
 策略把 BC 的受限动作转换为有限逆 tanh 均值，新增动作上下文均值修正和 log 标准差。初始修正为零，默认 log 标准差 −3，范围 [−5, −1]，以较窄高斯开始探索；饱和边界的均值留在同一整数命令格内。保存前报告所用经验上的 BC 交接整数命令误差。此检查不证明所有未知状态或实机驾驶相同。
 
