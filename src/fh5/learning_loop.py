@@ -223,17 +223,25 @@ class _Loop:
             if (
                 "storage" not in self.config
                 or state["phase"] != "stopped"
-                or state["stop_reason"] not in ("storage_budget_exhausted", "stop_requested")
+                or state["stop_reason"]
+                not in ("storage_budget_exhausted", "stop_requested", "interface_error")
                 or state["rounds"]
                 or any(role in state for role in ("default", "explorer", "latest_learner"))
+                or (self.root / "initial").exists()
             ):
                 raise ValueError("Incomplete learning initialization cannot be resumed")
             self.verify()
             state["interruptions"].append(
-                {"stop_reason": state["stop_reason"], "phase": "initializing", "error": None}
+                {
+                    "stop_reason": state["stop_reason"],
+                    "phase": "initializing",
+                    "error": state.get("error"),
+                }
             )
+            state.pop("error", None)
             state["resources_released"] = False
-            return self.initialize()
+            # Authenticate first; the caller enables failure publication before new work.
+            return True
         for key in ("default", "explorer", "latest_learner"):
             saved = state[key]
             if _learner(Path(saved["directory"]), saved["sha256"]) != saved:
@@ -722,6 +730,8 @@ def run_learning_loop(
         if isinstance(request, LearningContinue):
             ready = loop.restore(request.expected_state_sha256)
             publish = True
+            if loop.state.get("initialized", True) is False:
+                ready = loop.initialize()
         else:
             write_file(root / "config.json", encode(config))
             ready = loop.initialize()

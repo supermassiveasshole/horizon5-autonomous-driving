@@ -106,6 +106,43 @@ def test_capacity_is_rechecked_after_initialization_before_sampling(
     assert Path(result["latest_learner"]["directory"]).is_dir()
 
 
+def test_failed_initial_recheck_remains_stopped_and_can_be_retried(
+    tmp_path, tmp_path_factory, seeded_loop
+):
+    request = budget_request(tmp_path, seeded_loop, tmp_path_factory.getbasetemp())
+    usage = shutil.disk_usage(tmp_path)
+    with pytest.MonkeyPatch.context() as disk:
+        disk.setattr(shutil, "disk_usage", lambda _: usage._replace(free=0))
+        first = run_experiment(request, learning_environment=SharedBackend(seeded_loop[0])).summary[
+            "learning_loop"
+        ]
+    assert first["stop_reason"] == "storage_budget_exhausted"
+
+    def unavailable(_):
+        raise OSError("Disk capacity service unavailable")
+
+    backend = SharedBackend(seeded_loop[0])
+    with pytest.MonkeyPatch.context() as disk:
+        disk.setattr(shutil, "disk_usage", unavailable)
+        failed = run_experiment(
+            LearningContinue(request.output_dir, sha(request.output_dir / "state.json")),
+            learning_environment=backend,
+        ).summary["learning_loop"]
+    assert failed["stop_reason"] == "interface_error"
+    assert "Disk capacity service unavailable" in failed["error"]
+    assert failed["phase"] == "stopped" and failed["initialized"] is False
+    assert backend.leases == [] and backend.closed
+    with pytest.MonkeyPatch.context() as disk:
+        disk.setattr(shutil, "disk_usage", lambda _: usage._replace(free=0))
+        resumed = run_experiment(
+            LearningContinue(request.output_dir, sha(request.output_dir / "state.json")),
+            learning_environment=SharedBackend(seeded_loop[0]),
+        ).summary["learning_loop"]
+    assert resumed["stop_reason"] == "storage_budget_exhausted"
+    assert resumed["interruptions"][-1]["stop_reason"] == "interface_error"
+    assert not (request.output_dir / "initial").exists()
+
+
 @pytest.fixture
 def waiting_for_evaluation(tmp_path, tmp_path_factory, seeded_loop):
     request = budget_request(tmp_path, seeded_loop, tmp_path_factory.getbasetemp())
