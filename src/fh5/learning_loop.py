@@ -524,6 +524,23 @@ class _Loop:
             or not self.state["child_resources_released"]
         ):
             raise ValueError("Unsealed sampling cannot be automatically acknowledged")
+        summary_path = request.output_dir / "summary.json"
+        summary = json.loads(read_bounded(summary_path, 4 * 1024**2))
+        if self.config.get("sampling_retry", {}).get("max_retries", 0) and summary.get(
+            "stop_reason"
+        ) in ("sampling_fault", "no_eligible_experience", "stop_requested"):
+            if not retryable_sampling(request, self.state["latest_learner"], _sha(summary_path)):
+                raise ValueError("Pending sampling failure is not sealed, released and update-free")
+            self.accept_sampling(row, request.output_dir, summary)
+            self.state.setdefault("recoveries", []).append(
+                {
+                    "kind": "sealed_failed_sampling",
+                    "round": len(rows) - 1,
+                    "reason": summary["stop_reason"],
+                    "source_directory": str(request.output_dir),
+                }
+            )
+            return
         summary, learner = completed_sampling(request, self.state["latest_learner"])
         self.accept_sampling(row, request.output_dir, summary, learner)
         self.state.setdefault("recoveries", []).append(

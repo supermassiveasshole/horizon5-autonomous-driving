@@ -26,6 +26,7 @@ def interrupt_selection(
     failed_evaluation=False,
     parent_evidence=False,
     stopped_evaluation=False,
+    failed_sampling=False,
 ):
     repository = Path(__file__).resolve().parents[1]
     environment = dict(os.environ)
@@ -58,6 +59,9 @@ def replace(source, destination, *args, **kwargs):
             os._exit(73)
         if sys.argv[4] == 'before_learned' and value['phase'] == 'learned':
             os._exit(73)
+        if (sys.argv[4] == 'before_retried_failure' and value['phase'] == 'learned'
+                and value['rounds'][0].get('sampling_attempt') == 1):
+            os._exit(73)
         if sys.argv[4] == 'before_evaluation_ack' and value['phase'] == 'reviewing_evaluation':
             os._exit(73)
         if sys.argv[4] == 'before_evaluation_run' and value['phase'] == 'evaluating':
@@ -75,6 +79,13 @@ def open_file(path, *args, **kwargs):
     return original_open(path, *args, **kwargs)
 Path.open = open_file
 backend = SharedBackend(Path(sys.argv[3]))
+if sys.argv[5] == 'failed_sampling':
+    original_sampling = backend.sampling
+    def sampling(identity):
+        lease = original_sampling(identity)
+        lease.fail_at = 0
+        return lease
+    backend.sampling = sampling
 if sys.argv[5] == 'stopped_evaluation':
     from fh5.control import Command
     original_evaluation = backend.evaluation
@@ -142,6 +153,8 @@ raise SystemExit('Expected filesystem exit was not reached')
             if parent_evidence
             else "stopped_evaluation"
             if stopped_evaluation
+            else "failed_sampling"
+            if failed_sampling
             else "normal_trace",
         ],
         env=environment,

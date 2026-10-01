@@ -99,7 +99,18 @@ def retryable_sampling(request: SACCycle, parent: dict[str, Any], expected_summa
             or attempt.get("diagnostic_write_error")
         ):
             return False
-        verify_sampling_sources(attempt.get("source_assets", {}))
+        inventory = attempt.get("source_assets", {})
+        verify_sampling_sources(inventory)
+        count = attempt.get("received_packets")
+        if type(count) is not int or count < 0:
+            return False
+        attempt_dir = root / "attempt-000"
+        _require_originals(
+            attempt_dir,
+            inventory,
+            None,
+            trace_required=count > 0 or (attempt_dir / "trace.json").exists(),
+        )
     return True
 
 
@@ -107,7 +118,13 @@ def _sha(path: Path, limit: int = 4 * 1024**2) -> str:
     return hashlib.sha256(read_bounded(path, limit)).hexdigest()
 
 
-def _require_originals(root: Path, inventory: dict[str, str], sources: dict[str, Any]) -> None:
+def _require_originals(
+    root: Path,
+    inventory: dict[str, str],
+    sources: dict[str, Any] | None,
+    *,
+    trace_required: bool = True,
+) -> None:
     def require(path: Path, digest: str | None = None) -> None:
         stored = inventory.get(str(path.resolve()))
         if stored is None or (digest is not None and stored != digest):
@@ -120,12 +137,15 @@ def _require_originals(root: Path, inventory: dict[str, str], sources: dict[str,
         ("recording/packets.jsonl", "packets"),
         ("recording/session.json", "session"),
     ):
-        require(root / name, sources[key])
-    trace = json.loads(read_bounded(root / "trace.json", 32 * 1024**2))
-    for observation in trace["observations"]:
-        for frame in observation["frames"]:
-            require(asset(root, frame["path"]), frame["sha256"])
-    if sources["review"] is not None:
+        if name == "trace.json" and not trace_required:
+            continue
+        require(root / name, sources[key] if sources is not None else None)
+    if trace_required:
+        trace = json.loads(read_bounded(root / "trace.json", 32 * 1024**2))
+        for observation in trace["observations"]:
+            for frame in observation["frames"]:
+                require(asset(root, frame["path"]), frame["sha256"])
+    if sources is not None and sources["review"] is not None:
         proofs = [Path(name) for name, digest in inventory.items() if digest == sources["review"]]
         if not proofs:
             raise ValueError("Pending sampling inventory omits its independent review")
