@@ -123,8 +123,22 @@ def test_numeric_training_and_reload_preserve_actual_time_inputs(tmp_path):
     assert summary["training"]["reload_max_abs_error"] <= 1e-6
 
 
+@pytest.fixture
+def inference_threads(request):
+    torch = pytest.importorskip("torch")
+    previous = torch.get_num_threads()
+    torch.set_num_threads(request.param)
+    try:
+        yield
+    finally:
+        torch.set_num_threads(previous)
+
+
+@pytest.mark.parametrize("inference_threads", [1, 2], indirect=True)
 @pytest.mark.parametrize("mode", ["actual", "fixed"])
-def test_temporal_model_uses_same_features_in_live_numeric_seam_and_exact_replay(tmp_path, mode):
+def test_temporal_model_uses_same_features_in_live_numeric_seam_and_exact_replay(
+    tmp_path, mode, inference_threads
+):
     from fh5.numeric_actor import FrozenNumericActor
     from fh5.numeric_images import NumericDecision, NumericInfer, NumericReplay
     from fh5.numeric_recording import read_numeric_frame
@@ -160,7 +174,11 @@ def test_temporal_model_uses_same_features_in_live_numeric_seam_and_exact_replay
         numeric_inputs=[original, changed],
     )
     first, second = result.summary["numeric"]["decisions"]
-    assert first["prediction"] == trained.summary["temporal_bc"]["decisions"][0]["prediction"]
+    # Training uses two CPU threads; inference restores the caller's setting.
+    # Compare across kernels at the declared reload tolerance, not bit equality.
+    assert first["prediction"] == pytest.approx(
+        trained.summary["temporal_bc"]["decisions"][0]["prediction"], abs=1e-6, rel=0
+    )
     if mode == "actual":
         assert second["features"][-4:] == pytest.approx([0.12, 1, 0.08, 1])
         assert max(abs(a - b) for a, b in zip(first["prediction"], second["prediction"])) > 1e-7
