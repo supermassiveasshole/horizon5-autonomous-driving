@@ -54,4 +54,9 @@ class SACEvaluationActor:
             raise ValueError("Invalid successful command context")
         previous = command_action(context["sent"])
         elapsed = (decision.decision_ns - context["returned_ns"]) / 1e9
-        return list(self.frozen.predict(decision, previous, elapsed, [0.0, 0.0])["command"])
+        return list(
+            self.frozen.predict(decision, previous, elapsed, self._noise(decision))["command"]
+        )
+
+    def _noise(self, decision: NumericDecision) -> list[float]:
+        return [0.0, 0.0]
