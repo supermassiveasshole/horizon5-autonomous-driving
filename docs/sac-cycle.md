@@ -60,6 +60,9 @@ result = run_experiment(
 以及当时实际使用的冻结 actor。先核对原始包流、实际成功发送、因果动作历史和独立数值重放，
 再生成 `sac-numeric-replay-v3`，可交给已有 `SACResume` 继续更新。当前来源必须是 `synthetic`；
 外部模拟输入使用真实 CPU 模型，并不使该记录获得原生游戏资格。
+发送返回至下一观测之间还须验证合成适配器的踏板/转向反馈；仅返回发送成功、反馈未知或矛盾的片段不能进入学习。
+此直接反馈映射只用于合成接口，不能代替 FH5 转向滤波与实际响应延迟的标定。
+准备前固定执行清单摘要，封存前复核未变，避免给旧转移绑定后来替换的来源。
 
 ```python
 from fh5.sac_realtime_experience import SACRealtimePrepare

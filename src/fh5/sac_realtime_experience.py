@@ -18,8 +18,8 @@ from fh5.realtime_numeric_replay import (
     verify_realtime_decision,
 )
 from fh5.rewards import RewardReplay
-from fh5.routes import load_route
-from fh5.sac_replay import command_action
+from fh5.sac_replay import command_action, matches_synthetic_feedback
+from fh5.sac_rewards import aggregate_reward, index_rewards
 from fh5.temporal_features import describe_time
 
 if TYPE_CHECKING:
@@ -36,44 +36,14 @@ class SACRealtimePrepare:
     evidence_file: Path | None = None
 
 
-def _reward_states(
-    settled: RunResult, task_file: Path
-) -> tuple[dict[str, Any], dict[int, Any], dict[int, Any]]:
-    task = settled.summary["attempt_review"]["task"]
-    route_path = task_file.parent / task["route_file"]
-    if hashlib.sha256(read_bounded(route_path, 128 * 1024**2)).hexdigest() != task["route_sha256"]:
-        raise ValueError("Task route changed during asynchronous experience preparation")
-    route = load_route(route_path)
-    context = {
-        "route_length_m": route["length_m"],
-        "checkpoint_ids": [g["id"] for g in route["checkpoints"]],
-        "max_duration_s": task["max_duration_s"],
-        "no_progress_timeout_s": task["no_progress_timeout_s"],
-    }
-    samples = {s["packet_index"]: s for s in settled.samples}
-    states, steps = {}, {}
-    for segment in settled.summary["rewards"]["segments"]:
-        if not segment["steps"]:
-            continue
-        start = segment["steps"][0]["from_packet_index"]
-        position = samples[start]["route"]
-        states[start] = {
-            "farthest_confirmed_m": position["confirmed_progress_m"],
-            "start_progress_m": position["confirmed_progress_m"],
-            "next_checkpoint": position["next_checkpoint"],
-            "remaining_s": task["max_duration_s"],
-            "no_progress_remaining_s": task["no_progress_timeout_s"],
-        }
-        for step in segment["steps"]:
-            states[step["to_packet_index"]] = step["task_state"]
-            steps[step["from_packet_index"]] = (step, segment)
-    return context, states, steps
-
-
 def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActor) -> RunResult:
     from fh5.experiment import RunResult, run_experiment
 
+    manifest_path = request.execution_dir / "realtime-manifest.json"
+    manifest = read_bounded(manifest_path, 4096)
     report = read_realtime_recording(request.execution_dir)
+    if read_bounded(manifest_path, 4096) != manifest:
+        raise ValueError("Execution manifest changed during preparation")
     if (
         report["evidence_kind"] != "synthetic"
         or report["actor_kind"] not in ("frozen-numeric-sac-v1", "frozen-numeric-sac-sampling-v1")
@@ -102,25 +72,16 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
     task = settled.summary["attempt_review"]["task"]
     if settled.metadata["control_source"] != "policy" or task["control_owner"] != "policy":
         raise ValueError("Asynchronous SAC experience requires actual policy ownership")
-    context, states, steps = _reward_states(settled, request.task_file)
+    reward_index = index_rewards(settled, request.task_file)
+    context, states, steps = reward_index.context, reward_index.states, reward_index.steps
     samples = {s["packet_index"]: s for s in settled.samples}
     by_time = {s["received_monotonic_ns"]: s for s in settled.samples}
     observations: dict[str, dict[str, Any]] = {}
     observation_errors = []
     retained_bytes = 0
     decisions = [d for d in report["decisions"] if d["status"] == "accepted"]
-    segment_bounds: dict[int, tuple[str, int | None]] = {}
+    segment_bounds = reward_index.segment_bounds
     epoch_segments: dict[str, str] = {}
-    for ordinal, segment in enumerate(settled.summary["rewards"]["segments"]):
-        if not segment["steps"]:
-            continue
-        start, end = (
-            segment["steps"][0]["from_packet_index"],
-            segment["steps"][-1]["to_packet_index"],
-        )
-        boundary = samples[start]["received_monotonic_ns"] if ordinal else None
-        for packet_index in range(start, end + 1):
-            segment_bounds[packet_index] = segment["segment_id"], boundary
     for row in decisions:
         try:
             packet_index = by_time[row["telemetry_received_ns"]]["packet_index"]
@@ -213,17 +174,21 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
             cursor = step["to_packet_index"]
         if not interval or cursor != end:
             reason = reason or "unusable_reward_interval"
+        if reason is None and end is not None:
+            for packet_index in range(start + 1, end + 1):
+                sample = samples.get(packet_index)
+                if sample and sample["received_monotonic_ns"] > command["returned_ns"]:
+                    if not matches_synthetic_feedback(
+                        command["sent"], sample["telemetry_controls"]
+                    ):
+                        reason = "synthetic_response_mismatch"
+                        break
         if reason:
             excluded.append({"execution_command_index": index, "reason": reason})
             continue
         assert segment is not None and end is not None and current is not None
-        reward, discount = 0.0, 1.0
-        for step in interval:
-            reward += discount * step["reward"]
-            discount *= step["discount"]
         adjustment = segment["terminal_adjustment"] if terminal else None
-        if adjustment is not None:
-            reward += discount * adjustment["reward"]
+        reward, discount = aggregate_reward(interval, adjustment)
         next_ns = following["decision_ns"] if following and not terminal else None
         transitions.append(
             {
@@ -264,6 +229,8 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
                 },
             }
         )
+    if read_bounded(manifest_path, 4096) != manifest:
+        raise ValueError("Execution manifest changed during preparation")
     replay = {
         "version": 3,
         "kind": "sac-numeric-replay-v3",
@@ -278,9 +245,7 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
         "observation_errors": observation_errors,
         "source_hashes": {
             **settled.summary["rewards"]["source_hashes"],
-            "execution": hashlib.sha256(
-                read_bounded(request.execution_dir / "realtime-manifest.json", 4096)
-            ).hexdigest(),
+            "execution": hashlib.sha256(manifest).hexdigest(),
             "reward": settled.summary["rewards"]["reward_sha256"],
         },
         "sampling_model": report["model"],

@@ -13,7 +13,7 @@ from fh5.collection_store import encode, read_bounded, write_file
 from fh5.numeric_images import NumericDecision, PixelContract, validate_decision
 from fh5.numeric_recording import read_numeric_frame
 from fh5.rewards import RewardReplay
-from fh5.routes import load_route
+from fh5.sac_rewards import aggregate_reward, index_rewards
 from fh5.temporal_features import actor_shape, describe_time
 
 if TYPE_CHECKING:
@@ -43,6 +43,17 @@ def command_action(command: dict[str, Any]) -> list[float]:
     ):
         raise ValueError("SAC requires a valid exclusive two-axis sent command")
     return [command["steer_i16"] / 32767, (command["throttle_u8"] - command["brake_u8"]) / 255]
+
+
+def matches_synthetic_feedback(command: dict[str, Any], feedback: dict[str, Any] | None) -> bool:
+    """Check the synthetic adapter's direct mapping, not FH5's filtered steering."""
+    action = command_action(command)
+    return bool(
+        feedback
+        and feedback["accel"] == command["throttle_u8"]
+        and feedback["brake"] == command["brake_u8"]
+        and abs(feedback["steer"] / 127 - action[0]) <= 1 / 127
+    )
 
 
 def _check_history(
@@ -172,15 +183,8 @@ def prepare_sac_replay(request: SACReplayPrepare) -> RunResult:
         raise ValueError("Synthetic SAC adapter cannot authenticate live game actions")
     samples = {s["packet_index"]: s for s in settled.samples}
     rewards = settled.summary["rewards"]
-    segment_bounds: dict[int, tuple[str, int | None]] = {}
-    for ordinal, segment in enumerate(rewards["segments"]):
-        if not segment["steps"]:
-            continue
-        start = segment["steps"][0]["from_packet_index"]
-        end = segment["steps"][-1]["to_packet_index"]
-        boundary = samples[start]["received_monotonic_ns"] if ordinal else None
-        for index in range(start, end + 1):
-            segment_bounds[index] = (segment["segment_id"], boundary)
+    reward_index = index_rewards(settled, request.task_file)
+    segment_bounds = reward_index.segment_bounds
     epoch_segments: dict[str, str] = {}
     observations = {}
     seen, observation_errors = set(), []
@@ -206,37 +210,8 @@ def prepare_sac_replay(request: SACReplayPrepare) -> RunResult:
             )
         except (OSError, ValueError, TypeError, KeyError) as error:
             observation_errors.append({"packet_index": index, "error": str(error)})
-    task = settled.summary["attempt_review"]["task"]
-    route_path = request.task_file.parent / task["route_file"]
-    if hashlib.sha256(read_bounded(route_path, 128 * 1024**2)).hexdigest() != task["route_sha256"]:
-        raise ValueError("Task route changed during SAC replay preparation")
-    route = load_route(route_path)
-    task_context = {
-        "route_length_m": route["length_m"],
-        "checkpoint_ids": [g["id"] for g in route["checkpoints"]],
-        "max_duration_s": task["max_duration_s"],
-        "no_progress_timeout_s": task["no_progress_timeout_s"],
-    }
-    task_states = {}
-    for segment in rewards["segments"]:
-        if not segment["steps"]:
-            continue
-        index = segment["steps"][0]["from_packet_index"]
-        position = samples[index]["route"]
-        task_states[index] = {
-            "farthest_confirmed_m": position["confirmed_progress_m"],
-            "start_progress_m": position["confirmed_progress_m"],
-            "next_checkpoint": position["next_checkpoint"],
-            "remaining_s": task["max_duration_s"],
-            "no_progress_remaining_s": task["no_progress_timeout_s"],
-        }
-        for step in segment["steps"]:
-            task_states[step["to_packet_index"]] = step["task_state"]
-    steps = {
-        step["from_packet_index"]: (step, segment)
-        for segment in rewards["segments"]
-        for step in segment["steps"]
-    }
+    task, task_context = reward_index.task, reward_index.context
+    task_states, steps = reward_index.states, reward_index.steps
     transitions, excluded = [], []
     previous_action: list[float] | None = command_action(trace["initial_command"])
     previous_issued = trace["initial_issued_ns"]
@@ -295,23 +270,13 @@ def prepare_sac_replay(request: SACReplayPrepare) -> RunResult:
             reason = reason or "invalid_action_time"
         for index in range(start + 1, end + 1):
             feedback = samples.get(index, {}).get("telemetry_controls")
-            if (
-                not feedback
-                or feedback["accel"] != action["sent"]["throttle_u8"]
-                or feedback["brake"] != action["sent"]["brake_u8"]
-                or abs(feedback["steer"] / 127 - sent[0]) > 1 / 127
-            ):
+            if not matches_synthetic_feedback(action["sent"], feedback):
                 reason = reason or "synthetic_response_mismatch"
         if reason:
             excluded.append({"action_index": number, "reason": reason})
         else:
-            reward, discount = 0.0, 1.0
-            for step, _ in interval:
-                reward += discount * step["reward"]
-                discount *= step["discount"]
             adjustment = segment["terminal_adjustment"] if terminal and segment else None
-            if adjustment is not None:
-                reward += discount * adjustment["reward"]
+            reward, discount = aggregate_reward((step for step, _ in interval), adjustment)
             transitions.append(
                 {
                     "id": f"transition-{number}",

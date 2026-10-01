@@ -1,8 +1,10 @@
 """Asynchronous action evidence becomes actual SAC updates at the experiment seam."""
 
 import json
+import struct
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from test_attempts import evidence
@@ -17,14 +19,14 @@ from fh5.sac_learning import SACResume
 from fh5.sac_sampling_actor import SACSamplingActor
 
 
-def recorded_attempt(tmp_path, policy, *, observation_gap=False):
+def recorded_attempt(tmp_path, policy, *, observation_gap=False, conflicting_feedback=False):
     pixels = PixelContract(size=(64, 36))
 
     def factory():
         return SACSamplingActor(policy, pixels, sha(policy / "policy.json"), exploration_seed=9)
 
     class DelayedSender(ResponsiveGame):
-        gap_started = None
+        gap_command_count = None
 
         def send(self, command):
             time.sleep(0.008)  # External transport delay, not a delayed/mocked model.
@@ -32,10 +34,21 @@ def recorded_attempt(tmp_path, policy, *, observation_gap=False):
 
         def read(self, period_s):
             point = super().read(period_s)
+            if self.sent and not conflicting_feedback:
+                command = self.sent[-1][1]
+                raw = bytearray(point.raw_packets[0].payload)
+                struct.pack_into("<BB", raw, 315, command.throttle_u8, command.brake_u8)
+                struct.pack_into("<b", raw, 320, round(command.steer_i16 / 32767 * 127))
+                packet = replace(point.raw_packets[0], payload=bytes(raw))
+                self.packets[-1] = packet
+                point = replace(point, raw_packets=(packet,))
             if observation_gap and len(self.sent) >= 4:
-                if self.gap_started is None:
-                    self.gap_started = point.at_ns
-                if point.at_ns - self.gap_started < 170_000_000:
+                if self.gap_command_count is None:
+                    self.gap_command_count = len(self.sent)
+                # Withhold external images until the supervisor's release has
+                # reached the adapter, then resume. No wall-clock race with
+                # the separate no-decision watchdog is needed for this case.
+                if len(self.sent) == self.gap_command_count:
                     return replace(point, observation=None)
             return point
 
@@ -142,11 +155,12 @@ def prepare_attempt(
     recovery=False,
     observation_gap=False,
     coverage=True,
+    conflicting_feedback=False,
 ):
     from fh5.sac_realtime_experience import SACRealtimePrepare
 
     root, recording, report, actor = recorded_attempt(
-        tmp_path, policy, observation_gap=observation_gap
+        tmp_path, policy, observation_gap=observation_gap, conflicting_feedback=conflicting_feedback
     )
     accepted = [d for d in report["decisions"] if d["status"] == "accepted"]
     events = []
@@ -277,3 +291,46 @@ def test_actor_execution_alone_cannot_supply_independent_reward_validity(tmp_pat
     assert result.summary["sac_replay"]["eligible_transitions"] == 0
     assert replay["excluded"]
     assert all(not r["reason"].startswith("terminal") for r in replay["excluded"])
+
+
+def test_successful_sends_with_conflicting_feedback_cannot_supply_learning_experience(
+    tmp_path, sac_policy
+):
+    replay, result = prepare_attempt(tmp_path, sac_policy, conflicting_feedback=True)
+    assert result.summary["sac_replay"]["eligible_transitions"] == 0
+    assert any(e["reason"] == "synthetic_response_mismatch" for e in replay["excluded"])
+
+
+def test_preparation_does_not_seal_experience_under_a_replaced_execution_identity(
+    tmp_path, sac_policy, monkeypatch
+):
+    from fh5.sac_realtime_experience import SACRealtimePrepare
+
+    root, recording, _, actor = recorded_attempt(tmp_path, sac_policy)
+    request = SACRealtimePrepare(
+        recording,
+        root,
+        sac_policy.parent / "task.json",
+        sac_policy.parent / "reward.json",
+        tmp_path / "experience",
+        evidence(tmp_path, recording),
+    )
+    frozen = actor()
+    manifest = root / "realtime-manifest.json"
+    original_open = Path.open
+    replaced = False
+
+    def external_replacement(path, *args, **kwargs):
+        nonlocal replaced
+        if not replaced and path.suffix == ".rgb" and path.is_relative_to(root):
+            replaced = True
+            with original_open(manifest, "wb") as output:
+                output.write(b'{"version":1,"report_sha256":"replaced-during-read"}')
+        return original_open(path, *args, **kwargs)
+
+    # File-system race only: the recorded model and all internal validators run.
+    monkeypatch.setattr(Path, "open", external_replacement)
+    with pytest.raises(ValueError, match="Execution manifest changed"):
+        run_experiment(request, numeric_actor=frozen)
+    assert replaced
+    assert not (request.output_dir / "replay.json").exists()
