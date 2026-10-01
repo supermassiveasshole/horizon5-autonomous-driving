@@ -17,7 +17,9 @@ from fh5.experiment import run_experiment
 from fh5.learning_loop import LearningContinue
 
 
-def interrupt_selection(request, source, boundary="after_commit", *, large_trace=False):
+def interrupt_selection(
+    request, source, boundary="after_commit", *, large_trace=False, failed_evaluation=False
+):
     repository = Path(__file__).resolve().parents[1]
     environment = dict(os.environ)
     environment["PYTHONPATH"] = os.pathsep.join(
@@ -46,9 +48,23 @@ def replace(source, destination, *args, **kwargs):
             os._exit(73)
         if sys.argv[4] == 'before_learned' and value['phase'] == 'learned':
             os._exit(73)
+        if sys.argv[4] == 'before_evaluation_ack' and value['phase'] == 'reviewing_evaluation':
+            os._exit(73)
     return original_replace(source, destination, *args, **kwargs)
 os.replace = replace
 backend = SharedBackend(Path(sys.argv[3]))
+if sys.argv[5] == 'failed_evaluation':
+    original_evaluation = backend.evaluation
+    def evaluation(identity):
+        lease = original_evaluation(identity)
+        original_driving = lease.driving
+        def driving(slot, ready):
+            game = original_driving(slot, ready)
+            game.signals = lambda: (len(game.sent) < 3, False)
+            return game
+        lease.driving = driving
+        return lease
+    backend.evaluation = evaluation
 if sys.argv[5] == 'large_trace':
     # Expand permitted external frame metadata without fabricating learned results.
     original_sampling = backend.sampling
@@ -71,7 +87,11 @@ raise SystemExit('Expected filesystem exit was not reached')
             str(request.output_dir),
             str(source),
             boundary,
-            "large_trace" if large_trace else "normal_trace",
+            "large_trace"
+            if large_trace
+            else "failed_evaluation"
+            if failed_evaluation
+            else "normal_trace",
         ],
         env=environment,
         cwd=repository,
@@ -80,6 +100,45 @@ raise SystemExit('Expected filesystem exit was not reached')
         timeout=240,
     )
     assert process.returncode == 73, process.stdout + process.stderr
+
+
+def test_sealed_evaluation_survives_exit_before_parent_acknowledgement(tmp_path, seeded_loop):
+    request = loop_request(tmp_path, seeded_loop, rounds=1)
+    interrupt_selection(request, seeded_loop[0], "before_evaluation_ack")
+    state_file = request.output_dir / "state.json"
+    interrupted = json.loads(state_file.read_bytes())
+    assert interrupted["phase"] == "evaluating"
+    assert interrupted["learner_updates"] == 3
+    assert "evaluation_run" not in interrupted["rounds"][0]
+    root = request.output_dir / "round-000/evaluation"
+    execution = json.loads((root / "run.json").read_bytes())
+    assert execution["stop_reason"] == "plan_complete"
+    assert execution["resources_released"] is True
+    originals = {path: sha(path) for path in root.rglob("*") if path.is_file()}
+    backend = SharedBackend(seeded_loop[0])
+    resumed = run_experiment(
+        LearningContinue(request.output_dir, sha(state_file)), learning_environment=backend
+    ).summary["learning_loop"]
+    assert resumed["stop_reason"] == "budget_completed", resumed.get("error")
+    assert resumed["rounds_completed"] == 1
+    assert resumed["learner_updates"] == resumed["eligible_transitions"] == 3
+    assert resumed["latest_learner"]["sha256"] == interrupted["latest_learner"]["sha256"]
+    assert resumed["latest_learner"]["total_steps"] == 33
+    assert resumed["rounds"][0]["evaluation_run"] == execution
+    assert resumed["rounds"][0]["evaluation"]["metrics"]["all_attempts"] == 2
+    assert resumed["rounds"][0]["evaluation"]["execution_metrics"]["bound_runs"] == 2
+    assert resumed["recoveries"][0]["kind"] == "sealed_evaluation"
+    assert resumed["interruptions"][0] == {
+        "phase": "evaluating",
+        "stop_reason": "unclean_exit",
+        "error": None,
+    }
+    assert not backend.leases and backend.closed and resumed["resources_released"]
+    assert all(sha(path) == digest for path, digest in originals.items())
+    history = run_experiment(CandidateHistory(tmp_path / "versions")).summary["candidate_store"]
+    assert len(history["history"]) == 2
+    assert history["explorer"]["model_sha256"] == resumed["latest_learner"]["sha256"]
+    assert history["default"]["model_sha256"] == seeded_loop[2]["default"]["model_sha256"]
 
 
 def test_sampling_recovery_accepts_the_same_trace_size_as_the_sampler(tmp_path, seeded_loop):
@@ -96,6 +155,88 @@ def test_sampling_recovery_accepts_the_same_trace_size_as_the_sampler(tmp_path, 
     assert result["learner_updates"] == 3
     assert result["latest_learner"]["total_steps"] == 33
     assert len(backend.leases) == 1 and backend.closed
+
+
+def test_completed_failed_evaluation_keeps_its_attempt_and_unstarted_slots_on_recovery(
+    tmp_path, seeded_loop
+):
+    request = loop_request(tmp_path, seeded_loop, rounds=1)
+    interrupt_selection(request, seeded_loop[0], "before_evaluation_ack", failed_evaluation=True)
+    state = request.output_dir / "state.json"
+    interrupted = json.loads(state.read_bytes())
+    root = request.output_dir / "round-000/evaluation"
+    execution = json.loads((root / "run.json").read_bytes())
+    assert execution["stop_reason"] == "execution_stopped"
+    assert execution["resources_released"] is True
+    assert execution["started_slots"] == ["run-0"]
+    assert execution["unstarted_slots"] == ["run-1"]
+    originals = {path: sha(path) for path in root.rglob("*") if path.is_file()}
+    backend = SharedBackend(seeded_loop[0])
+    resumed = run_experiment(
+        LearningContinue(request.output_dir, sha(state)), learning_environment=backend
+    ).summary["learning_loop"]
+    assert resumed["stop_reason"] == "evaluation_execution_stopped"
+    assert resumed["rounds_completed"] == 1
+    assert resumed["learner_updates"] == 3
+    assert resumed["latest_learner"] == interrupted["latest_learner"]
+    row = resumed["rounds"][0]
+    assert row["evaluation_run"] == execution
+    assert row["evaluation"]["metrics"]["all_attempts"] == 1
+    assert row["evaluation"]["unstarted_slots"] == ["run-1"]
+    assert row["selection"] == "retain_incumbent"
+    assert resumed["resources_released"] and backend.closed and not backend.leases
+    assert all(sha(path) == digest for path, digest in originals.items())
+    history = run_experiment(CandidateHistory(tmp_path / "versions")).summary["candidate_store"]
+    assert len(history["history"]) == 2
+    assert history["default"]["model_sha256"] == seeded_loop[2]["default"]["model_sha256"]
+
+
+def test_evaluation_recovery_requires_the_complete_original_child(tmp_path, seeded_loop):
+    import hashlib
+
+    request = loop_request(tmp_path, seeded_loop, rounds=1)
+    interrupt_selection(request, seeded_loop[0], "before_evaluation_ack")
+    state = request.output_dir / "state.json"
+    original_state = state.read_bytes()
+    root = request.output_dir / "round-000/evaluation"
+    completion = root / "completion.json"
+    original_completion = completion.read_bytes()
+    frame = next((root / "attempt-0000/execution/pixels").glob("*.rgb"))
+    cases = [{completion: None}, {frame: None}, {root / "frozen/model/policy.pt": b"changed"}]
+    for name, key, value in (
+        ("run.json", "resources_released", False),
+        ("run.json", "started_slots", ["run-0"]),
+        ("run-protocol.json", "seconds_per_attempt", 99),
+        ("review/batch-report.json", "verified_starts", 1),
+    ):
+        document = json.loads((root / name).read_bytes())
+        document[key] = value
+        payload = json.dumps(document).encode()
+        seal = json.loads(original_completion)
+        seal["files"][name] = hashlib.sha256(payload).hexdigest()
+        cases.append({root / name: payload, completion: json.dumps(seal).encode()})
+    for changes in cases:
+        originals = {path: path.read_bytes() for path in changes}
+        backend = SharedBackend(seeded_loop[0])
+        try:
+            for path, payload in changes.items():
+                if payload is None:
+                    path.unlink()
+                else:
+                    path.write_bytes(payload)
+            with pytest.raises((OSError, ValueError)):
+                run_experiment(
+                    LearningContinue(request.output_dir, sha(state)), learning_environment=backend
+                )
+            assert state.read_bytes() == original_state
+            assert not backend.leases and backend.closed
+            history = run_experiment(CandidateHistory(tmp_path / "versions")).summary[
+                "candidate_store"
+            ]
+            assert len(history["history"]) == 1
+        finally:
+            for path, payload in originals.items():
+                path.write_bytes(payload)
 
 
 def test_sealed_sampling_is_adopted_after_exit_before_parent_acknowledgement(tmp_path, seeded_loop):

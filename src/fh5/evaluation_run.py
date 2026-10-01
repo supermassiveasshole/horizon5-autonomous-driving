@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 from fh5.collection_store import atomic_json, encode, read_bounded, write_file
 from fh5.evaluation import EvaluationReview, _read, read_evaluation_batch
+from fh5.evaluation_completion import seal_evaluation
 from fh5.evaluation_handoff import ReadyHandoff
 from fh5.evaluation_model import asset_limit, evaluation_actor
 from fh5.evaluation_start import event_payloads, seal_start
@@ -351,4 +352,6 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
         + "</pre>",
         encoding="utf-8",
     )
+    if reviewed_summary and summary["resources_released"]:
+        seal_evaluation(root)
     return RunResult({}, [], [], {"evaluation_run": summary, **reviewed_summary}, path)

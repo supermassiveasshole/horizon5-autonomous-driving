@@ -18,6 +18,7 @@ from fh5.candidate_store import CandidateHistory, CandidateRecord
 from fh5.collection_lease import CollectionLease
 from fh5.collection_store import atomic_json, encode, read_bounded, write_file
 from fh5.evaluation import EvaluationPrepare, EvaluationReview, read_evaluation_batch
+from fh5.evaluation_completion import completed_evaluation
 from fh5.evaluation_run import EvaluationEnvironment, EvaluationRun
 from fh5.learning_io import EvaluationLease, RejectedLease, SamplingLease
 from fh5.learning_recovery import completed_sampling
@@ -210,6 +211,7 @@ class _Loop:
             if "candidate_evaluation" in row:
                 _input(self.root, row["candidate_evaluation"]).verify()
         self.reconcile_sampling()
+        self.reconcile_evaluation()
         self.reconcile_commit()
         self.verify()
         clean_stop = state["phase"] == "stopped"
@@ -330,6 +332,58 @@ class _Loop:
             return False
         return True
 
+    def reconcile_evaluation(self) -> None:
+        rows = self.state["rounds"]
+        if not rows or rows[-1]["complete"] or "candidate_evaluation" in rows[-1]:
+            return
+        row, number = rows[-1], len(rows) - 1
+        root = self.root / f"round-{number:03d}"
+        if not (root / "evaluation").exists():
+            return
+        acknowledged = row.get("evaluation_completion_sha256")
+        if (
+            not self.state["child_resources_released"]
+            or self.state["rounds_completed"] != number
+            or not all(prior["complete"] for prior in rows[:-1])
+            or row.get("candidate_sha256") != self.state["latest_learner"]["sha256"]
+            or not acknowledged
+            and (self.state["phase"] != "evaluating" or "evaluation_run" in row)
+        ):
+            raise ValueError("Unsealed evaluation cannot be automatically acknowledged")
+        completion = root / "evaluation/completion.json"
+        if acknowledged is not None and _sha(completion) != acknowledged:
+            raise ValueError("Acknowledged evaluation completion changed")
+        prepared = row["evaluation_prepared"]
+        if _sha(root / "evaluation.json") != prepared["config_sha256"]:
+            raise ValueError("Prepared evaluation configuration changed")
+        basis = _input(self.root, self.state["incumbent"])
+        batch, _, _ = read_evaluation_batch(root / "batch", prepared["batch_sha256"])
+        if (
+            evaluation_conditions(batch) != evaluation_conditions(basis.batch)
+            or batch["config"]["model"]["manifest_sha256"] != self.state["latest_learner"]["sha256"]
+            or batch["config"]["model"].get("kind") != "sac"
+        ):
+            raise ValueError("Completed evaluation belongs to a different learner or conditions")
+        execution = completed_evaluation(
+            EvaluationRun(
+                root / "batch",
+                prepared["batch_sha256"],
+                basis.batch_dir / "start/event.json",
+                root / "evaluation",
+                self.config["evaluation_seconds"],
+                self.registry,
+                initial_operation="restart_ready",
+            )
+        )
+        if "evaluation_run" in row and row["evaluation_run"] != execution:
+            raise ValueError("Acknowledged evaluation summary changed")
+        row["evaluation_run"] = execution
+        row["evaluation_completion_sha256"] = _sha(completion)
+        if acknowledged is None:
+            self.state.setdefault("recoveries", []).append(
+                {"kind": "sealed_evaluation", "round": number}
+            )
+
     def evaluate(self, number: int, row: dict[str, Any]) -> dict[str, Any]:
         from fh5.experiment import run_experiment
 
@@ -359,25 +413,32 @@ class _Loop:
         frozen, _, _ = read_evaluation_batch(batch, digest)
         if evaluation_conditions(frozen) != evaluation_conditions(basis.batch):
             raise ValueError("Candidate evaluation changed frozen comparison conditions")
-        self.save("evaluating")
-        if (root / "evaluation").exists():
-            raise ValueError("Interrupted evaluation is retained; cannot overwrite its attempts")
-        execution = run_experiment(
-            EvaluationRun(
-                batch,
-                digest,
-                basis.batch_dir / "start/event.json",
-                root / "evaluation",
-                self.config["evaluation_seconds"],
-                self.registry,
-                initial_operation="restart_ready",
-            ),
-            evaluation_environment=EvaluationLease(
-                self.environment.evaluation(f"round-{number:03d}"),
-                self.save,
-                lambda: (self.root / "stop.request").exists(),
-            ),
-        ).summary["evaluation_run"]
+        execution = row.get("evaluation_run") if row.get("evaluation_completion_sha256") else None
+        if execution is None:
+            self.save("evaluating")
+            if (root / "evaluation").exists():
+                raise ValueError(
+                    "Interrupted evaluation is retained; cannot overwrite its attempts"
+                )
+            execution = run_experiment(
+                EvaluationRun(
+                    batch,
+                    digest,
+                    basis.batch_dir / "start/event.json",
+                    root / "evaluation",
+                    self.config["evaluation_seconds"],
+                    self.registry,
+                    initial_operation="restart_ready",
+                ),
+                evaluation_environment=EvaluationLease(
+                    self.environment.evaluation(f"round-{number:03d}"),
+                    self.save,
+                    lambda: (self.root / "stop.request").exists(),
+                ),
+            ).summary["evaluation_run"]
+            completion = root / "evaluation/completion.json"
+            if completion.is_file():
+                row["evaluation_completion_sha256"] = _sha(completion)
         row["evaluation_run"] = execution
         row["evaluation_interrupted_by_stop"] = (self.root / "stop.request").exists()
         self.state["child_resources_released"] &= execution["resources_released"]
