@@ -9,8 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fh5.candidate_archive import _paths as checkpoint_paths
-from fh5.candidate_store import CandidateHistory
+from fh5.candidate_archive import checkpoint_asset_names
+from fh5.candidate_store import _read_events
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.numeric_images import asset
 
@@ -69,11 +69,14 @@ class _Inventory:
             entry["roles"].append(role)
         return path
 
+    def asset(self, root: Path, name: str) -> Path:
+        self.path(root / name)
+        return asset(root, name)
+
     def document(self, path: Path, role: str, expected: str | None = None) -> dict[str, Any]:
         path = self.file(path, role)
         if path not in self.documents:
-            raw = read_bounded(path, min(128 * 1024**2, 256 * 1024**2 - self.metadata_bytes))
-            self.metadata_bytes += len(raw)
+            raw = self.read_metadata(path, 128 * 1024**2)
             value = json.loads(raw)
             if not isinstance(value, dict):
                 raise ValueError("Storage dependency manifest must be an object")
@@ -82,6 +85,17 @@ class _Inventory:
         if expected is not None and digest != expected:
             raise ValueError("Storage dependency manifest changed: " + str(path))
         return value
+
+    def reserve_metadata(self, size: int) -> None:
+        if self.metadata_bytes + size > 256 * 1024**2:
+            raise ValueError("Storage metadata read budget exceeded")
+        self.metadata_bytes += size
+
+    def read_metadata(self, path: Path, limit: int) -> bytes:
+        path = self.file(path, "metadata")
+        size = self.files[str(path)]["bytes"]
+        self.reserve_metadata(size)
+        return read_bounded(path, min(limit, size))
 
     def tree(self, root: Path, role: str) -> None:
         root = self.path(root)
@@ -108,17 +122,22 @@ class _Inventory:
 
     def checkpoint(self, root: Path, expected: str, role: str) -> None:
         root = self.path(root)
-        self.document(root / "policy.json", role, expected)
+        manifest = self.document(root / "policy.json", role, expected)
         self.tree(root, role)
-        _, names = checkpoint_paths(root, expected)
+        replay = self.document(root / "experience/replay.json", role, manifest["replay_sha256"])
+        for original in replay.get("source_inventory", []):
+            self.document(
+                self.asset(root / "experience", original["path"]), role, original["replay_sha256"]
+            )
+        names = checkpoint_asset_names(manifest, replay)
         for name in names:
-            self.file(asset(root, name), role)
+            self.file(self.asset(root, name), role)
 
     def evidence(self, base: Path, binding: dict[str, Any], role: str) -> None:
         path = self.path(base / binding["file"])
         proof = self.document(path, role, binding["sha256"])
         for item in proof.get("items", []):
-            self.file(asset(path.parent, item["path"]), role)
+            self.file(self.asset(path.parent, item["path"]), role)
 
     def execution(self, root: Path, expected: str) -> None:
         root = self.path(root)
@@ -126,14 +145,16 @@ class _Inventory:
         self.tree(root, role)
         manifest = self.document(root / "realtime-manifest.json", role, expected)
         report = self.document(root / "report.json", role, manifest["report_sha256"])
-        self.file(asset(root, report["journal"]["path"]), role)
+        self.file(self.asset(root, report["journal"]["path"]), role)
         for decision in report["decisions"]:
             archive = decision.get("archive")
             if archive is None:
                 continue
-            source = self.document(asset(root, archive["path"]), role, archive["sha256"])
+            source = self.document(self.asset(root, archive["path"]), role, archive["sha256"])
             for frame in source["frames"]:
-                self.file(asset(root, frame["path"]), role, 3 * frame["size"][0] * frame["size"][1])
+                self.file(
+                    self.asset(root, frame["path"]), role, 3 * frame["size"][0] * frame["size"][1]
+                )
 
     def evaluation(self, base: Path, binding: dict[str, Any]) -> None:
         batch = self.path(base / binding["batch"])
@@ -149,12 +170,12 @@ class _Inventory:
             raise ValueError("Storage evaluation ledger belongs to another batch")
         self.tree(batch, role)
         for name in frozen["files"]:
-            self.file(asset(batch, name), role)
+            self.file(self.asset(batch, name), role)
         for entry in entries["entries"]:
             recording = self.path(ledger.parent / entry["recording"])
             self.tree(recording, role)
             for name in entry["files"]:
-                self.file(asset(recording, name), role)
+                self.file(self.asset(recording, name), role)
             if entry.get("evidence") is not None:
                 self.evidence(ledger.parent, entry["evidence"], role)
             if entry.get("execution") is not None:
@@ -168,23 +189,23 @@ class _Inventory:
                     root / "start-manifest.json", role, prepared["manifest_sha256"]
                 )
                 for name in source["files"]:
-                    self.file(asset(root, name), role)
+                    self.file(self.asset(root, name), role)
 
     def store(self, root: Path, expected: str) -> None:
-        from fh5.experiment import run_experiment
-
         root = self.path(root)
-        history = run_experiment(CandidateHistory(root)).summary["candidate_store"]
-        if history["revision"] != expected:
-            raise ValueError("Retained candidate store revision changed")
         self.tree(root, "candidate_history")
-        for event in history["history"]:
+        database = self.file(root / "state.sqlite", "candidate_history")
+        self.reserve_metadata(self.files[str(database)]["bytes"])
+        history = _read_events(root, read_file=self.read_metadata)
+        if history[-1]["revision"] != expected:
+            raise ValueError("Retained candidate store revision changed")
+        for event in history:
             for role in (
                 event["default"],
                 event["explorer"],
                 *event["aggressive_by_reference"].values(),
             ):
-                archive = asset(root, role["archive"])
+                archive = self.asset(root, role["archive"])
                 saved = self.document(
                     archive / "archive.json", "candidate_history", role["archive_sha256"]
                 )
@@ -193,15 +214,18 @@ class _Inventory:
                 )
                 for name, entry in saved["files"].items():
                     self.file(
-                        asset(archive / "checkpoint", name), "candidate_history", entry["bytes"]
+                        self.asset(archive / "checkpoint", name),
+                        "candidate_history",
+                        entry["bytes"],
                     )
             proof = event["qualification"]
             path = self.path(Path(proof["comparison_file"]))
             comparison = self.document(path, "candidate_history", proof["comparison_sha256"])
             for side in ("incumbent", "candidate"):
                 self.evaluation(path.parent, comparison[side])
-        repeated = run_experiment(CandidateHistory(root)).summary["candidate_store"]
-        if repeated["revision"] != expected:
+        self.reserve_metadata(self.files[str(database)]["bytes"])
+        repeated = _read_events(root, read_file=self.read_metadata)
+        if repeated[-1]["revision"] != expected:
             raise ValueError("Candidate store changed during storage accounting")
 
     def session(self, root: Path, expected: str) -> None:
@@ -218,16 +242,16 @@ class _Inventory:
         route_path = self.path(task_path.parent / task["route_file"])
         route = self.document(route_path, "task_route", task["route_sha256"])
         for item in [*route["assets"].values(), *route["evidence"]]:
-            self.file(asset(route_path.parent, item["path"]), "task_route")
+            self.file(self.asset(route_path.parent, item["path"]), "task_route")
         if task.get("automatic_start") is not None:
             start = task["automatic_start"]
             event_path = self.path(task_path.parent / start["event_file"])
             event = self.document(event_path, "automatic_start", start["event_sha256"])["event_run"]
             for patches in event["signatures"].values():
                 for patch in patches:
-                    self.file(asset(event_path.parent, patch["template"]), "automatic_start")
+                    self.file(self.asset(event_path.parent, patch["template"]), "automatic_start")
             for name in event["verification_evidence"]:
-                self.file(asset(event_path.parent, name), "automatic_start")
+                self.file(self.asset(event_path.parent, name), "automatic_start")
         self.file(Path(config["registry"]), "evidence_registry")
         for role in ("default", "explorer", "latest_learner"):
             self.checkpoint(Path(state[role]["directory"]), state[role]["sha256"], role)
@@ -251,7 +275,7 @@ class _Inventory:
         for name, entry in self.files.items():
             self.file(Path(name), entry["roles"][0])
         for path, (digest, _) in self.documents.items():
-            if hashlib.sha256(read_bounded(path, 128 * 1024**2)).hexdigest() != digest:
+            if hashlib.sha256(self.read_metadata(path, 128 * 1024**2)).hexdigest() != digest:
                 raise ValueError("Storage manifest changed during accounting: " + str(path))
 
 
@@ -279,6 +303,8 @@ def plan_learning_storage(request: LearningStoragePlan) -> RunResult:
         "root": str(root),
         "state_sha256": config["learning"]["state_sha256"],
         "budget_bytes": config["budget_bytes"],
+        "metadata_budget_bytes": 256 * 1024**2,
+        "metadata_read_bytes": inventory.metadata_bytes,
         "protected_bytes": total,
         "status": "within_budget" if total <= config["budget_bytes"] else "over_budget",
         "files": files,

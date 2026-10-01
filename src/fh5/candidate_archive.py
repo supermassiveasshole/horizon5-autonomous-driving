@@ -37,6 +37,12 @@ def _paths(source: Path, expected: str) -> tuple[dict[str, Any], set[str]]:
     if hashlib.sha256(raw).hexdigest() != expected:
         raise ValueError("Candidate differs from its expected checkpoint identity")
     manifest = json.loads(raw)
+    replay = json.loads(read_bounded(source / "experience/replay.json", 128 * 1024**2))
+    return manifest, checkpoint_asset_names(manifest, replay)
+
+
+def checkpoint_asset_names(manifest: dict[str, Any], replay: dict[str, Any]) -> set[str]:
+    """Enumerate continuation assets from already-read manifests, without more I/O."""
     if manifest.get("version") not in (2, 3, 4) or manifest.get("stage") != "sac_updates":
         raise ValueError("Archive requires a complete SAC continuation checkpoint")
     names = {
@@ -51,13 +57,12 @@ def _paths(source: Path, expected: str) -> tuple[dict[str, Any], set[str]]:
         names.update((entry["checkpoint"], entry["report"]))
     for entry in manifest.get("imitation", {}).get("transitions", []):
         names.add(entry["review"])
-    replay = json.loads(read_bounded(source / "experience/replay.json", 128 * 1024**2))
     names.update("experience/" + entry["path"] for entry in replay.get("source_inventory", []))
     for row in replay["transitions"]:
         for observation in (row["current"], row["next"]):
             if observation is not None:
                 names.update("experience/" + frame["path"] for frame in observation["frames"])
-    return manifest, names
+    return names
 
 
 def _publish_checkpoint(source: Path, output: Path, names: set[str]) -> None:

@@ -6,7 +6,7 @@ import hashlib
 import json
 import sqlite3
 import uuid
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -94,7 +94,9 @@ def _events(db: sqlite3.Connection) -> list[dict[str, Any]]:
     return result
 
 
-def _read_events(root: Path) -> list[dict[str, Any]]:
+def _read_events(
+    root: Path, *, read_file: Callable[[Path, int], bytes] = read_bounded
+) -> list[dict[str, Any]]:
     database = root / "state.sqlite"
     if not database.is_file() or database.stat().st_size > 32 * 1024**2:
         raise ValueError("Missing or oversized candidate store")
@@ -102,7 +104,7 @@ def _read_events(root: Path) -> list[dict[str, Any]]:
         events = _events(db)
     for event in events:
         for name, digest in event["evidence"].items():
-            if hashlib.sha256(read_bounded(asset(root, name), 128 * 1024**2)).hexdigest() != digest:
+            if hashlib.sha256(read_file(asset(root, name), 128 * 1024**2)).hexdigest() != digest:
                 raise ValueError("Candidate history evidence changed: " + name)
     return events
 

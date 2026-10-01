@@ -2,9 +2,13 @@
 
 import json
 import os
+import shutil
+import sqlite3
+import subprocess
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from test_candidate_store import candidates as candidates
@@ -223,3 +227,145 @@ def test_missing_original_route_asset_stops_accounting(tmp_path, recorded_storag
     with pytest.raises(FileNotFoundError):
         run_experiment(operation)
     assert not operation.output_dir.exists()
+
+
+def test_original_route_cannot_hide_a_directory_link(tmp_path, recorded_storage):
+    run, _ = recorded_storage
+    config = json.loads((run / "config.json").read_bytes())
+    task = json.loads(Path(config["task"]).read_bytes())
+    original_route = Path(task["route_file"])
+    directory = tmp_path / "route"
+    directory.mkdir()
+    contents = directory / "original-assets"
+    shutil.copytree(original_route.parent, contents)
+    linked = directory / "linked-assets"
+    if os.name == "nt":
+        subprocess.run(
+            ["cmd.exe", "/c", "mklink", "/J", str(linked), str(contents)],
+            check=True,
+            capture_output=True,
+        )
+    else:
+        linked.symlink_to(contents, target_is_directory=True)
+    route = json.loads(original_route.read_bytes())
+    for entry in [*route["assets"].values(), *route["evidence"]]:
+        entry["path"] = "linked-assets/" + entry["path"]
+    route_path = directory / "route.json"
+    route_path.write_text(json.dumps(route))
+    task.update(route_file=str(route_path), route_sha256=sha(route_path))
+    task_path = tmp_path / "task.json"
+    task_path.write_text(json.dumps(task))
+    source = session_with_task(tmp_path, recorded_storage, task_path)
+    operation = storage_request(tmp_path, source)
+    with pytest.raises(ValueError, match="links"):
+        run_experiment(operation)
+    assert not operation.output_dir.exists()
+
+
+@pytest.mark.parametrize("component", ["experience/replay.json", "source_replay"])
+def test_changed_continuation_manifest_cannot_shrink_dependency_accounting(
+    tmp_path, recorded_storage, component
+):
+    run, _ = recorded_storage
+    config = json.loads((run / "config.json").read_bytes())
+    source = session_with_task(tmp_path, recorded_storage, Path(config["task"]))
+    state_path = source[0] / "state.json"
+    state = json.loads(state_path.read_bytes())
+    learner = tmp_path / "learner"
+    shutil.copytree(Path(state["latest_learner"]["directory"]), learner)
+    state["latest_learner"]["directory"] = str(learner)
+    state_path.write_text(json.dumps(state))
+    if component == "source_replay":
+        replay = json.loads((learner / "experience/replay.json").read_bytes())
+        path = learner / "experience" / replay["source_inventory"][0]["path"]
+    else:
+        path = learner / component
+    contents = json.loads(path.read_bytes())
+    contents["transitions"] = []
+    path.write_text(json.dumps(contents))
+    operation = storage_request(tmp_path, source)
+    with pytest.raises(ValueError, match="manifest changed"):
+        run_experiment(operation)
+    assert not operation.output_dir.exists()
+
+
+def test_metadata_budget_includes_nested_and_verification_reads(tmp_path, recorded_storage):
+    request = storage_request(tmp_path, recorded_storage)
+    open_file = Path.open
+    observed = []
+
+    class CountedReader:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def read(self, *args):
+            contents = self.stream.read(*args)
+            observed.append(len(contents))
+            return contents
+
+    def counting_open(path, *args, **kwargs):
+        stream = open_file(path, *args, **kwargs)
+        if args == ("rb",) and path.suffix == ".json" and path != request.config_file:
+            return CountedReader(stream)
+        return stream
+
+    with pytest.MonkeyPatch.context() as filesystem:
+        filesystem.setattr(Path, "open", counting_open)
+        plan = run_experiment(request).summary["storage"]
+    assert plan["metadata_read_bytes"] >= sum(observed) > 0
+    assert plan["metadata_read_bytes"] <= plan["metadata_budget_bytes"] == 256 * 1024**2
+
+
+def test_nested_metadata_over_budget_is_rejected_before_reading(tmp_path, recorded_storage):
+    run, _ = recorded_storage
+    state = json.loads((run / "state.json").read_bytes())
+    oversized = Path(state["default"]["directory"]) / "experience/replay.json"
+    request = storage_request(tmp_path, recorded_storage)
+    stat_file, open_file = Path.stat, Path.open
+
+    def oversized_status(path, *args, **kwargs):
+        status = stat_file(path, *args, **kwargs)
+        if path == oversized:
+            return SimpleNamespace(
+                st_size=256 * 1024**2 + 1, st_mode=status.st_mode, st_mtime_ns=status.st_mtime_ns
+            )
+        return status
+
+    def reject_read(path, *args, **kwargs):
+        if path == oversized:
+            pytest.fail("The oversized nested manifest was opened before checking its budget")
+        return open_file(path, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as filesystem:
+        filesystem.setattr(Path, "stat", oversized_status)
+        filesystem.setattr(Path, "open", reject_read)
+        with pytest.raises(ValueError, match="metadata read budget"):
+            run_experiment(request)
+    assert not request.output_dir.exists()
+
+
+def test_candidate_database_link_is_rejected_before_sqlite_access(tmp_path, recorded_storage):
+    run, _ = recorded_storage
+    config = json.loads((run / "config.json").read_bytes())
+    database = Path(config["store"]["directory"]) / "state.sqlite"
+    request = storage_request(tmp_path, recorded_storage)
+    is_link = Path.is_symlink
+
+    def database_link(path):
+        return path == database or is_link(path)
+
+    def reject_database_open(*args, **kwargs):
+        pytest.fail("SQLite opened before the candidate database link was checked")
+
+    with pytest.MonkeyPatch.context() as filesystem:
+        filesystem.setattr(Path, "is_symlink", database_link)
+        filesystem.setattr(sqlite3, "connect", reject_database_open)
+        with pytest.raises(ValueError, match="links"):
+            run_experiment(request)
+    assert not request.output_dir.exists()
