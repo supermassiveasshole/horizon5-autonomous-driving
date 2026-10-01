@@ -1,7 +1,7 @@
 """Continuous asynchronous learning through the experiment entry point."""
 
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 
 import pytest
 from test_candidate_store import candidate_setup, record_config
@@ -64,6 +64,27 @@ class AsyncBackend(SharedBackend):
         lease = Lease(self.source)
         self.active = lease
         self.leases.append(lease)
+        return lease
+
+
+class LargeMetadataBackend(AsyncBackend):
+    def sampling(self, identity):
+        class LargeMetadataGame(CycleGame):
+            def read(self, period_s):
+                point = super().read(period_s)
+                return replace(
+                    point,
+                    observation=replace(
+                        point.observation,
+                        frames=tuple(
+                            replace(frame, frame_id=frame.frame_id + "x" * 180000)
+                            for frame in point.observation.frames
+                        ),
+                    ),
+                )
+
+        lease = super().sampling(identity)
+        lease.game_type = LargeMetadataGame
         return lease
 
 
@@ -186,3 +207,32 @@ def test_existing_synchronous_loop_keeps_its_original_update_count(tmp_path, asy
     assert result["latest_learner"]["total_steps"] == 5
     assert result["default"]["sha256"] == async_seed[2]["default"]["model_sha256"]
     assert len(backend.leases) == 2 and result["resources_released"]
+
+
+@pytest.mark.parametrize("pending", [False, True])
+def test_large_async_result_can_be_acknowledged_and_resumed(tmp_path, async_seed, pending):
+    operation = async_request(tmp_path, async_seed, rounds=1)
+    config = json.loads(operation.config_file.read_bytes())
+    config["sampling"]["seconds"] = 1.0
+    operation.config_file.write_text(json.dumps(config))
+    root = operation.output_dir
+    if pending:
+        interrupt_selection(operation, async_seed[0], "before_learned", scenario="async_large")
+        backend = AsyncBackend(async_seed[0])
+        result = run_experiment(
+            LearningContinue(root, sha(root / "state.json")), learning_environment=backend
+        ).summary["learning_loop"]
+        assert len(backend.leases) == 1  # Evaluation only; sealed sampling is reused.
+    else:
+        backend = LargeMetadataBackend(async_seed[0])
+        result = run_experiment(operation, learning_environment=backend).summary["learning_loop"]
+    child = root / "round-000/learning"
+    assert (child / "summary.json").stat().st_size > 4 * 1024**2
+    assert result["stop_reason"] == "budget_completed", result.get("error")
+    assert result["learner_updates"] == 2 and result["rounds_completed"] == 1
+    assert result["resources_released"]
+    backend = AsyncBackend(async_seed[0])
+    resumed = run_experiment(
+        LearningContinue(root, sha(root / "state.json")), learning_environment=backend
+    ).summary["learning_loop"]
+    assert resumed["learner_updates"] == 2 and not backend.leases

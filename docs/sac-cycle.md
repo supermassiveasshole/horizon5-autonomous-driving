@@ -119,7 +119,8 @@ run_experiment(
 
 `SACRealtimeCycle` 将上述异步运行、独立经验审核和续训接成有界循环。
 它复用 `RealtimeRun` 的采集、推理、动作租期及旁路存档；学习只在采样资源全部释放之后进行。
-当前使用实际 CPU SAC 和合成外部 I/O，原生 SAC 资格与 #15 的恢复调度尚未接入。
+当前使用实际 CPU SAC 和合成外部 I/O；[连续学习循环](learning-loop.md)版本 3 已接入异步采样、
+冻结评估、保存与封存结果恢复。原生 SAC 资格仍未接入。
 
 ```python
 from fh5.realtime import RealtimeConfig
@@ -154,7 +155,8 @@ result = run_experiment(
 
 外部停止、`stop.request` 或停止回调会阻止后续采样和学习；发送失败、释放未确认、无合格经验同样停止循环，
 保留已启动尝试。环境级关闭成功不能覆盖某次运行的释放失败。故障记录不会生成驾驶进步结论。
-此入口尚无专用 CLI，也不恢复被中断的异步循环；已封存候选仍可使用已有 `SACResume`。
+此独立入口尚无专用 CLI，也不恢复被中断的异步循环；已封存候选仍可使用已有 `SACResume`，
+需要阶段接续时使用版本 3 的 `LearningLoop` / `LearningContinue`。
 
 ## 新经验和持续学习
 

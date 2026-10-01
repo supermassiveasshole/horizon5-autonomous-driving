@@ -38,7 +38,15 @@ __all__ = [
     "SACSample",
     "SACStart",
     "run_sac_cycle",
+    "sampling_update_budget",
 ]
+
+
+def sampling_update_budget(eligible: int, maximum: int | None = None) -> int:
+    """Grant at most one update per new transition, subject to the frozen cap."""
+    if type(eligible) is not int or eligible < 0:
+        raise ValueError("Sampling transition count must be a nonnegative integer")
+    return eligible if maximum is None else min(eligible, maximum)
 
 
 @dataclass(frozen=True)
@@ -272,9 +280,12 @@ def run_sac_cycle(
                     SACResume(
                         checkpoint,
                         candidate,
-                        steps=min(count, request.max_updates_per_attempt)
-                        if isinstance(request, SACRealtimeCycle)
-                        else count,
+                        steps=sampling_update_budget(
+                            count,
+                            request.max_updates_per_attempt
+                            if isinstance(request, SACRealtimeCycle)
+                            else None,
+                        ),
                         additions=((replay, prepared["replay_sha256"]),),
                         expected_checkpoint_sha256=actor.sha,
                     ),

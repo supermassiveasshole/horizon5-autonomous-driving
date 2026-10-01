@@ -34,6 +34,7 @@ def interrupt_selection(
         "stopped_updates",
         "async_sampling",
         "async_stopped_updates",
+        "async_large",
     }
     repository = Path(__file__).resolve().parents[1]
     environment = dict(os.environ)
@@ -86,7 +87,10 @@ def open_file(path, *args, **kwargs):
         os._exit(73)
     return original_open(path, *args, **kwargs)
 Path.open = open_file
-if sys.argv[5].startswith('async_'):
+if sys.argv[5] == 'async_large':
+    from test_learning_realtime import LargeMetadataBackend
+    backend = LargeMetadataBackend(Path(sys.argv[3]))
+elif sys.argv[5].startswith('async_'):
     from test_learning_realtime import AsyncBackend
     backend = AsyncBackend(Path(sys.argv[3]))
 else:

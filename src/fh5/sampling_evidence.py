@@ -10,6 +10,10 @@ from pathlib import Path
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.numeric_images import asset
 
+# Sampling diagnostics contain numerical decisions and original-file inventories.
+# Keep acknowledgement and recovery compatible with the existing 256 MiB assets.
+SAMPLING_RESULT_LIMIT = 256 * 1024**2
+
 
 def _inventory(paths: Iterable[Path]) -> dict[str, str]:
     result: dict[str, str] = {}

@@ -11,9 +11,13 @@ from typing import Any
 from fh5.collection_store import atomic_json, encode, read_bounded
 from fh5.numeric_images import asset
 from fh5.realtime_numeric_replay import read_realtime_journal, read_realtime_recording
-from fh5.sac_cycle import SACCycle, SACRealtimeCycle
+from fh5.sac_cycle import SACCycle, SACRealtimeCycle, sampling_update_budget
 from fh5.sac_learning import validate_sac_candidate
-from fh5.sampling_evidence import seal_sampling_sources, verify_sampling_sources
+from fh5.sampling_evidence import (
+    SAMPLING_RESULT_LIMIT,
+    seal_sampling_sources,
+    verify_sampling_sources,
+)
 
 _INVENTORY_LIMIT = 64 * 1024**2
 
@@ -84,9 +88,9 @@ def retryable_sampling(
 ) -> bool:
     """Only released, sealed failures without any learner output may be resampled."""
     root = request.output_dir
-    if _sha(root / "summary.json") != expected_summary:
+    if _sha(root / "summary.json", SAMPLING_RESULT_LIMIT) != expected_summary:
         raise ValueError("Retained sampling result changed")
-    summary = json.loads(read_bounded(root / "summary.json", 4 * 1024**2))
+    summary = json.loads(read_bounded(root / "summary.json", SAMPLING_RESULT_LIMIT))
     reason = summary.get("stop_reason")
     attempts = summary.get("attempts", [])
     if (
@@ -128,7 +132,7 @@ def retryable_sampling(
         if type(count) is not int or count < 0:
             return False
         attempt_dir = root / "attempt-000"
-        diagnostic = json.loads(read_bounded(attempt_dir / "sampling.json", 4 * 1024**2))
+        diagnostic = json.loads(read_bounded(attempt_dir / "sampling.json", SAMPLING_RESULT_LIMIT))
         if diagnostic.get("received_packets") != count:
             raise ValueError("Failed sampling count differs from its original diagnostic")
         _require_originals(
@@ -240,7 +244,7 @@ def completed_sampling(
     """Authenticate a sealed single attempt and its complete learner snapshot."""
     root = request.output_dir
     protocol = json.loads(read_bounded(root / "protocol.json", 1024**2))
-    summary: dict[str, Any] = json.loads(read_bounded(root / "summary.json", 4 * 1024**2))
+    summary: dict[str, Any] = json.loads(read_bounded(root / "summary.json", SAMPLING_RESULT_LIMIT))
     if protocol != _expected_protocol(request) or not (
         summary.get("source_kind") == "synthetic"
         and summary.get("stop_reason")
@@ -259,7 +263,8 @@ def completed_sampling(
         raise ValueError("Pending sampling did not seal a matching successful child")
     attempt = summary["attempts"][0]
     if (
-        attempt != json.loads(read_bounded(root / "attempt-000/cycle-result.json", 4 * 1024**2))
+        attempt
+        != json.loads(read_bounded(root / "attempt-000/cycle-result.json", SAMPLING_RESULT_LIMIT))
         or attempt.get("sampling_checkpoint_sha256") != parent["sha256"]
         or attempt.get("sampler_seed") != request.seed
         or attempt.get("candidate") != "candidate-000"
@@ -310,10 +315,9 @@ def completed_sampling(
         if isinstance(request, SACRealtimeCycle)
         else request.steps_per_attempt
     )
-    budget = (
-        min(count, request.max_updates_per_attempt)
-        if isinstance(request, SACRealtimeCycle)
-        else count
+    budget = sampling_update_budget(
+        count,
+        request.max_updates_per_attempt if isinstance(request, SACRealtimeCycle) else None,
     )
     if (
         type(count) is not int
