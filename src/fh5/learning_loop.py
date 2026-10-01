@@ -20,6 +20,7 @@ from fh5.collection_store import atomic_json, encode, read_bounded, write_file
 from fh5.evaluation import EvaluationPrepare, EvaluationReview, read_evaluation_batch
 from fh5.evaluation_completion import completed_evaluation
 from fh5.evaluation_run import EvaluationEnvironment, EvaluationRun
+from fh5.learning_capacity import capacity_decision, validate_storage_budget
 from fh5.learning_io import EvaluationLease, RejectedLease, SamplingLease
 from fh5.learning_recovery import completed_sampling
 from fh5.sac_cycle import SACCycle, SACEnvironment
@@ -60,7 +61,7 @@ def _sha(path: Path, limit: int = 4 * 1024**2) -> str:
 def _configuration(path: Path) -> dict[str, Any]:
     config: dict[str, Any] = json.loads(read_bounded(path, 1024**2))
     if (
-        set(config)
+        set(config) - ({"storage"} if config.get("version") == 2 else set())
         != {
             "version",
             "store",
@@ -74,9 +75,11 @@ def _configuration(path: Path) -> dict[str, Any]:
             "seed",
         }
         or type(config["version"]) is not int
-        or config["version"] != 1
+        or config["version"] not in (1, 2)
     ):
         raise ValueError("Unsupported learning loop configuration")
+    if config["version"] == 2:
+        config["storage"] = validate_storage_budget(config.get("storage"), path.parent)
     for key, low, high in (
         ("rounds", 1, 10),
         ("steps_per_attempt", 1, 1000),
@@ -154,7 +157,23 @@ class _Loop:
         )
         atomic_json(self.root / "state.json", self.state)
 
-    def initialize(self) -> None:
+    def capacity(self, phase: str) -> bool:
+        if "storage" not in self.config:
+            return True
+        decision = capacity_decision(
+            self.root, _sha(self.root / "state.json"), self.config["storage"], phase
+        )
+        stopped = (self.root / "stop.request").exists()
+        decision["stop_requested"] = stopped
+        self.state.setdefault("storage_checks", []).append(decision)
+        if stopped:
+            self.state["stop_reason"] = "stop_requested"
+        elif not decision["admitted"]:
+            self.state["stop_reason"] = "storage_budget_exhausted"
+        self.save("capacity_checked")
+        return bool(decision["admitted"] and not stopped)
+
+    def initialize(self) -> bool:
         from fh5.experiment import run_experiment
 
         history = run_experiment(CandidateHistory(self.store)).summary["candidate_store"]
@@ -162,6 +181,15 @@ class _Loop:
             raise ValueError("Learning store revision changed before initialization")
         self.state["store_revision"] = history["revision"]
         self.state["incumbent"] = _qualification(history)
+        self.state["source_files"] = {
+            self.config[key]: _sha(Path(self.config[key]))
+            for key in ("recording", "task", "reward")
+        }
+        self.state["config_sha256"] = _sha(self.root / "config.json")
+        self.state["initialized"] = False
+        self.save("initializing")
+        if not self.capacity("initialize"):
+            return False
         for role in ("default", "explorer"):
             saved = history[role]
             target = self.root / "initial" / role
@@ -175,14 +203,11 @@ class _Loop:
             )
             self.state[role] = _learner(target, saved["model_sha256"])
         self.state["latest_learner"] = self.state["explorer"]
-        self.state["source_files"] = {
-            self.config[key]: _sha(Path(self.config[key]))
-            for key in ("recording", "task", "reward")
-        }
-        self.state["config_sha256"] = _sha(self.root / "config.json")
+        self.state["initialized"] = True
         self.save("ready")
+        return True
 
-    def restore(self, expected: str) -> None:
+    def restore(self, expected: str) -> bool:
         path = self.root / "state.json"
         if _sha(path) != expected:
             raise ValueError("Learning continuation state changed")
@@ -194,6 +219,21 @@ class _Loop:
         ):
             raise ValueError("Learning continuation configuration changed")
         self.state = state
+        if state.get("initialized", True) is False:
+            if (
+                "storage" not in self.config
+                or state["phase"] != "stopped"
+                or state["stop_reason"] not in ("storage_budget_exhausted", "stop_requested")
+                or state["rounds"]
+                or any(role in state for role in ("default", "explorer", "latest_learner"))
+            ):
+                raise ValueError("Incomplete learning initialization cannot be resumed")
+            self.verify()
+            state["interruptions"].append(
+                {"stop_reason": state["stop_reason"], "phase": "initializing", "error": None}
+            )
+            state["resources_released"] = False
+            return self.initialize()
         for key in ("default", "explorer", "latest_learner"):
             saved = state[key]
             if _learner(Path(saved["directory"]), saved["sha256"]) != saved:
@@ -228,6 +268,7 @@ class _Loop:
         state.pop("error", None)
         state["resources_released"] = False
         self.save("resuming")
+        return True
 
     def verify(self) -> None:
         from fh5.experiment import run_experiment
@@ -625,16 +666,24 @@ class _Loop:
                     raise ValueError(
                         "Interrupted sampling is retained; cannot overwrite its attempts"
                     )
+                if not self.capacity("sampling"):
+                    return
                 if not self.sample(number, row):
                     return
             if (self.root / "stop.request").exists():
                 self.state["stop_reason"] = "stop_requested"
                 return
-            binding = row.get("candidate_evaluation") or self.evaluate(number, row)
+            binding = row.get("candidate_evaluation")
+            if binding is None:
+                if not self.capacity("evaluation"):
+                    return
+                binding = self.evaluate(number, row)
             if (self.root / "stop.request").exists():
                 self.state["stop_reason"] = "stop_requested"
                 return
             self.verify()
+            if not self.capacity("retention"):
+                return
             self.retain(number, row, binding)
             if row["evaluation_run"]["stop_reason"] != "plan_complete" and not row.get(
                 "evaluation_interrupted_by_stop"
@@ -671,12 +720,13 @@ def run_learning_loop(
             raise ValueError("Learning loop currently requires synthetic external I/O")
         lease.acquire()
         if isinstance(request, LearningContinue):
-            loop.restore(request.expected_state_sha256)
+            ready = loop.restore(request.expected_state_sha256)
             publish = True
         else:
             write_file(root / "config.json", encode(config))
-            loop.initialize()
-        loop.run()
+            ready = loop.initialize()
+        if ready:
+            loop.run()
     except (Exception, KeyboardInterrupt) as error:
         if not publish:
             raise

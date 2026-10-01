@@ -25,7 +25,7 @@ class LearningStoragePlan:
 
 
 class _Inventory:
-    def __init__(self, root: Path, output: Path) -> None:
+    def __init__(self, root: Path, output: Path | None) -> None:
         self.root, self.output = root, output
         self.files: dict[str, dict[str, Any]] = {}
         self.documents: dict[Path, tuple[str, dict[str, Any]]] = {}
@@ -99,7 +99,7 @@ class _Inventory:
 
     def tree(self, root: Path, role: str) -> None:
         root = self.path(root)
-        if self.output.is_relative_to(root):
+        if self.output is not None and self.output.is_relative_to(root):
             raise ValueError("Storage report must be outside retained source directories")
         if not root.is_dir():
             raise ValueError("Missing retained storage directory: " + str(root))
@@ -253,8 +253,13 @@ class _Inventory:
             for name in event["verification_evidence"]:
                 self.file(self.asset(event_path.parent, name), "automatic_start")
         self.file(Path(config["registry"]), "evidence_registry")
-        for role in ("default", "explorer", "latest_learner"):
-            self.checkpoint(Path(state[role]["directory"]), state[role]["sha256"], role)
+        roles = ("default", "explorer", "latest_learner")
+        if state.get("initialized", True) is False:
+            if state["rounds"] or any(role in state for role in roles):
+                raise ValueError("Uninitialized storage state cannot contain learners or rounds")
+        else:
+            for role in roles:
+                self.checkpoint(Path(state[role]["directory"]), state[role]["sha256"], role)
         self.evaluation(root, state["incumbent"])
         for row in state["rounds"]:
             if "learning" in row:
@@ -277,6 +282,18 @@ class _Inventory:
         for path, (digest, _) in self.documents.items():
             if hashlib.sha256(self.read_metadata(path, 128 * 1024**2)).hexdigest() != digest:
                 raise ValueError("Storage manifest changed during accounting: " + str(path))
+
+
+def measure_learning_storage(namespace: Path, run_dir: Path, state_sha256: str) -> dict[str, int]:
+    """Account at a quiescent learning boundary without writing an external report."""
+    inventory = _Inventory(namespace.resolve(), None)
+    inventory.session(run_dir, state_sha256)
+    inventory.stable()
+    return {
+        "protected_bytes": sum(entry["bytes"] for entry in inventory.files.values()),
+        "protected_files": len(inventory.files),
+        "metadata_read_bytes": inventory.metadata_bytes,
+    }
 
 
 def plan_learning_storage(request: LearningStoragePlan) -> RunResult:
