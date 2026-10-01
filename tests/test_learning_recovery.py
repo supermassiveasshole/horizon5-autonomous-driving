@@ -218,6 +218,41 @@ def test_unacknowledged_sampling_rejects_missing_or_inconsistent_child_evidence(
                 path.write_bytes(raw)
 
 
+def test_sampling_recovery_requires_raw_frame_and_review_attachment_inventory(
+    tmp_path, seeded_loop
+):
+    request = loop_request(tmp_path, seeded_loop, rounds=1)
+    interrupt_selection(request, seeded_loop[0], "before_learned")
+    state = request.output_dir / "state.json"
+    original_state = state.read_bytes()
+    root = request.output_dir / "round-000/learning"
+    summary_path = root / "summary.json"
+    result_path = root / "attempt-000/cycle-result.json"
+    original_summary, original_result = summary_path.read_bytes(), result_path.read_bytes()
+    inventory = json.loads(original_summary)["attempts"][0]["source_assets"]
+    frame = next(Path(name) for name in inventory if name.endswith(".rgb"))
+    attachment = root / "attempt-000/independent-review.md"
+    for omitted in (frame, attachment):
+        original_asset = omitted.read_bytes()
+        summary = json.loads(original_summary)
+        del summary["attempts"][0]["source_assets"][str(omitted.resolve())]
+        backend = SharedBackend(seeded_loop[0])
+        try:
+            summary_path.write_text(json.dumps(summary))
+            result_path.write_text(json.dumps(summary["attempts"][0]))
+            omitted.unlink()
+            with pytest.raises(ValueError, match="inventory"):
+                run_experiment(
+                    LearningContinue(request.output_dir, sha(state)), learning_environment=backend
+                )
+            assert state.read_bytes() == original_state
+            assert not backend.leases and backend.closed
+        finally:
+            omitted.write_bytes(original_asset)
+            summary_path.write_bytes(original_summary)
+            result_path.write_bytes(original_result)
+
+
 def test_commit_recovery_rejects_changed_assets_and_another_store_successor(tmp_path, seeded_loop):
     request = loop_request(tmp_path, seeded_loop, rounds=1)
     interrupt_selection(request, seeded_loop[0])

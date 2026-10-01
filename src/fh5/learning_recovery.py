@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from fh5.collection_store import read_bounded
+from fh5.numeric_images import asset
 from fh5.sac_cycle import SACCycle
 from fh5.sac_learning import validate_sac_candidate
 from fh5.sampling_evidence import verify_sampling_sources
@@ -15,6 +16,36 @@ from fh5.sampling_evidence import verify_sampling_sources
 
 def _sha(path: Path, limit: int = 4 * 1024**2) -> str:
     return hashlib.sha256(read_bounded(path, limit)).hexdigest()
+
+
+def _require_originals(root: Path, inventory: dict[str, str], sources: dict[str, Any]) -> None:
+    def require(path: Path, digest: str | None = None) -> None:
+        stored = inventory.get(str(path.resolve()))
+        if stored is None or (digest is not None and stored != digest):
+            raise ValueError("Pending sampling original inventory is incomplete or inconsistent")
+
+    for name in ("sampling.json", "recording/report.json", "recording/report.html"):
+        require(root / name)
+    for name, key in (
+        ("trace.json", "trace"),
+        ("recording/packets.jsonl", "packets"),
+        ("recording/session.json", "session"),
+    ):
+        require(root / name, sources[key])
+    trace = json.loads(read_bounded(root / "trace.json", 4 * 1024**2))
+    for observation in trace["observations"]:
+        for frame in observation["frames"]:
+            require(asset(root, frame["path"]), frame["sha256"])
+    if sources["review"] is not None:
+        proofs = [Path(name) for name, digest in inventory.items() if digest == sources["review"]]
+        if not proofs:
+            raise ValueError("Pending sampling inventory omits its independent review")
+        # Same bytes at different paths can refer to different relative attachments.
+        # Require the attachments of every retained matching original review.
+        for path in proofs:
+            proof = json.loads(read_bounded(path, 4 * 1024**2))
+            for item in proof["items"]:
+                require(asset(path.parent, item["path"]), item["sha256"])
 
 
 def completed_sampling(
@@ -69,6 +100,7 @@ def completed_sampling(
     }
     if any(source_hashes[key] != _sha(path, 256 * 1024**2) for key, path in originals.items()):
         raise ValueError("Pending sampling replay differs from its original evidence")
+    _require_originals(root / "attempt-000", attempt["source_assets"], source_hashes)
     candidate = root / "candidate-000"
     manifest_sha = _sha(candidate / "policy.json")
     if attempt["candidate_sha256"] != manifest_sha:
