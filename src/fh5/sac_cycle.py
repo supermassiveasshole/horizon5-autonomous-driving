@@ -180,6 +180,9 @@ def run_sac_cycle(
                     > 512 * 1024**2
                 ):
                     raise ValueError("SAC attempt exceeds 512 MiB numerical frame budget")
+                if stopped():
+                    summary["stop_reason"] = "stop_requested"
+                    break
                 attempt_dir = root / f"attempt-{number:03d}"
                 if isinstance(request, SACRealtimeCycle):
                     runtime = request.runtime

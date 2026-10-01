@@ -4,6 +4,7 @@ import json
 import struct
 import time
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
 from test_attempts import evidence
@@ -185,3 +186,23 @@ def test_without_independent_task_evidence_cycle_preserves_sampling_but_cannot_l
     attempt = result["attempts"][0]
     assert attempt["eligible_transitions"] == 0 and "learner_updates" not in attempt
     assert attempt["received_packets"] > 0 and attempt["source_assets"]
+
+
+def test_stop_arriving_during_checkpoint_load_prevents_new_input_acquisition(
+    tmp_path, sac_policy, monkeypatch
+):
+    settings = request(tmp_path, sac_policy)
+    environment = AsyncEnvironment(settings.output_dir)
+    original_open = Path.open
+
+    def externally_stopped(path, mode="r", *args, **kwargs):
+        if path == sac_policy / "policy.pt" and mode == "rb":
+            (settings.output_dir / "stop.request").write_text("operator stopped during I/O")
+        return original_open(path, mode, *args, **kwargs)
+
+    # Only the external filesystem timing changes; loading and model execution remain real.
+    monkeypatch.setattr(Path, "open", externally_stopped)
+    result = run_experiment(settings, sac_realtime_environment=environment).summary["sac_cycle"]
+    assert result["stop_reason"] == "stop_requested", result
+    assert environment.games == [] and result["attempts"] == []
+    assert result["resources_released"] and environment.closed

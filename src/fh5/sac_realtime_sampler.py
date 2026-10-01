@@ -64,6 +64,9 @@ def sample_realtime_attempt(
     drive = None
     review = None
     try:
+        if stopped():
+            result.update(stop_reason="user_stop", resources_released=True)
+            return result, None
         drive = _AttemptDrive(environment.start(identity, runtime), stopped)
         if drive.source_kind != "synthetic":
             raise ValueError("Asynchronous SAC cycle requires synthetic external I/O")
