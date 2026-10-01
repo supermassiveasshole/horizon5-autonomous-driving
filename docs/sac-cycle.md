@@ -55,4 +55,4 @@ uv run --locked fh5 sac-resume --checkpoint runs/sac-001 --output runs/sac-002 -
 
 `summary.json` / `report.html` 汇总候选、尝试、有效/排除转移及故障；每次尝试保留 `sampling.json`、`trace.json`、数值帧、完整遥测和独立结算。`candidate-NNN/` 支持已有续训入口，搬走采样目录仍可继续其封存经验。原始来源清单用于追溯，运行所需数值帧按内容摘要保存在合并经验中。
 
-仍需继续：示范/在线数据混合与临时模仿约束退出、冻结 SAC 评估接入、候选筛选、原生异步时序和自动重新入场、完整在线学习调度恢复，以及真实驾驶收益。不能用此处的合成回报或 loss 变化宣布车辆已进化。
+[示范/在线混合](sac-mixture.md)、[临时 BC 约束退出](sac-imitation.md)、[冻结 SAC 评估](evaluation.md)、[候选比较](candidate-selection.md)及[完整归档恢复](candidate-archive.md)已有各自的软件实现。仍需将这些环节集成为持久的无人值守调度，继续完善版本选择历史、回退、原生异步时序与自动重新入场，以及真实驾驶收益验证。实机验收待完成不阻止独立集成与故障测试；不能用此处的合成回报或 loss 变化宣布车辆已进化。
