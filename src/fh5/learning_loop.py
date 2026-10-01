@@ -433,6 +433,34 @@ class _Loop:
                 {"kind": "sealed_evaluation", "round": number}
             )
 
+    def review_ledger(self, root: Path, row: dict[str, Any]) -> Path:
+        child = root / "evaluation"
+        if "review_input" not in row:
+            ledger = json.loads(read_bounded(child / "ledger.json", 4 * 1024**2))
+            for entry in ledger["entries"]:
+                recording = (child / entry["recording"]).resolve()
+                entry["recording"] = str(recording)
+                for key in ("execution", "preparation"):
+                    if entry.get(key) is not None:
+                        entry[key]["directory"] = str((child / entry[key]["directory"]).resolve())
+                if entry["evidence"] is not None:
+                    entry["evidence"]["file"] = str((child / entry["evidence"]["file"]).resolve())
+                if (recording / "packets.jsonl").is_file():
+                    proof = self.environment.review(recording)
+                    if proof is not None:
+                        entry["evidence"] = {"file": str(proof.resolve()), "sha256": _sha(proof)}
+            # Freeze the complete input before publishing its derived file or report.
+            row["review_input"] = ledger
+            self.save("reviewing_evaluation")
+        path = root / "parent-ledger.json"
+        raw = encode(row["review_input"])
+        if path.exists():
+            if read_bounded(path, 4 * 1024**2) != raw:
+                raise ValueError("Frozen parent evaluation review changed")
+        else:
+            atomic_json(path, row["review_input"])
+        return path
+
     def evaluate(self, number: int, row: dict[str, Any]) -> dict[str, Any]:
         from fh5.experiment import run_experiment
 
@@ -491,23 +519,23 @@ class _Loop:
         row["evaluation_run"] = execution
         row["evaluation_interrupted_by_stop"] = (self.root / "stop.request").exists()
         self.state["child_resources_released"] &= execution["resources_released"]
+        for attempt in range(10):
+            review_output = root / ("reviewed" if attempt == 0 else f"reviewed-{attempt:03d}")
+            if not review_output.exists():
+                break
+        else:
+            raise ValueError("Parent evaluation review exceeds 10 retained publications")
+        directories = row.setdefault("review_directories", [])
+        if str(review_output) not in directories:
+            directories.append(str(review_output))
         self.save("reviewing_evaluation")
-        ledger_file = root / "evaluation/ledger.json"
-        ledger = json.loads(read_bounded(ledger_file, 4 * 1024**2))
-        for entry in ledger["entries"]:
-            recording = ledger_file.parent / entry["recording"]
-            if not (recording / "packets.jsonl").is_file():
-                continue
-            proof = self.environment.review(recording)
-            if proof is not None:
-                entry["evidence"] = {"file": str(proof.resolve()), "sha256": _sha(proof)}
+        ledger_file = self.review_ledger(root, row)
         # Never derive legality from the model or a successful execution summary.
-        atomic_json(ledger_file, ledger)
         row["evaluation"] = run_experiment(
             EvaluationReview(
                 batch,
                 ledger_file,
-                root / "reviewed",
+                review_output,
                 self.registry,
             )
         ).summary["evaluation"]

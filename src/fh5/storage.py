@@ -262,6 +262,12 @@ class _Inventory:
                 self.checkpoint(Path(state[role]["directory"]), state[role]["sha256"], role)
         self.evaluation(root, state["incumbent"])
         for row in state["rounds"]:
+            # Parent review input may be frozen before its derived ledger exists.
+            # Recordings are in the session tree; independent proof can live outside it.
+            if "review_input" in row:
+                for entry in row["review_input"]["entries"]:
+                    if entry.get("evidence") is not None:
+                        self.evidence(root, entry["evidence"], "parent_review")
             if "learning" in row:
                 learning = row["learning"]
                 sampled = self.document(

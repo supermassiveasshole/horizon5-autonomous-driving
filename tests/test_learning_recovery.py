@@ -18,7 +18,13 @@ from fh5.learning_loop import LearningContinue
 
 
 def interrupt_selection(
-    request, source, boundary="after_commit", *, large_trace=False, failed_evaluation=False
+    request,
+    source,
+    boundary="after_commit",
+    *,
+    large_trace=False,
+    failed_evaluation=False,
+    parent_evidence=False,
 ):
     repository = Path(__file__).resolve().parents[1]
     environment = dict(os.environ)
@@ -39,6 +45,9 @@ from test_learning_loop import SharedBackend
 root = Path(sys.argv[2]).resolve()
 original_replace = os.replace
 def replace(source, destination, *args, **kwargs):
+    if (sys.argv[4] == 'before_parent_ledger'
+            and Path(destination).resolve() == root / 'round-000/parent-ledger.json'):
+        os._exit(73)
     if Path(destination).resolve() == root / 'state.json':
         value = json.loads(Path(source).read_bytes())
         if sys.argv[4] == 'before_commit' and value['phase'] == 'saving_versions':
@@ -53,9 +62,25 @@ def replace(source, destination, *args, **kwargs):
         if sys.argv[4] == 'before_evaluation_run' and value['phase'] == 'evaluating':
             original_replace(source, destination, *args, **kwargs)
             os._exit(73)
+        if sys.argv[4] == 'before_parent_review_ack' and value['phase'] == 'evaluated':
+            os._exit(73)
     return original_replace(source, destination, *args, **kwargs)
 os.replace = replace
+original_open = Path.open
+def open_file(path, *args, **kwargs):
+    if (sys.argv[4] == 'before_review_report'
+            and path.resolve() == root / 'round-000/reviewed/batch-report.json'):
+        os._exit(73)
+    return original_open(path, *args, **kwargs)
+Path.open = open_file
 backend = SharedBackend(Path(sys.argv[3]))
+if sys.argv[5] == 'parent_evidence':
+    from test_attempts import evidence
+    def review(recording):
+        target = root.parent / 'independent-evidence' / recording.parent.name
+        target.mkdir(parents=True, exist_ok=True)
+        return evidence(target, recording)
+    backend.review = review
 if sys.argv[5] == 'failed_evaluation':
     original_evaluation = backend.evaluation
     def evaluation(identity):
@@ -94,6 +119,8 @@ raise SystemExit('Expected filesystem exit was not reached')
             if large_trace
             else "failed_evaluation"
             if failed_evaluation
+            else "parent_evidence"
+            if parent_evidence
             else "normal_trace",
         ],
         env=environment,
