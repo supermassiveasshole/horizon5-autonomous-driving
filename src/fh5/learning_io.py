@@ -15,13 +15,26 @@ from fh5.realtime import RealtimeEnvironment, TimelineInput
 from fh5.sac_sampler import SACEnvironment, SACSample, SACStart
 
 
+class RejectedLease(ValueError):
+    def __init__(self, released: dict[str, Any]):
+        super().__init__("Learning lease must use synthetic external I/O")
+        self.released = released
+
+
+def _require_synthetic(source: SACEnvironment | EvaluationEnvironment) -> None:
+    if source.source_kind != "synthetic":
+        try:
+            released = source.close()
+        except Exception as error:
+            released = {"resources_released": False, "error": str(error)}
+        raise RejectedLease(released)
+
+
 class SamplingLease:
     source_kind: Literal["synthetic"] = "synthetic"
 
     def __init__(self, source: SACEnvironment, phase: Callable[[str], None]):
-        if source.source_kind != "synthetic":
-            source.close()
-            raise ValueError("Sampling lease must use synthetic external I/O")
+        _require_synthetic(source)
         self.source, self.phase = source, phase
         self.released: dict[str, Any] | None = None
 
@@ -121,9 +134,7 @@ class EvaluationLease:
         phase: Callable[[str], None],
         stopped: Callable[[], bool],
     ):
-        if source.source_kind != "synthetic":
-            source.close()
-            raise ValueError("Evaluation lease must use synthetic external I/O")
+        _require_synthetic(source)
         self.source, self.phase, self.stopped = source, phase, stopped
 
     def event(self, slot_id: str) -> EventEnvironment:

@@ -18,9 +18,10 @@ from fh5.collection_lease import CollectionLease
 from fh5.collection_store import atomic_json, encode, read_bounded, write_file
 from fh5.evaluation import EvaluationPrepare, EvaluationReview, read_evaluation_batch
 from fh5.evaluation_run import EvaluationEnvironment, EvaluationRun
-from fh5.learning_io import EvaluationLease, SamplingLease
+from fh5.learning_io import EvaluationLease, RejectedLease, SamplingLease
 from fh5.sac_cycle import SACCycle, SACEnvironment
 from fh5.sac_learning import validate_sac_candidate
+from fh5.sampling_evidence import verify_sampling_sources
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -199,6 +200,11 @@ class _Loop:
                 binding = row["learning"]
                 if _sha(Path(binding["directory"]) / "summary.json") != binding["summary_sha256"]:
                     raise ValueError("Retained sampling result changed")
+                sampled = json.loads(
+                    read_bounded(Path(binding["directory"]) / "summary.json", 4 * 1024**2)
+                )
+                for attempt in sampled["attempts"]:
+                    verify_sampling_sources(attempt.get("source_assets", {}))
             if "candidate_evaluation" in row:
                 _input(self.root, row["candidate_evaluation"]).verify()
         self.verify()
@@ -475,6 +481,11 @@ def run_learning_loop(
     except (Exception, KeyboardInterrupt) as error:
         if not publish:
             raise
+        if isinstance(error, RejectedLease):
+            loop.state["rejected_lease"] = error.released
+            loop.state["child_resources_released"] &= (
+                error.released.get("resources_released") is True
+            )
         loop.state.update(
             stop_reason="user_stop" if isinstance(error, KeyboardInterrupt) else "interface_error",
             error=f"{type(error).__name__}: {error}",

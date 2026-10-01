@@ -22,6 +22,7 @@ from fh5.sac_sampler import (
     SACStart,
     sample_attempt,
 )
+from fh5.sampling_evidence import seal_sampling_sources, verify_sampling_sources
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -135,6 +136,7 @@ def run_sac_cycle(
                     stopped,
                 )
                 summary["attempts"].append(result)
+                result["source_assets"] = seal_sampling_sources(attempt_dir, review)
                 if stopped():
                     summary["stop_reason"] = "stop_requested"
                     break
@@ -152,6 +154,7 @@ def run_sac_cycle(
                     )
                 ).summary["sac_replay"]
                 result.update(prepared)
+                verify_sampling_sources(result["source_assets"])
                 replay = attempt_dir / "prepared/replay.json"
                 result["replay"] = replay.relative_to(root).as_posix()
                 count = prepared["eligible_transitions"]

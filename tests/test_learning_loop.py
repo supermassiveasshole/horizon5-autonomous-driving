@@ -357,3 +357,167 @@ def test_unconfirmed_restart_retains_the_candidate_and_stops_further_sampling(
     assert result["rounds"][0]["evaluation"]["unstarted_slots"] == ["run-0", "run-1"]
     assert result["rounds"][0]["selection"] == "retain_incumbent"
     assert result["resources_released"]
+
+
+def test_menu_release_failure_survives_successful_backend_close(tmp_path, seeded_loop):
+    request = loop_request(tmp_path, seeded_loop, rounds=1)
+
+    class FailedMenuRelease(SharedBackend):
+        def evaluation(self, identity):
+            lease = super().evaluation(identity)
+            original_event = lease.event
+
+            def event(slot):
+                menu = original_event(slot)
+
+                def release():
+                    raise OSError("synthetic menu release failed")
+
+                menu.release = release
+                return menu
+
+            lease.event = event
+            return lease
+
+    backend = FailedMenuRelease(seeded_loop[0])
+    result = run_experiment(request, learning_environment=backend).summary["learning_loop"]
+    assert result["environment"]["resources_released"] is True
+    assert result["resources_released"] is False
+    assert result["child_resources_released"] is False
+    assert result["stop_reason"] == "release_fault"
+    assert result["learner_updates"] == 3
+    assert result["store_revision"] == seeded_loop[2]["revision"]
+    assert not backend.leases[1].drives
+
+
+def test_menu_close_exception_survives_successful_backend_close(tmp_path, seeded_loop):
+    request = loop_request(tmp_path, seeded_loop, rounds=1)
+
+    class FailedMenuClose(SharedBackend):
+        def evaluation(self, identity):
+            lease = super().evaluation(identity)
+            original_event = lease.event
+            original_close = lease.close
+
+            def close_backend():
+                original_close()
+                return {"resources_released": True}
+
+            def event(slot):
+                menu = original_event(slot)
+
+                def close():
+                    raise OSError("synthetic menu close failed")
+
+                menu.close = close
+                return menu
+
+            lease.event = event
+            lease.close = close_backend
+            return lease
+
+    backend = FailedMenuClose(seeded_loop[0])
+    result = run_experiment(request, learning_environment=backend).summary["learning_loop"]
+    assert result["environment"]["resources_released"] is True
+    assert result["resources_released"] is False
+    assert result["child_resources_released"] is False
+    assert result["stop_reason"] == "release_fault"
+    assert result["store_revision"] == seeded_loop[2]["revision"]
+    assert not backend.leases[1].drives
+
+
+def test_rejected_child_cannot_hide_failed_cleanup(tmp_path, seeded_loop):
+    for kind in ("sampling", "evaluation"):
+        folder = tmp_path / kind
+        folder.mkdir()
+        request = loop_request(folder, seeded_loop, rounds=1)
+
+        class RejectedChild(SharedBackend):
+            def reject(self, lease):
+                lease.source_kind = "unsupported"
+                original_close = lease.close
+
+                def close():
+                    original_close()
+                    return {"resources_released": False}
+
+                lease.close = close
+                return lease
+
+            def sampling(self, identity):
+                lease = super().sampling(identity)
+                return self.reject(lease) if kind == "sampling" else lease
+
+            def evaluation(self, identity):
+                return self.reject(super().evaluation(identity))
+
+        backend = RejectedChild(seeded_loop[0])
+        result = run_experiment(request, learning_environment=backend).summary["learning_loop"]
+        assert result["environment"]["resources_released"] is True
+        assert result["resources_released"] is False
+        assert result["child_resources_released"] is False
+        assert result["stop_reason"] == "release_fault"
+        assert result["store_revision"] == seeded_loop[2]["revision"]
+        if kind == "sampling":
+            assert not backend.leases[-1].commands
+        else:
+            assert not backend.leases[-1].menus
+
+
+def test_continuation_verifies_sampling_originals_and_external_review(tmp_path, seeded_loop):
+    from fh5.learning_loop import LearningContinue
+
+    request = loop_request(tmp_path, seeded_loop, rounds=1)
+    proof_dir = tmp_path / "observer"
+    proof_dir.mkdir()
+
+    class ExternalReview(SharedBackend):
+        def sampling(self, identity):
+            lease = super().sampling(identity)
+            original_finish = lease.finish
+
+            def finish(recording):
+                proof = original_finish(recording)
+                for name in (proof.name, "independent-review.md"):
+                    shutil.move(proof.parent / name, proof_dir / name)
+                return proof_dir / proof.name
+
+            lease.finish = finish
+            return lease
+
+    result = run_experiment(request, learning_environment=ExternalReview(seeded_loop[0])).summary[
+        "learning_loop"
+    ]
+    assert result["stop_reason"] == "budget_completed"
+    attempt = request.output_dir / "round-000/learning/attempt-000"
+    state = request.output_dir / "state.json"
+    original_state = state.read_bytes()
+    trace = json.loads((attempt / "trace.json").read_bytes())
+    paths = [
+        attempt / "trace.json",
+        attempt / "recording/packets.jsonl",
+        attempt / "recording/session.json",
+        attempt / trace["observations"][0]["frames"][0]["path"],
+        proof_dir / "evidence.json",
+        proof_dir / "independent-review.md",
+    ]
+    for path in paths:
+        raw = path.read_bytes()
+        path.write_bytes(b'{"corrupted":true}')
+        backend = SharedBackend(seeded_loop[0])
+        try:
+            with pytest.raises(ValueError, match="sampling.*changed"):
+                run_experiment(
+                    LearningContinue(request.output_dir, sha(state)), learning_environment=backend
+                )
+            assert state.read_bytes() == original_state
+            assert not backend.leases and backend.closed
+        finally:
+            path.write_bytes(raw)
+    backend = SharedBackend(seeded_loop[0])
+    resumed = run_experiment(
+        LearningContinue(request.output_dir, sha(state)), learning_environment=backend
+    ).summary["learning_loop"]
+    assert resumed["stop_reason"] == "budget_completed"
+    assert resumed["learner_updates"] == 3
+    assert not backend.leases and backend.closed

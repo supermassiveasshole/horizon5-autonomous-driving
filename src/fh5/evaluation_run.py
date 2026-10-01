@@ -174,6 +174,8 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
             directory = root / f"attempt-{i:04d}"
             directory.mkdir()
             menu_environment = environment.event(slot["id"])
+            preparation: dict[str, Any] = {"slot_id": slot["id"], "release_sent": False}
+            summary["preparations"].append(preparation)
             try:
                 _verify_event_protocol(root, protocol_sha)
             except (Exception, KeyboardInterrupt):
@@ -182,15 +184,16 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
                 finally:
                     menu_environment.close()
                 raise
-            preparation = run_experiment(
-                EventRun(
-                    event_file,
-                    directory / "ready",
-                    operation=request.initial_operation if i == 0 else "restart_ready",
-                ),
-                event_environment=menu_environment,
-            ).summary["event_run"]
-            summary["preparations"].append({"slot_id": slot["id"], **preparation})
+            preparation.update(
+                run_experiment(
+                    EventRun(
+                        event_file,
+                        directory / "ready",
+                        operation=request.initial_operation if i == 0 else "restart_ready",
+                    ),
+                    event_environment=menu_environment,
+                ).summary["event_run"]
+            )
             if (
                 not preparation["ready_verified"]
                 or not preparation["release_sent"]
@@ -310,9 +313,11 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
         except Exception as error:
             summary["environment"] = {"resources_released": False, "error": str(error)}
             summary["stop_reason"] = "close_failed"
-        summary["resources_released"] = summary["environment"].get(
-            "resources_released", False
-        ) and all(a["resources_released"] for a in summary["attempts"])
+        summary["resources_released"] = (
+            summary["environment"].get("resources_released", False)
+            and all(a["resources_released"] for a in summary["attempts"])
+            and all(p["release_sent"] for p in summary["preparations"])
+        )
     assert batch is not None
     summary["unstarted_slots"] = [
         p["id"] for p in batch["config"]["plan"] if p["id"] not in summary["started_slots"]
