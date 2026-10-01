@@ -80,6 +80,35 @@ def test_expired_start_handoff_never_sends_a_nonzero_command(tmp_path, policy):
     assert result.summary["evaluation"]["unstarted_slots"] == ["run-1"]
 
 
+def test_state_change_while_waiting_for_first_prediction_prevents_driving(tmp_path, policy):
+    class ChangedBeforeCommand(PacketGame):
+        def read(self, period_s):
+            point = super().read(period_s)
+            if len(self.packets) == 1:
+                return replace(point, observation=None)
+            raw = bytearray(point.raw_packets[0].payload)
+            struct.pack_into("<f", raw, 244, 10)
+            packet = replace(point.raw_packets[0], payload=bytes(raw))
+            self.packets[-1] = packet
+            return replace(point, raw_packets=(packet,))
+
+    class ChangedBatch(Batch):
+        def driving(self, slot_id, ready_state):
+            game = ChangedBeforeCommand()
+            self.drives.append(game)
+            return game
+
+    operation = automatic_request(tmp_path, policy)
+    game = ChangedBatch()
+    result = run_experiment(operation, evaluation_environment=game)
+    assert not any(
+        c.throttle_u8 or c.brake_u8 or c.steer_i16 for g in game.drives for _, c in g.sent
+    )
+    assert result.summary["evaluation"]["verified_starts"] == 0
+    assert result.summary["evaluation"]["metrics"]["all_attempts"] == 1
+    assert result.summary["evaluation"]["unstarted_slots"] == ["run-1"]
+
+
 def test_failed_driver_open_retains_the_started_slot_and_its_unknown_start(tmp_path, policy):
     class FailedSecondDriver(Batch):
         def driving(self, slot_id, ready_state):
@@ -102,6 +131,47 @@ def recorded_starts(tmp_path_factory, policy):
     operation = automatic_request(root, policy)
     run_experiment(operation, evaluation_environment=Batch())
     return operation.output_dir
+
+
+def test_reviewer_checks_state_between_initial_packet_and_first_command(tmp_path, recorded_starts):
+    root = tmp_path / "recorded"
+    shutil.copytree(recorded_starts, root)
+    execution = root / "attempt-0001/execution"
+    journal = execution / "realtime-events.jsonl"
+    events = [json.loads(line) for line in journal.read_text().splitlines()]
+    packets = [e["data"] for e in events if e["kind"] == "packet"]
+    first_command = next(e["data"] for e in events if e["kind"] == "command")
+    assert packets[1]["received_monotonic_ns"] < first_command["issued_ns"]
+    raw = bytearray.fromhex(packets[1]["payload_hex"])
+    struct.pack_into("<f", raw, 244, 10)
+    packets[1]["payload_hex"] = raw.hex()
+    journal.write_text("".join(json.dumps(e) + "\n" for e in events))
+    report_path = execution / "report.json"
+    report = json.loads(report_path.read_bytes())
+    report["journal"]["sha256"] = sha(journal)
+    report_path.write_text(json.dumps(report))
+    execution_manifest = execution / "realtime-manifest.json"
+    execution_manifest.write_text(json.dumps({"version": 1, "report_sha256": sha(report_path)}))
+    packets_path = root / "attempt-0001/recording/packets.jsonl"
+    packets_path.write_text("".join(json.dumps(p) + "\n" for p in packets))
+    ledger_path = root / "ledger.json"
+    ledger = json.loads(ledger_path.read_bytes())
+    entry = ledger["entries"][1]
+    entry["files"]["packets.jsonl"] = sha(packets_path)
+    entry["execution"]["manifest_sha256"] = sha(execution_manifest)
+    prep_manifest = root / "attempt-0001/ready/start-manifest.json"
+    manifest = json.loads(prep_manifest.read_bytes())
+    manifest.update(recording_sha256=sha(packets_path), execution_sha256=sha(execution_manifest))
+    prep_manifest.write_text(json.dumps(manifest))
+    entry["preparation"]["manifest_sha256"] = sha(prep_manifest)
+    ledger_path.write_text(json.dumps(ledger))
+    review = run_experiment(
+        EvaluationReview(root / "frozen", ledger_path, tmp_path / "reviewed")
+    ).summary["evaluation"]
+    assert review["executions"][1]["status"] == "bound_diagnostic"
+    assert [s["status"] for s in review["starts"]] == ["verified", "quarantined"]
+    assert "before first policy command" in str(review["starts"][1]["reasons"])
+    assert review["metrics"]["all_attempts"] == 2
 
 
 @pytest.mark.parametrize("fault", ["missing", "other_slot", "changed_frame"])
@@ -134,6 +204,7 @@ def test_start_binding_gaps_do_not_erase_attempts_or_qualify_the_wrong_start(
         ("pixels", "driving frames"),
         ("capture_time", "frame timing"),
         ("telemetry", "stationary telemetry"),
+        ("release", "release evidence"),
     ],
 )
 def test_claimed_readiness_is_recomputed_from_sources_after_manifest_rebinding(
@@ -152,7 +223,7 @@ def test_claimed_readiness_is_recomputed_from_sources_after_manifest_rebinding(
             event["sha256"] = sha(frame)
     elif fault == "capture_time":
         screens[-1]["captured_ns"] = 1
-    else:
+    elif fault == "telemetry":
         packets_path = ready / "packets.jsonl"
         packets = [json.loads(line) for line in packets_path.read_text().splitlines()]
         raw = bytearray.fromhex(packets[-1]["payload_hex"])
@@ -162,6 +233,9 @@ def test_claimed_readiness_is_recomputed_from_sources_after_manifest_rebinding(
         for event in events:
             if event["kind"] == "asset" and event["path"] == "packets.jsonl":
                 event["sha256"] = sha(packets_path)
+    else:
+        released = next(e for e in events if e["kind"] == "released")
+        released.update(kind="release_failed", error="synthetic release failure")
     journal.write_text("".join(json.dumps(e) + "\n" for e in events))
     saved_path = ready / "event-run.json"
     saved = json.loads(saved_path.read_bytes())

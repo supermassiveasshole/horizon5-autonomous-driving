@@ -1,6 +1,6 @@
 # 局部尝试与独立有效性（T06 / #7）
 
-`run_experiment(AttemptReplay(...))` 和 `fh5 attempt-review` 对**完整录制**作离线判定，不发送游戏输入，不要求自动重开。报告包含全部尝试、前向片段、排除区、局部起终点、控制归属、证据和正式全程结论。当前规则版本为 `local-validity-v2`：增加导航事件、任务阶段边界及显式接口故障清单，原 v1 结果保留。
+`run_experiment(AttemptReplay(...))` 和 `fh5 attempt-review` 对**完整录制**作离线判定，不发送游戏输入，不要求自动重开。报告包含全部尝试、前向片段、排除区、局部起终点、控制归属、证据和正式全程结论。人工置位采用 `local-validity-v2`：包含导航事件、任务阶段边界及显式接口故障清单；自动起跑任务采用下述 v3。历史结果保留。
 
 ```powershell
 uv run --locked fh5 attempt-review runs/my-recording --task runs/my-task.json --evidence runs/my-review.json --output runs/my-verdict

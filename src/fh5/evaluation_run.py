@@ -56,7 +56,8 @@ def _freeze(request: EvaluationRun) -> tuple[dict[str, Any], Path, dict[str, Any
     plan = batch["config"]["plan"]
     if not 1 <= len(plan) <= 10 or any(p["reference_mode"] != "no_reference" for p in plan):
         raise ValueError("Current repeated runner supports 1..10 no-reference runs")
-    menu = validate_event_file(request.event_config_file)
+    event_snapshot = event_payloads(request.event_config_file)
+    menu = json.loads(event_snapshot["start/event.json"])
     runtime = batch["config"]["runtime"]
     if (
         not menu["event_run"]["conditions_verified"]
@@ -78,36 +79,23 @@ def _freeze(request: EvaluationRun) -> tuple[dict[str, Any], Path, dict[str, Any
         dest.parent.mkdir(parents=True, exist_ok=True)
         write_file(dest, read_bounded(request.batch_dir / name, asset_limit(name)))
     read_evaluation_batch(root / "frozen", request.batch_sha256)
-    assets = root / "event-assets"
-    assets.mkdir()
-    references = [
-        patch for patches in menu["event_run"]["signatures"].values() for patch in patches
-    ]
-    for i, patch in enumerate(references):
-        name = f"event-assets/{i}.pgm"
-        write_file(
-            root / name,
-            read_bounded(request.event_config_file.parent / patch["template"], 16 * 1024**2),
-        )
-        patch["template"] = name
-    for i, source in enumerate(menu["event_run"]["verification_evidence"]):
-        name = f"event-assets/evidence-{i}"
-        write_file(
-            root / name, read_bounded(request.event_config_file.parent / source, 16 * 1024**2)
-        )
-        menu["event_run"]["verification_evidence"][i] = name
+    event_files = {}
+    for name, payload in event_snapshot.items():
+        relative = name.removeprefix("start/")
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        write_file(destination, payload)
+        event_files[relative] = hashlib.sha256(payload).hexdigest()
     event_file = root / "event.json"
-    write_file(event_file, encode(menu))
     validate_event_file(event_file)
     task = _read(root / "frozen/task.json")[0]
     if task["version"] == 2:
-        canonical = event_payloads(request.event_config_file)
         frozen = {
             name: read_bounded(root / "frozen" / name, 16 * 1024**2)
             for name in batch["files"]
             if name.startswith("start/")
         }
-        if canonical != frozen:
+        if event_snapshot != frozen:
             raise ValueError("Requested event differs from the frozen automatic start protocol")
     write_file(
         root / "run-protocol.json",
@@ -116,10 +104,7 @@ def _freeze(request: EvaluationRun) -> tuple[dict[str, Any], Path, dict[str, Any
                 "version": 1,
                 "batch_sha256": request.batch_sha256,
                 "seconds_per_attempt": request.seconds,
-                "event_files": {
-                    p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
-                    for p in [event_file, *assets.iterdir()]
-                },
+                "event_files": event_files,
                 "source_kind": "synthetic",
                 "exploration": False,
                 "rewind": False,

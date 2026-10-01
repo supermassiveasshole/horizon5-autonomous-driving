@@ -90,6 +90,31 @@ def _menu_ready(
         or summary.get("stop_reason") != "ready"
     ):
         raise ValueError("Preparation did not finish a complete ready operation")
+    kinds = [event["kind"] for event in events]
+    allowed = {
+        "asset",
+        "prepare",
+        "screen",
+        "menu_action",
+        "recovery_verified",
+        "ready_verified",
+        "released",
+        "adapter_event",
+        "run_ended",
+    }
+    if (
+        any(kind not in allowed for kind in kinds)
+        or kinds.count("released") != 1
+        or kinds.count("ready_verified") != 1
+        or not kinds.index("ready_verified") < kinds.index("released") < len(kinds) - 1
+        or any(
+            kind not in {"adapter_event", "asset", "run_ended"}
+            for kind in kinds[kinds.index("released") + 1 :]
+        )
+        or events[kinds.index("released")]["received_monotonic_ns"]
+        < events[kinds.index("ready_verified")]["received_monotonic_ns"]
+    ):
+        raise ValueError("Preparation lacks consistent final release evidence")
     templates = {
         p["template"]: _pgm(read_bounded(directory / p["template"], 16 * 1024**2))[2]
         for ps in config["signatures"].values()
@@ -238,6 +263,17 @@ def review_start(
             or not first["received_monotonic_ns"] <= commands[0]["issued_ns"] <= checked + bound
         ):
             raise ValueError("No acknowledged policy command after the confirmed handoff")
+        before_command = [
+            s for s in recording.samples if s["received_monotonic_ns"] <= commands[0]["issued_ns"]
+        ]
+        if commands[0]["issued_ns"] - before_command[-1]["received_monotonic_ns"] > batch["config"][
+            "runtime"
+        ]["max_telemetry_age_ms"] * 1e6 or any(
+            not _stationary(s, observed_config, batch["config"]["runtime"]["start_speed_kmh"])
+            or any(s["telemetry_controls"].values())
+            for s in before_command
+        ):
+            raise ValueError("Handoff state changed or expired before first policy command")
         if manifest["files"] != _inventory(directory):
             raise ValueError("Preparation changed during verification")
         result.update(
