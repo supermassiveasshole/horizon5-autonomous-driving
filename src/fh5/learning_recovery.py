@@ -32,7 +32,7 @@ def _require_originals(root: Path, inventory: dict[str, str], sources: dict[str,
         ("recording/session.json", "session"),
     ):
         require(root / name, sources[key])
-    trace = json.loads(read_bounded(root / "trace.json", 4 * 1024**2))
+    trace = json.loads(read_bounded(root / "trace.json", 32 * 1024**2))
     for observation in trace["observations"]:
         for frame in observation["frames"]:
             require(asset(root, frame["path"]), frame["sha256"])

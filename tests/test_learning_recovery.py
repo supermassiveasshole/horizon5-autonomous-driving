@@ -17,7 +17,7 @@ from fh5.experiment import run_experiment
 from fh5.learning_loop import LearningContinue
 
 
-def interrupt_selection(request, source, boundary="after_commit"):
+def interrupt_selection(request, source, boundary="after_commit", *, large_trace=False):
     repository = Path(__file__).resolve().parents[1]
     environment = dict(os.environ)
     environment["PYTHONPATH"] = os.pathsep.join(
@@ -29,6 +29,7 @@ def interrupt_selection(request, source, boundary="after_commit"):
             "-c",
             """
 import json, os, sys
+from dataclasses import replace as replaced
 from pathlib import Path
 from fh5.experiment import run_experiment
 from fh5.learning_loop import LearningLoop
@@ -47,14 +48,30 @@ def replace(source, destination, *args, **kwargs):
             os._exit(73)
     return original_replace(source, destination, *args, **kwargs)
 os.replace = replace
+backend = SharedBackend(Path(sys.argv[3]))
+if sys.argv[5] == 'large_trace':
+    # Expand permitted external frame metadata without fabricating learned results.
+    original_sampling = backend.sampling
+    def sampling(identity):
+        lease = original_sampling(identity)
+        original_sample = lease.sample
+        def sample():
+            value = original_sample()
+            frames = tuple(replaced(f, frame_id=f.frame_id + 'x' * 400000)
+                           for f in value.decision.frames)
+            return replaced(value, decision=replaced(value.decision, frames=frames))
+        lease.sample = sample
+        return lease
+    backend.sampling = sampling
 run_experiment(LearningLoop(Path(sys.argv[1]), root),
-               learning_environment=SharedBackend(Path(sys.argv[3])))
+               learning_environment=backend)
 raise SystemExit('Expected filesystem exit was not reached')
 """,
             str(request.config_file),
             str(request.output_dir),
             str(source),
             boundary,
+            "large_trace" if large_trace else "normal_trace",
         ],
         env=environment,
         cwd=repository,
@@ -63,6 +80,22 @@ raise SystemExit('Expected filesystem exit was not reached')
         timeout=240,
     )
     assert process.returncode == 73, process.stdout + process.stderr
+
+
+def test_sampling_recovery_accepts_the_same_trace_size_as_the_sampler(tmp_path, seeded_loop):
+    request = loop_request(tmp_path, seeded_loop, rounds=1)
+    interrupt_selection(request, seeded_loop[0], "before_learned", large_trace=True)
+    root = request.output_dir
+    trace = root / "round-000/learning/attempt-000/trace.json"
+    assert 4 * 1024**2 < trace.stat().st_size < 32 * 1024**2
+    backend = SharedBackend(seeded_loop[0])
+    result = run_experiment(
+        LearningContinue(root, sha(root / "state.json")), learning_environment=backend
+    ).summary["learning_loop"]
+    assert result["stop_reason"] == "budget_completed", result.get("error")
+    assert result["learner_updates"] == 3
+    assert result["latest_learner"]["total_steps"] == 33
+    assert len(backend.leases) == 1 and backend.closed
 
 
 def test_sealed_sampling_is_adopted_after_exit_before_parent_acknowledgement(tmp_path, seeded_loop):
