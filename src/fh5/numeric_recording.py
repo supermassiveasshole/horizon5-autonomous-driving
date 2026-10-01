@@ -117,11 +117,13 @@ class NumericArchive:
                     if self.aborted.is_set():
                         break
                     (self.directory / path).write_bytes(document)
-                    self.records[row["decision_id"]] = {
-                        "path": path,
-                        "sha256": hashlib.sha256(document).hexdigest(),
-                        "previews": previews,
-                    }
+                    with self.lock:
+                        if not self.aborted.is_set():
+                            self.records[row["decision_id"]] = {
+                                "path": path,
+                                "sha256": hashlib.sha256(document).hexdigest(),
+                                "previews": previews,
+                            }
                 finally:
                     with self.lock:
                         self.pending -= 1
@@ -136,7 +138,8 @@ class NumericArchive:
         self.worker.join(timeout=2)
         released = not self.worker.is_alive()
         if not released:
-            self.aborted.set()
+            with self.lock:
+                self.aborted.set()
             self.error = "Numerical archive worker did not finish within its shutdown budget"
         while True:
             try:
@@ -147,7 +150,9 @@ class NumericArchive:
                 self.pending -= 1
                 self.pending_bytes -= size
         previews, available = self.previews.close(deadline - time.monotonic())
-        for record in self.records.values():
+        with self.lock:
+            records = tuple(self.records.values())
+        for record in records:
             record["previews"] = [
                 path if path in available else None for path in record["previews"]
             ]
