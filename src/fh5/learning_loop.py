@@ -382,6 +382,24 @@ class _Loop:
             if _learner(Path(saved["directory"]), saved["sha256"]) != saved:
                 raise ValueError("Learning continuation checkpoint changed")
         for number, row in enumerate(state["rounds"]):
+            round_dir = self.root / f"round-{number:03d}"
+            if (
+                not row["complete"]
+                and row.get("learner_updates", 0) < row.get("eligible_transitions", 0)
+                and (
+                    any(
+                        key in row
+                        for key in ("evaluation_prepared", "candidate_evaluation", "evaluation_run")
+                    )
+                    or any(
+                        (round_dir / name).exists()
+                        for name in ("evaluation.json", "batch", "evaluation")
+                    )
+                )
+            ):
+                raise ValueError(
+                    "Incomplete updates already have frozen evaluation; migration required"
+                )
             for archived in row.get("sampling_history", []):
                 verify_archived_sampling(archived)
             for binding in sampling_bindings(row):
@@ -639,6 +657,7 @@ class _Loop:
         learner = _learner(output, _sha(output / "policy.json"))
         proposed = {
             **row,
+            "sampling_parent": dict(row.get("sampling_parent", self.state["explorer"])),
             "update_segments": [
                 *segments,
                 {"directory": str(output), "sha256": learner["sha256"]},
