@@ -121,3 +121,30 @@ def test_frozen_parent_input_survives_exit_before_ledger_publication(tmp_path, s
     ledger = json.loads((root / "round-000/parent-ledger.json").read_bytes())
     assert all(entry["evidence"] is not None for entry in ledger["entries"])
     assert not backend.leases and backend.closed
+
+
+def test_user_stop_survives_parent_review_exit_and_resumes_remaining_rounds(tmp_path, seeded_loop):
+    request = loop_request(tmp_path, seeded_loop, rounds=2)
+    interrupt_selection(
+        request, seeded_loop[0], "before_parent_review_ack", stopped_evaluation=True
+    )
+    root = request.output_dir
+    state = root / "state.json"
+    interrupted = json.loads(state.read_bytes())
+    assert interrupted["rounds"][0]["evaluation_interrupted_by_stop"]
+    child = root / "round-000/evaluation"
+    originals = {path: sha(path) for path in child.rglob("*") if path.is_file()}
+    (root / "stop.request").unlink()
+    backend = SharedBackend(seeded_loop[0])
+    resumed = run_experiment(
+        LearningContinue(root, sha(state)), learning_environment=backend
+    ).summary["learning_loop"]
+    assert resumed["stop_reason"] == "budget_completed", resumed.get("error")
+    assert resumed["rounds_completed"] == 2 and resumed["learner_updates"] == 6
+    first = resumed["rounds"][0]
+    assert first["evaluation_interrupted_by_stop"]
+    assert first["evaluation"]["metrics"]["all_attempts"] == 1
+    assert first["evaluation"]["unstarted_slots"] == ["run-1"]
+    assert first["selection"] == "retain_incumbent"
+    assert all(sha(path) == digest for path, digest in originals.items())
+    assert len(backend.leases) == 2 and backend.closed and resumed["resources_released"]

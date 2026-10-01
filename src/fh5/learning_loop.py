@@ -517,7 +517,7 @@ class _Loop:
             if completion.is_file():
                 row["evaluation_completion_sha256"] = _sha(completion)
         row["evaluation_run"] = execution
-        row["evaluation_interrupted_by_stop"] = (self.root / "stop.request").exists()
+        row.setdefault("evaluation_interrupted_by_stop", (self.root / "stop.request").exists())
         self.state["child_resources_released"] &= execution["resources_released"]
         for attempt in range(10):
             review_output = root / ("reviewed" if attempt == 0 else f"reviewed-{attempt:03d}")

@@ -25,6 +25,7 @@ def interrupt_selection(
     large_trace=False,
     failed_evaluation=False,
     parent_evidence=False,
+    stopped_evaluation=False,
 ):
     repository = Path(__file__).resolve().parents[1]
     environment = dict(os.environ)
@@ -74,6 +75,24 @@ def open_file(path, *args, **kwargs):
     return original_open(path, *args, **kwargs)
 Path.open = open_file
 backend = SharedBackend(Path(sys.argv[3]))
+if sys.argv[5] == 'stopped_evaluation':
+    from fh5.control import Command
+    original_evaluation = backend.evaluation
+    def evaluation(identity):
+        lease = original_evaluation(identity)
+        original_driving = lease.driving
+        def driving(slot, ready):
+            game = original_driving(slot, ready)
+            original_send = game.send
+            def send(command):
+                original_send(command)
+                if command != Command(0, 0, 0):
+                    (root / 'stop.request').write_text('external stop')
+            game.send = send
+            return game
+        lease.driving = driving
+        return lease
+    backend.evaluation = evaluation
 if sys.argv[5] == 'parent_evidence':
     from test_attempts import evidence
     def review(recording):
@@ -121,6 +140,8 @@ raise SystemExit('Expected filesystem exit was not reached')
             if failed_evaluation
             else "parent_evidence"
             if parent_evidence
+            else "stopped_evaluation"
+            if stopped_evaluation
             else "normal_trace",
         ],
         env=environment,
