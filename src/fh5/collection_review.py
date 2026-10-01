@@ -102,6 +102,8 @@ def review_collection(request: CollectionReview) -> RunResult:
     for name in ("final.json", "index.json"):
         if not (root / name).is_file():
             continue
+        if name == "final.json":
+            result["final_status_present"] = True
         try:
             document = json.loads(read_bounded(root / name, 4 * 1024**2))
             references[name] = _references(document, binding)
