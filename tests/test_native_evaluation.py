@@ -83,6 +83,26 @@ def test_native_comparison_requires_the_same_frozen_device(tmp_path, eligible_mo
         assert result["promotion_allowed"] is False
 
 
+@pytest.mark.parametrize("device", ["cpu", "cuda"])
+def test_version_three_cannot_silently_use_the_legacy_synthetic_runner(
+    tmp_path, eligible_model, device
+):
+    from test_evaluation_run import Batch
+
+    operation = native_request(tmp_path, eligible_model)
+    path = tmp_path / "evaluation.json"
+    config = json.loads(path.read_bytes())
+    config["model"]["device"] = device
+    path.write_text(json.dumps(config))
+    batch = tmp_path / "declared-device"
+    run_experiment(EvaluationPrepare(path, batch))
+    operation = replace(operation, batch_dir=batch, batch_sha256=sha(batch / "batch.json"))
+    environment = Batch()
+    with pytest.raises(ValueError, match="native"):
+        run_experiment(operation, evaluation_environment=environment)
+    assert not environment.menus and not environment.drives and not operation.output_dir.exists()
+
+
 def prepared_drive(tmp_path, model, operation):
     folder = tmp_path / "drive-qualification"
     folder.mkdir()
@@ -273,3 +293,121 @@ def test_native_configuration_change_between_attempts_stops_before_next_menu(
         summary["resources_released"]
         and result.summary["evaluation"]["metrics"]["all_attempts"] == 1
     )
+
+
+@pytest.mark.parametrize("fault", ["closing", "close_error"])
+def test_native_menu_capture_must_release_before_a_driving_lease(tmp_path, eligible_model, fault):
+    import threading
+
+    from fh5.evaluation_native import NativeEvaluationEnvironment
+    from fh5.live_event import BoundedFrames
+
+    unblocked, finished = threading.Event(), threading.Event()
+
+    class Source:
+        frame = None
+
+        def capture(self):
+            return self.frame
+
+        def close(self):
+            try:
+                if fault == "closing":
+                    unblocked.wait(60)
+                else:
+                    raise OSError("external capture close failed")
+            finally:
+                finished.set()
+
+    class ClosingMenu(Menu):
+        source_kind = "udp"
+
+        def __init__(self):
+            super().__init__(False)
+            self.source = Source()
+            self.frames = BoundedFrames(lambda: self.source, confirm_release=True)
+
+        def read(self, period_s):
+            observed = super().read(period_s)
+            self.source.frame = observed.frame
+            return replace(observed, frame=self.frames.capture())
+
+        def close(self):
+            super().close()
+            self.frames.close()
+
+    class Devices(ExternalDevices):
+        def menu(self, path, plan):
+            result = ClosingMenu()
+            self.menus.append(result)
+            return result
+
+    operation = replace(native_request(tmp_path, eligible_model), live=True, seconds=1.2)
+    config = prepared_drive(tmp_path, eligible_model, operation)
+    devices = Devices()
+    environment = NativeEvaluationEnvironment(
+        config, menu_factory=devices.menu, driving_factory=devices.drive
+    )
+    try:
+        result = run_experiment(operation, evaluation_environment=environment)
+    finally:
+        unblocked.set()
+        assert finished.wait(2)
+    summary = result.summary["evaluation_run"]
+    assert not summary["resources_released"]
+    assert summary["stop_reason"] == "interface_error"
+    assert not devices.controllers
+    assert summary["started_slots"] == []
+    assert summary["unstarted_slots"] == ["run-0", "run-1"]
+
+
+def test_native_runner_accepts_a_qualified_environment_contract(tmp_path, eligible_model):
+    from fh5.evaluation_native import NativeEvaluationEnvironment
+
+    operation = replace(native_request(tmp_path, eligible_model), live=True, seconds=1.2)
+    config = prepared_drive(tmp_path, eligible_model, operation)
+    devices = ExternalDevices()
+    qualified = NativeEvaluationEnvironment(
+        config, menu_factory=devices.menu, driving_factory=devices.drive
+    )
+
+    class EnvironmentContract:
+        source_kind = "native"
+
+        def prepare(self, request, batch):
+            return qualified.prepare(request, batch)
+
+        def event(self, slot):
+            return qualified.event(slot)
+
+        def driving(self, slot, ready):
+            return qualified.driving(slot, ready)
+
+        def close(self):
+            return qualified.close()
+
+    result = run_experiment(operation, evaluation_environment=EnvironmentContract())
+    assert result.summary["evaluation_run"]["stop_reason"] == "plan_complete"
+    assert result.summary["evaluation"]["execution_metrics"]["bound_runs"] == 2
+
+
+def test_failed_menu_acquisition_does_not_claim_all_resources_released(tmp_path, eligible_model):
+    from fh5.evaluation_native import NativeEvaluationEnvironment
+
+    class Devices(ExternalDevices):
+        def menu(self, path, plan):
+            raise OSError("external capture allocation failed; cleanup status unknown")
+
+    operation = replace(native_request(tmp_path, eligible_model), live=True)
+    config = prepared_drive(tmp_path, eligible_model, operation)
+    devices = Devices()
+    result = run_experiment(
+        operation,
+        evaluation_environment=NativeEvaluationEnvironment(
+            config, menu_factory=devices.menu, driving_factory=devices.drive
+        ),
+    )
+    summary = result.summary["evaluation_run"]
+    assert summary["stop_reason"] == "interface_error"
+    assert not summary["resources_released"]
+    assert not devices.controllers and not summary["started_slots"]

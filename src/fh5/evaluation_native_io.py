@@ -55,7 +55,8 @@ def native_event_environment(path: Path, plan: NumericDriveConfiguration) -> Eve
         receiver.bind(("127.0.0.1", plan.telemetry.port))
         desktop = WindowsDesktop()
         frames = BoundedFrames(
-            lambda: DXGIEventFrames(WindowsDXGIFrames(plan.target), tuple(config["screen_size"]))
+            lambda: DXGIEventFrames(WindowsDXGIFrames(plan.target), tuple(config["screen_size"])),
+            confirm_release=True,
         )
         cleanup.callback(frames.close)
         controller = XboxController()

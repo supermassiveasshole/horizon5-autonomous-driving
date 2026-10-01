@@ -238,11 +238,15 @@ def review_execution(
         }
         if report["configuration"] != batch["config"]["runtime"]:
             raise ValueError("Execution runtime differs from frozen configuration")
+        if batch["version"] == 3 and (
+            report["evidence_kind"] != "native"
+            or report["inference"].get("inference_device") != batch["config"]["model"]["device"]
+        ):
+            raise ValueError("Version 3 requires native execution on the frozen device")
         if report["evidence_kind"] == "native" and (
             batch["version"] != 3
             or report["environment"].get("input_conditions", {}).get("conditions")
             != batch["config"]["conditions"]["numeric_input_conditions"]
-            or report["inference"].get("inference_device") != batch["config"]["model"]["device"]
         ):
             raise ValueError("Native execution input conditions or device differ from frozen batch")
         result["linked_packets"] = _bind_telemetry(root, report, source_dir, recording)

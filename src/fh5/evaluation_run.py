@@ -9,7 +9,7 @@ import math
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
 
 from fh5.collection_store import atomic_json, encode, read_bounded, write_file
 from fh5.evaluation import EvaluationReview, _read, read_evaluation_batch
@@ -57,6 +57,13 @@ class EvaluationEnvironment(Protocol):
     def event(self, slot_id: str) -> EventEnvironment: ...
     def driving(self, slot_id: str, ready_state: dict[str, Any]) -> RealtimeEnvironment: ...
     def close(self) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class QualifiedEvaluationEnvironment(EvaluationEnvironment, Protocol):
+    """Native environments qualify frozen inputs before acquiring any devices."""
+
+    def prepare(self, request: EvaluationRun, batch: dict[str, Any]) -> dict[str, Any]: ...
 
 
 def evaluation_inputs(
@@ -165,16 +172,23 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
     try:
         native_binding = None
         device = "cpu"
+        source_batch, _, _ = evaluation_inputs(request)
         if environment.source_kind == "native":
-            from fh5.evaluation_native import NativeEvaluationEnvironment
-
-            if not isinstance(environment, NativeEvaluationEnvironment):
-                raise ValueError("Native evaluation requires its qualified environment adapter")
-            source_batch, _, _ = read_evaluation_batch(request.batch_dir, request.batch_sha256)
+            if (
+                not request.live
+                or request.seconds > 30
+                or source_batch["version"] != 3
+                or not isinstance(environment, QualifiedEvaluationEnvironment)
+            ):
+                raise ValueError(
+                    "Native evaluation requires live opt-in, bounded v3 and qualification"
+                )
             native_binding = environment.prepare(request, source_batch)
-            device = environment.device
+            device = source_batch["config"]["model"]["device"]
         elif environment.source_kind != "synthetic" or request.live:
             raise ValueError("Evaluation source and live opt-in disagree")
+        elif source_batch["version"] == 3:
+            raise ValueError("Version 3 execution requires a qualified native environment")
         batch, event_file, event_parameters = _freeze(request, native_binding)
         protocol_sha = _read(root / "run-protocol.json")[1]
         settings = dict(batch["config"]["runtime"])

@@ -26,9 +26,15 @@ class BoundedFrames:
 
     A timed-out native grab is quarantined, never reused. It may stay blocked until
     process exit; this worker owns no controller and cannot send game input.
+    Sequential resource reuse requires confirm_release, which reports an unfinished
+    or failed close instead of treating quarantine as successful release.
     """
 
-    def __init__(self, factory: Callable[[], FrameSource]) -> None:
+    def __init__(
+        self, factory: Callable[[], FrameSource], *, confirm_release: bool = False
+    ) -> None:
+        self._confirm_release = confirm_release
+        self._close_error: Exception | None = None
         self._request = threading.Event()
         self._done = threading.Event()
         self._results: queue.Queue[ScreenFrame | Exception | None] = queue.Queue(maxsize=1)
@@ -48,7 +54,10 @@ class BoundedFrames:
                 self._results.put(error)
             finally:
                 if source is not None:
-                    source.close()
+                    try:
+                        source.close()
+                    except Exception as error:
+                        self._close_error = error
 
         self._worker = threading.Thread(target=work, daemon=True, name="fh5-frame-capture")
         self._worker.start()
@@ -78,6 +87,11 @@ class BoundedFrames:
         self._done.set()
         self._request.set()
         self._worker.join(timeout=0.1)
+        if self._confirm_release:
+            if self._worker.is_alive():
+                raise TimeoutError("Capture resource release is unconfirmed")
+            if self._close_error is not None:
+                raise OSError(f"Capture resource release failed: {self._close_error}")
 
 
 class LiveEventEnvironment:

@@ -77,6 +77,7 @@ class NativeEvaluationEnvironment:
         self.slots: list[str] = []
         self.menus: list[_EventLease] = []
         self.drives: list[RealtimeEnvironment] = []
+        self.acquisition_errors: list[str] = []
         self.device = "unqualified"
 
     def prepare(self, request: EvaluationRun, batch: dict[str, Any]) -> dict[str, Any]:
@@ -129,7 +130,12 @@ class NativeEvaluationEnvironment:
     def event(self, slot_id: str) -> EventEnvironment:
         plan = self._attempt(slot_id)
         assert self.request is not None
-        lease = _EventLease(self.menu_factory(self.request.output_dir / "event.json", plan))
+        try:
+            source = self.menu_factory(self.request.output_dir / "event.json", plan)
+        except Exception as error:
+            self.acquisition_errors.append(f"Menu acquisition cleanup unconfirmed: {error}")
+            raise
+        lease = _EventLease(source)
         self.menus.append(lease)
         if lease.source_kind != "udp":
             lease.close()
@@ -139,7 +145,12 @@ class NativeEvaluationEnvironment:
     def driving(self, slot_id: str, ready_state: dict[str, Any]) -> RealtimeEnvironment:
         if not self.menus or not self.menus[-1].closed or self.menus[-1].error:
             raise ValueError("Menu resources must be released before driving")
-        drive = self.driving_factory(self._attempt(slot_id))
+        plan = self._attempt(slot_id)
+        try:
+            drive = self.driving_factory(plan)
+        except Exception as error:
+            self.acquisition_errors.append(f"Driving acquisition cleanup unconfirmed: {error}")
+            raise
         self.drives.append(drive)
         if drive.source_kind != "native":
             drive.close()
@@ -147,7 +158,7 @@ class NativeEvaluationEnvironment:
         return drive
 
     def close(self) -> dict[str, Any]:
-        errors = []
+        errors = list(self.acquisition_errors)
         released = True
         for drive in self.drives:
             try:
