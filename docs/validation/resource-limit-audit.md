@@ -235,3 +235,5 @@ Ruff、346 文件格式及 132 源文件 strict mypy 通过。
 结果 `runs/resource-critic-integrated-20261002-results.xml`。
 
 该片段尚未改造 critic 按转移展开的预测/特征、经验读取及 batch 限制；不声称整个训练器内存恒定。
+Ruff、347 文件格式及 132 源文件 strict mypy 通过。
+固定 `c3ff7ce...1174bc8` 独立只读复审：**Standards 0 项、Spec 0 项**。
