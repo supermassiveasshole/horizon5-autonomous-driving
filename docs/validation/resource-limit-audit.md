@@ -442,3 +442,12 @@ Ruff、358 文件格式及 135 源文件 mypy 通过；隔离旧版本全量仍�
 **71 passed / 115.35 秒**，`runs/resource-sealed-pixels-integrated-20261002-results.xml`。
 Ruff、359 文件格式、135 源文件 mypy 通过。
 经验合并的单独容量门槛、来源清单、完整 replay/角色/特征数组仍未迁移；这不是全仓无阈值验收。
+固定 `0ddca0b...92dd2de` 只读独立审阅：**Standards 0 项、Spec 0 项**。
+
+## 容量清单及父恢复历史的全量结果
+
+隔离冻结 `25fa869` 全量回归已完成：**1283 passed / 1998.13 秒**，
+结果在隔离检出 `runs/resource-storage-full-20261002-results.xml`。
+包含此前 learner 摘要分块、父续训绑定、报告目录和容量清单迁移，
+不包含之后 `23e43e8` 的 critic 像素释放及 `92dd2de` 的封存帧索引。
+这些后续改动已有上述专项结果，其最终全量仍待执行；全仓资源限制审计继续进行。
