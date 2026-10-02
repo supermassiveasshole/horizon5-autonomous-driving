@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from checkpoint_files import history_entries
+from checkpoint_files import history_entries, update_records
 from test_sac_learning import warm_start
 
 from fh5.experiment import run_experiment
@@ -21,6 +21,7 @@ def test_resumed_learning_matches_uninterrupted_updates_including_odd_actor_phas
         SACTrain(tmp_path / "warm", replay, tmp_path / "first", steps=3)
     ).summary["sac_learning"]
     source = (tmp_path / "first/policy.pt").read_bytes()
+    assert first["steps_completed"] == 3
     resumed = run_experiment(SACResume(tmp_path / "first", tmp_path / "resumed", steps=5)).summary[
         "sac_learning"
     ]
@@ -28,7 +29,9 @@ def test_resumed_learning_matches_uninterrupted_updates_including_odd_actor_phas
     assert resumed["total_steps"] == 8
     assert resumed["actor_updates"] == 3
     assert resumed["actor_updates_total"] == 4
-    assert first["updates"] + resumed["updates"] == whole["updates"]
+    assert update_records(tmp_path / "first") + update_records(
+        tmp_path / "resumed"
+    ) == update_records(tmp_path / "whole")
     assert resumed["predictions"] == whole["predictions"]
     assert resumed["alpha_after"] == whole["alpha_after"]
     assert resumed["learner_state_sha256"] == whole["learner_state_sha256"]

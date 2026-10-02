@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from checkpoint_files import update_records
 from test_sac import experience
 from test_temporal_bc import temporal_fixture
 
@@ -102,7 +103,8 @@ def test_sac_terminal_target_keeps_physical_reward_without_bootstrap(tmp_path):
     trained = run_experiment(
         SACTrain(tmp_path / "warm", replay, tmp_path / "candidate", steps=2)
     ).summary["sac_learning"]
-    for update in trained["updates"]:
+    assert trained["steps_completed"] == 2
+    for update in update_records(tmp_path / "candidate"):
         targets = dict(zip(update["transition_ids"], update["targets"]))
         assert targets["transition-1"] == pytest.approx(2.66)
 

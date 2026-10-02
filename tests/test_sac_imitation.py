@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from checkpoint_files import update_records
 from test_sac_learning import warm_start
 
 from fh5.experiment import run_experiment
@@ -140,7 +141,7 @@ def test_guidance_changes_actor_objective_but_never_owns_encoder_or_teacher(tmp_
     ).summary["sac_learning"]
     assert guided["imitation"]["phase"] == "guided"
     assert guided["imitation"]["teacher_evaluations"] == 6
-    actor_updates = [step for step in guided["updates"] if "actor_loss" in step]
+    actor_updates = [step for step in update_records(tmp_path / "guided") if "actor_loss" in step]
     assert any(step["imitation_loss"] > 0 for step in actor_updates)
     for step in actor_updates:
         assert step["actor_loss"] == pytest.approx(
@@ -180,7 +181,10 @@ def test_imitation_schedule_and_updates_survive_an_odd_stop_and_reload(tmp_path)
     assert resumed["imitation"]["weights"] == [2.0, 0.5, 0.0]
     assert resumed["imitation"]["weight"] == 2
     assert resumed["imitation"]["index"] == 0
-    assert first["updates"] + resumed["updates"] == whole["updates"]
+    assert first["stop_reason"] == "stop_requested"
+    assert update_records(tmp_path / "first") + update_records(
+        tmp_path / "resumed"
+    ) == update_records(tmp_path / "whole")
     assert resumed["learner_state_sha256"] == whole["learner_state_sha256"]
     reloaded = run_experiment(
         SACPolicyReplay(

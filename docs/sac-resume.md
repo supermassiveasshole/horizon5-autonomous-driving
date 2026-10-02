@@ -13,7 +13,7 @@ uv run --locked fh5 sac-train --config configs/sac-learning.example.json --outpu
 uv run --locked fh5 sac-resume --checkpoint runs/sac-001 --output runs/sac-002 --steps 100
 ```
 
-`--steps` 是本次追加更新数，范围 0–10000；累计计数上限 100 万。输出须为源模型和经验目录以外的新目录。续训沿用冻结的学习率、batch、actor 更新间隔、动作包络和模型配置，不接受隐式覆盖；`--steps 0` 可核验恢复并导出新快照。示范抽样比例默认继承，可通过显式 `--demonstration-fraction` 改变；采用配额的版本 3 另见[混合经验契约](sac-mixture.md)。
+`--steps` 是配置明确指定的本次追加更新预算，须为非负整数，不另设单次或累计更新次数上限。输出须为源模型和经验目录以外的新目录。续训沿用冻结的学习率、batch、actor 更新间隔、动作包络和模型配置，不接受隐式覆盖；`--steps 0` 可核验恢复并导出新快照。示范抽样比例默认继承，可通过显式 `--demonstration-fraction` 改变；采用配额的版本 3 另见[混合经验契约](sac-mixture.md)。
 
 训练开始后，在输出目录新建 `stop.request` 可请求停止。当前一次完整 critic/actor/温度及目标网络更新结束后才检查下一次请求，保存可恢复状态并返回退出码 4。正常完成预算返回 0，输入错误返回 2。Python 调用可通过实验入口的 `sac_stop_requested(completed)` 提供外部停止信号；参数为累计已完成更新数。
 
@@ -28,7 +28,7 @@ uv run --locked fh5 sac-resume --checkpoint runs/sac-001 --output runs/sac-002 -
 - `policy.pt` 保存完整学习状态；`policy.json` 绑定权重、配置、状态摘要、经验和初始化 BC。
 - `experience/replay.json` 与所引用原始 RGB 字节一并复制，保留帧间 Δt、时间质量、动作保持、任务状态、终止及奖励字段；不重新打时间戳或编码为 JPEG。
 - `bc/` 保存初始化模型及像素/归一化/参考/历史契约，不依赖工作区里的旧路径。
-- `training-report.json` 绑定本段更新记录；`history/` 保留祖先清单与训练报告，原候选目录不会覆盖或删除。祖先权重仍位于各自候选目录，回退时须保留这些原候选。
+- `training-report.json` 绑定本段进度与诊断状态；`history/` 保留祖先清单和报告，原候选目录不会覆盖或删除。祖先权重仍位于各自候选目录，回退时须保留这些原候选。
 - `resume_contract` 明确当前 SAC 阶段、优化器归属、CPU/Torch 版本、两线程和确定性设置。版本 4 继承临时约束的系数、退出阶段及开发评估证据；普通续训不会重新开启已退出的约束。动力学辅助头尚未采用。
 
 每个候选封存自己的数值经验；默认恢复使用完全相同的经验与契约。显式 `additions` / `--add-replay PATH SHA256` 按[采样循环契约](sac-cycle.md)检查新来源、拒绝重复额度并生成新经验，不能直接改旧 replay。旧版本 1 候选仍可冻结回放，但缺少封存经验及训练历史，当前明确拒绝续训，不静默升级旧结果。
@@ -41,6 +41,8 @@ uv run --locked fh5 sac-resume --checkpoint runs/sac-001 --output runs/sac-002 -
 
 新快照的 `history` 使用 `linked-checkpoint-history-v1`：清单与权重元数据只绑定链头及条数，`history/<摘要>-node.json` 逐段连接祖先清单和报告。读取时逐节点校验内容摘要和连续条数，不把所有祖先条目再次嵌入每份模型。旧数组格式仍可恢复，下一次成功保存时转换为独立节点，原检查点与祖先清单字节不改写。缺失节点、摘要不符、条数不连续或越界路径仍拒绝接续；这属于完整性约束，不是容量限制。
 
-依据[资源约束](resource-policy.md)，旧经验清单 128 MiB、封存帧 512 MiB、更新次数/浮点 batch 等限制缺少实测容量或明确实验预算依据，仍在清理中，不能当作新的设计要求。单段训练明细、候选归档文件清单及磁盘统计元数据仍整体生成/加载，待进一步拆分/索引，进度见[审计](validation/resource-limit-audit.md)。CPU 同环境的连续/分段状态可以逐项比较；跨 Torch 版本不自动迁移，不据此保证跨硬件位级一致。
+SAC 的逐次更新明细改为可选 `diagnostics/updates.jsonl`，摘要的 `updates` 字段使用带格式标记的文件描述，而非增长数组；详见[训练诊断](training-diagnostics.md)。日志资源错误关闭该诊断流并记录原因，实际已完成更新仍按原流程封存、接续。旧报告中的数组仍保留原字节和摘要；接续不依赖新的本地诊断文件。
+
+依据[资源约束](resource-policy.md)，旧经验清单 128 MiB、封存帧 512 MiB、预热及循环次数/浮点 batch 等限制缺少实测容量或明确实验预算依据，仍在清理中，不能当作新的设计要求。当前前后预测数组、预热训练明细、候选归档文件清单及磁盘统计元数据仍整体生成/加载，待进一步拆分/索引，进度见[审计](validation/resource-limit-audit.md)。CPU 同环境的连续/分段状态可以逐项比较；跨 Torch 版本不自动迁移，不据此保证跨硬件位级一致。
 
 续训不连接采集或控制设备，不继承上一游戏 epoch、动作租期或当前帧缓存。未来重新进入游戏必须重新验证起点并开始新尝试，不能把中断两侧当成连续驾驶转移。

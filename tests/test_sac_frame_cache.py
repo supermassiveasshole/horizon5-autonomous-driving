@@ -8,6 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from checkpoint_files import update_records
 from test_candidate_store import candidates as candidates
 from test_sac import experience
 
@@ -203,7 +204,7 @@ def test_actual_updates_and_complete_resume_are_independent_of_frame_eviction(
     assert bounded["steps_completed"] == 2 and bounded["actor_updates"] == 1
     assert bounded["encoder_change_max"] > 0 and bounded["actor_change_max"] > 0
     assert bounded["learner_state_sha256"] == baseline["learner_state_sha256"]
-    assert bounded["updates"] == baseline["updates"]
+    assert update_records(output) == update_records(tmp_path / "baseline")
     assert bounded["predictions"] == baseline["predictions"]
     assert bounded["raw_frame_cache"]["peak_bytes"] <= FRAME_BYTES
     assert bounded["raw_frame_cache"]["evictions"] > 0

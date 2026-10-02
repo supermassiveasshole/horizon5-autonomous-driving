@@ -35,6 +35,8 @@ def test_archived_candidate_keeps_its_identity_and_training_after_source_is_move
     ).summary["candidate_archive"]
     archived = tmp_path / "archive/checkpoint"
     assert (archived / "policy.json").read_bytes() == raw
+    assert (checkpoint / "diagnostics/updates.jsonl").is_file()
+    assert not (archived / "diagnostics/updates.jsonl").exists()
     assert result["checkpoint_sha256"] == identity
     assert result["default_changed"] is False
     assert result["driving_qualification"] == "not_established_by_archive"

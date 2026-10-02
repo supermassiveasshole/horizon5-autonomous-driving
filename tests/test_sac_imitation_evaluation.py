@@ -5,6 +5,7 @@ import struct
 from dataclasses import replace
 
 import pytest
+from checkpoint_files import update_records
 from test_attempts import evidence
 from test_evaluation import sha
 from test_evaluation_execution import PacketGame
@@ -334,7 +335,9 @@ def test_improved_candidate_weakens_guidance_and_can_be_frozen_for_next_evaluati
     ).summary["sac_learning"]
     assert resumed["imitation"]["phase"] == "exited"
     assert resumed["imitation"]["teacher_evaluations"] == 0
-    assert all(step.get("imitation_weight", 0) == 0 for step in resumed["updates"])
+    assert all(
+        step.get("imitation_weight", 0) == 0 for step in update_records(tmp_path / "continued")
+    )
     proof = tmp_path / "exited" / exited["imitation"]["transitions"][0]["review"]
     proof.write_bytes(b"{}")
     with pytest.raises(ValueError, match="evidence changed"):

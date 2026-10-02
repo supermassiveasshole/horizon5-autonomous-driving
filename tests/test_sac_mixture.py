@@ -5,6 +5,7 @@ import json
 from dataclasses import replace
 
 import pytest
+from checkpoint_files import update_records
 from test_sac import experience
 
 from fh5.experiment import run_experiment
@@ -59,7 +60,7 @@ def test_mixed_sac_batches_learn_from_both_complete_sources_and_seal_actual_coun
     assert result["encoder_change_during_actor_max"] == 0
     assert result["sampling"]["available"] == {"demonstration": 4, "online": 2}
     assert result["sampling"]["sampled"] == {"demonstration": 8, "online": 8}
-    for update in result["updates"]:
+    for update in update_records(output):
         assert update["source_roles"].count("demonstration") == 2
         assert update["source_roles"].count("online") == 2
         assert len(set(update["transition_ids"])) == 4
@@ -81,7 +82,9 @@ def test_mixture_continuation_matches_uninterrupted_learning_and_zero_quota_exit
         "sac_learning"
     ]
     assert first["stop_reason"] == "stop_requested"
-    assert first["updates"] + second["updates"] == whole["updates"]
+    assert update_records(tmp_path / "first") + update_records(
+        tmp_path / "second"
+    ) == update_records(tmp_path / "whole")
     assert second["learner_state_sha256"] == whole["learner_state_sha256"]
     reloaded = run_experiment(
         SACPolicyReplay(
@@ -112,7 +115,7 @@ def test_small_pool_shrinks_batch_without_duplicating_or_backfilling(tmp_path):
     ).summary["sac_learning"]
     assert result["sampling"]["quotas"] == {"demonstration": 1, "online": 3}
     assert result["sampling"]["sampled"] == {"demonstration": 2, "online": 4}
-    for update in result["updates"]:
+    for update in update_records(tmp_path / "mixed"):
         assert len(update["transition_ids"]) == len(set(update["transition_ids"])) == 3
 
 

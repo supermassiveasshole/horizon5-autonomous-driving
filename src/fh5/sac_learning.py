@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from fh5.artifact_io import VerifiedFile, copy_evidence
 from fh5.checkpoint_history import HistorySource, empty_history
 from fh5.collection_store import encode, read_bounded, write_file
+from fh5.learning_diagnostics import UpdateJournal
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import PixelContract
@@ -130,7 +131,7 @@ def _validate_configuration(request: SACTrain) -> None:
     validate_cache_budget(request.raw_cache_bytes)
     if (
         type(request.steps) is not int
-        or not 0 <= request.steps <= 10_000
+        or request.steps < 0
         or type(request.batch_size) is not int
         or not 1 <= request.batch_size <= 256
         or type(request.actor_interval) is not int
@@ -188,7 +189,7 @@ def _make_learner(
             log_alpha.copy_(saved["log_alpha"])
         alpha_optimizer.load_state_dict(saved["alpha_optimizer"])
         start_step = saved["step"]
-        if type(start_step) is not int or not 0 <= start_step <= 1_000_000 - request.steps:
+        if type(start_step) is not int or start_step < 0:
             raise ValueError("Invalid SAC continuation step")
         torch.set_rng_state(saved["rng"])
     return _Learner(
@@ -502,7 +503,9 @@ def _train(
         write_file(output / "bc" / name, value)
     updates, encoder_actor_change, actor_critic_change = 0, 0.0, 0.0
     started = time.monotonic()
-    metrics = []
+    journal = UpdateJournal(output)
+    resources.callback(journal.close)
+    steps_completed = 0
     stop_reason = "budget_completed"
     for step in range(start_step, start_step + request.steps):
         if (
@@ -598,7 +601,8 @@ def _train(
             not torch.isfinite(p).all() for m in (encoder, policy, critic) for p in m.parameters()
         ) or not torch.isfinite(log_alpha):
             raise ValueError("Non-finite SAC update")
-        metrics.append(entry)
+        steps_completed += 1
+        journal.append(entry)
     summary = {
         "stage": "sac_updates",
         "source_kind": "synthetic",
@@ -607,11 +611,11 @@ def _train(
         "steps_requested": request.steps,
         "experience_added_transitions": added,
         "experience_expansion": expansion,
-        "steps_completed": len(metrics),
-        "total_steps": start_step + len(metrics),
+        "steps_completed": steps_completed,
+        "total_steps": start_step + steps_completed,
         "stop_reason": stop_reason,
         "actor_updates": updates,
-        "actor_updates_total": (start_step + len(metrics)) // request.actor_interval,
+        "actor_updates_total": (start_step + steps_completed) // request.actor_interval,
         "encoder_change_max": _difference(torch, initial_encoder, encoder),
         "actor_change_max": _difference(torch, initial_policy, policy),
         "critic_change_max": _difference(torch, initial_critic, critic),
@@ -626,7 +630,7 @@ def _train(
         "predictions": policy_predictions(
             torch, encoder, policy, data, request.normalized_target_entropy
         ),
-        "updates": metrics,
+        "updates": journal.finish(),
         "sampling": sampling.report(),
         "raw_frame_bytes": data.source_bytes,
         "raw_frame_cache": data.cache_summary(),
@@ -675,7 +679,7 @@ def _train(
     }
     if imitation is not None:
         metadata["imitation"] = imitation
-    state = learner.state(torch, start_step + len(metrics))
+    state = learner.state(torch, start_step + steps_completed)
     summary["learner_state_sha256"] = state_digest(torch, state)
     report_bytes = encode(summary)
     metadata["training_report_sha256"] = hashlib.sha256(report_bytes).hexdigest()
