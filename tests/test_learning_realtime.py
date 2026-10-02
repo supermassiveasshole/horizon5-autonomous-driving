@@ -79,7 +79,9 @@ class LargeMetadataBackend(AsyncBackend):
                     observation=replace(
                         point.observation,
                         frames=tuple(
-                            replace(frame, frame_id=frame.frame_id + "x" * 750000)
+                            # Large source metadata exercises the original archive reader
+                            # while stable image IDs keep actor-input copying inexpensive.
+                            replace(frame, time_quality=frame.time_quality + "x" * 1500000)
                             for frame in point.observation.frames
                         ),
                     ),
@@ -261,11 +263,49 @@ def test_large_async_result_can_be_acknowledged_and_resumed(tmp_path, async_seed
     attempt = json.loads((child / "summary.json").read_bytes())["attempts"][0]
     assert "decisions" not in attempt
     assert attempt["source_assets"]["kind"] == "sampling-source-index-v1"
+    replay = json.loads((child / attempt["replay"]).read_bytes())
+    eligible = len(replay["transitions"])
+    # Sampling earns one update per eligible transition, up to the explicit budget.
+    # Large metadata can reduce that count within the unchanged wall-clock budget.
+    expected_updates = min(eligible, config["sampling"]["max_updates"])
+    assert expected_updates > 0
+    training = json.loads((child / attempt["candidate"] / "training-report.json").read_bytes())
+    initial = json.loads((root / "initial/explorer/training-report.json").read_bytes())
+    assert training["steps_requested"] == training["steps_completed"] == expected_updates
+    archived_decisions = {row["decision_id"] for row in recorded["decisions"] if row.get("archive")}
+    large_transition_ids = {
+        f"{attempt['replay_sha256']}:{transition['id']}"
+        for transition in replay["transitions"]
+        if all(
+            transition[side]["decision_id"] in archived_decisions for side in ("current", "next")
+        )
+    }
+    updates_file = child / attempt["candidate"] / training["updates"]["path"]
+    updates = [json.loads(line) for line in updates_file.read_text().splitlines()]
+    sampled_ids = {identity for update in updates for identity in update["transition_ids"]}
+    assert large_transition_ids & sampled_ids  # The learner consumed oversized originals.
+    assert training["critic_change_max"] > 0 and training["encoder_change_max"] > 0
+    assert training["learner_state_sha256"] != initial["learner_state_sha256"]
+    assert attempt["eligible_transitions"] == result["eligible_transitions"] == eligible
+    assert attempt["learner_updates"] == result["learner_updates"] == expected_updates
+    row = result["rounds"][0]
+    assert row["eligible_transitions"] == eligible
+    assert row["update_budget"] == row["learner_updates"] == expected_updates
+    assert result["latest_learner"]["learner_state_sha256"] == training["learner_state_sha256"]
+    assert (
+        result["latest_learner"]["total_steps"]
+        == training["total_steps"]
+        == (initial["total_steps"] + expected_updates)
+    )
     assert result["stop_reason"] == "budget_completed", result.get("error")
-    assert result["learner_updates"] == 2 and result["rounds_completed"] == 1
+    assert result["rounds_completed"] == 1
     assert result["resources_released"]
     backend = AsyncBackend(async_seed[0])
     resumed = run_experiment(
         LearningContinue(root, sha(root / "state.json")), learning_environment=backend
     ).summary["learning_loop"]
-    assert resumed["learner_updates"] == 2 and not backend.leases
+    assert resumed["stop_reason"] == "budget_completed"
+    assert resumed["learner_updates"] == expected_updates and not backend.leases
+    assert resumed["eligible_transitions"] == eligible and resumed["rounds_completed"] == 1
+    assert resumed["latest_learner"] == result["latest_learner"]
+    assert resumed["rounds"] == result["rounds"] and resumed["resources_released"]
