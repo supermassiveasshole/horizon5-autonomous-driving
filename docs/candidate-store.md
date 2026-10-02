@@ -46,6 +46,8 @@ uv run --locked fh5 candidate-rollback --store runs/versions --expected-revision
 
 `CandidateHistory(store, after_sequence=N, limit=M)` / CLI 同名选项可按需获取历史页。序号从 1 起，返回 N 之后至多 M 条；示例的 20 只控制该次展示数量，不限制版本库继续增长。结果包含 `history_count`、`next_sequence` 和 `history_complete`；下一页使用返回的 `next_sequence`。不传 `limit` 保持完整历史查询行为，会显式物化全部返回条目；长历史应指定页面大小。`limit=0` 仅返回当前角色及统计，训练循环使用此模式，回退仅保留当前事件与目标事件。每页仍逐条验证完整摘要链和附件，页外损坏不会被跳过；累计历史越长，完整校验的 I/O 时间仍会增长。连续分页时应核对顶层 `revision`，若已变化则重新查询，避免把不同版本库快照的页面混用。
 
+核验在私有磁盘快照上进行：通过 SQLite 在线备份按页复制，关闭源连接后再读事件、核验附件，避免慢速诊断长期持有源库读锁而阻止候选提交。一页是 SQLite 的复制粒度，不是数据库容量门槛。此过程需要临时磁盘空间；失败保持原库，不能把失败快照当作成功历史。持续并发写入可能让备份重做，尚不保证固定完成时限。[Python backup 接口](https://docs.python.org/3.12/library/sqlite3.html#sqlite3.Connection.backup) · [SQLite 备份锁与一致性](https://www.sqlite.org/backup.html#file_and_database_connection_locking)
+
 回退指定历史事件的默认版本，并重新读取其冻结比较、原始评估证据和完整模型归档；资料缺失或改变时拒绝回退。回退自身追加一个事件，保留当前探索版本与所有中间失败记录。
 
 模型归档可以独立续训，评估证据仍依赖原始批次、录制、审核依据及用途登记库。版本库不是所有实验数据的自包含备份。未知转换谱系、实际驾驶资格、原生 FH5 晋升及长期磁盘回收仍另行验收。

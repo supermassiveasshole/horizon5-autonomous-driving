@@ -7,9 +7,10 @@ import json
 import sqlite3
 import uuid
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
 from fh5.artifact_io import sha256_file
@@ -101,12 +102,20 @@ def _read_events(
     database = root / "state.sqlite"
     if not database.is_file():
         raise ValueError("Missing candidate store")
-    with _database(root) as db:
-        for event in _events(db):
-            for name, digest in event["evidence"].items():
-                if digest_file(asset(root, name)) != digest:
-                    raise ValueError("Candidate history evidence changed: " + name)
-            yield event
+    try:
+        with TemporaryDirectory(prefix="fh5-candidate-history-") as temporary:
+            with closing(sqlite3.connect(Path(temporary) / "history.sqlite")) as snapshot:
+                with _database(root) as source:
+                    # SQLite's smallest copy unit permits writes between backup steps.
+                    # Release the source before attachment I/O or caller traversal.
+                    source.backup(snapshot, pages=1)
+                for event in _events(snapshot):
+                    for name, digest in event["evidence"].items():
+                        if digest_file(asset(root, name)) != digest:
+                            raise ValueError("Candidate history evidence changed: " + name)
+                    yield event
+    except sqlite3.Error as error:
+        raise ValueError("Candidate store unavailable: " + str(error)) from error
 
 
 def _latest(events: Iterator[dict[str, Any]]) -> dict[str, Any]:
