@@ -714,3 +714,7 @@ critic 冻结特征、10000 行以及配置 batch 取值上限仍待结构迁移
 `runs/resource-union-review-red-results.xml`。修正为角色核验与合并来源共享
 `replay_identity_key` 后，去重、篡改、磁盘失败及循环额度组合 **13 passed / 9.00 秒**，
 `runs/resource-union-review-green-results.xml`。未提高任何阈值；最终复审待回报。
+
+固定 `c68f3ba...f17ca386` 最终双轴只读复审：**Standards 0 项、Spec 0 项**；
+两轴先前各发现的同一 P2 已关闭。最终 Ruff、375 文件格式、141 源文件 mypy 通过。
+全量 `c68f3ba` 仍在独立冻结检出运行，结果尚未回报，且不覆盖本节之后的变化。
