@@ -256,3 +256,6 @@ Ruff、347 文件格式及 132 源文件 strict mypy 通过。
 **69 passed / 73.49 秒**，结果 `runs/resource-cache-bypass-20261002-results.xml`。
 
 该片段没有移除经验总量、转移数量及浮点 batch 的其余限制，也未测量真实 4K 游戏共存性能。
+父学习循环的更新中断/恢复组合 **10 passed / 111.56 秒**，
+结果 `runs/resource-cache-parent-20261002-results.xml`。Ruff、347 文件格式及 132 源文件 strict mypy 通过。
+固定 `611de1b...597ed83` 独立只读复审：**Standards 0 项、Spec 0 项**。
