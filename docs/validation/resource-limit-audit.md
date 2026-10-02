@@ -80,6 +80,7 @@
 加入发布前流式复核后，最终专项 **27 passed / 25.13 秒**。
 结果分别为 `runs/resource-archive-green-20261002-results.xml`、
 `runs/resource-archive-final-20261002-results.xml`。Ruff、339 文件格式及 130 源文件 mypy 通过。
+固定 `75b7890...b03c817` 独立只读复审：Standards 0 项、Spec 0 项。
 
 这一片段只完成载荷读写迁移。归档清单仍整体生成/加载，`candidate_store` 的数据库与历史阈值、
 底层经验限制仍待后续结构化，不以删除拒绝条件代替增长数据的长期迁移。
