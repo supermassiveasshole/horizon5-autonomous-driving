@@ -326,3 +326,4 @@ Ruff、350 文件格式及 133 源文件 strict mypy 通过。另有父更新恢
 
 与 SAC/critic 续训及诊断故障组合 **53 passed / 27.94 秒**，
 结果 `runs/resource-fingerprint-integrated-20261002-results.xml`。Ruff、351 文件格式及 133 源文件 mypy 通过。
+固定 `161b44d...d0d92c8` 独立只读审阅：**Standards 0 项、Spec 0 项**。
