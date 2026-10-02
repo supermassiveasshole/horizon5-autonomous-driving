@@ -1,14 +1,16 @@
-"""Bounded replay provenance and explicit demonstration/online batch sampling."""
+"""Indexed replay provenance and explicit demonstration/online batch sampling."""
 
 from __future__ import annotations
 
 import math
-from contextlib import closing
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
 from fh5.replay_document import ReplayArray
+from fh5.sac_provenance_index import ReplayRoles, provenance_index
 from fh5.sac_source_files import source_replays
 from fh5.sac_timing import next_action_elapsed
 
@@ -30,7 +32,7 @@ def check_compatible(replay: dict[str, Any], anchor: dict[str, Any]) -> None:
         raise ValueError("Incompatible SAC experience: task")
 
 
-def _leaf_roles(replay: dict[str, Any]) -> list[str]:
+def _leaf_role(replay: dict[str, Any]) -> str:
     if replay["version"] == 1:
         if (
             "source_role" in replay
@@ -38,7 +40,7 @@ def _leaf_roles(replay: dict[str, Any]) -> list[str]:
             or any("control_owner" in row for row in replay["transitions"])
         ):
             raise ValueError("Legacy SAC replay cannot declare new role or owner fields")
-        return ["online"] * len(replay["transitions"])
+        return "online"
     owner = {"demonstration": "human", "online": "policy"}.get(replay.get("source_role", ""))
     if (
         owner is None
@@ -46,7 +48,7 @@ def _leaf_roles(replay: dict[str, Any]) -> list[str]:
         or any(row.get("control_owner") != owner for row in replay["transitions"])
     ):
         raise ValueError("SAC source role differs from its actual control owner")
-    return [replay["source_role"]] * len(replay["transitions"])
+    return str(replay["source_role"])
 
 
 def _signature(row: dict[str, Any]) -> dict[str, Any]:
@@ -60,7 +62,7 @@ def _signature(row: dict[str, Any]) -> dict[str, Any]:
     return value
 
 
-def replay_roles(root: Path, replay: dict[str, Any]) -> list[str]:
+def _validate_document(replay: dict[str, Any], roles: ReplayRoles) -> None:
     if (
         (replay.get("version"), replay.get("kind"))
         not in (
@@ -70,17 +72,17 @@ def replay_roles(root: Path, replay: dict[str, Any]) -> list[str]:
         )
         or replay.get("source_kind") != "synthetic"
         or not isinstance(replay.get("transitions"), (list, ReplayArray))
-        or not 1 <= len(replay["transitions"]) <= 10_000
+        or not len(replay["transitions"])
         or replay.get("version") in (2, 3)
         and not isinstance(replay.get("task_contract"), dict)
     ):
-        raise ValueError("SAC requires a bounded prepared synthetic replay")
+        raise ValueError("SAC requires a nonempty prepared synthetic replay")
     required = {"id", "current", "next", "action", "reward", "discount", "bootstrap", "terminated"}
-    if any(not required <= row.keys() for row in replay["transitions"]):
-        raise ValueError("SAC Q learning requires complete transitions, not action-only labels")
-    if len({row["id"] for row in replay["transitions"]}) != len(replay["transitions"]):
-        raise ValueError("Duplicate SAC transition")
+    roles.begin_document()
     for row in replay["transitions"]:
+        if not required <= row.keys():
+            raise ValueError("SAC Q learning requires complete transitions, not action-only labels")
+        roles.check_identity(row["id"])
         next_action_elapsed(row)
         if (
             replay["version"] == 3
@@ -88,37 +90,42 @@ def replay_roles(root: Path, replay: dict[str, Any]) -> list[str]:
             and row.get("action_time_basis") != "asynchronous_send_return_proxy_v1"
         ):
             raise ValueError("Version 3 requires explicit asynchronous transition timing")
-    if not replay.get("source_inventory"):
-        return _leaf_roles(replay)
-    originals = {}
-    with closing(source_replays(root, replay)) as sources:
-        for entry in sources:
-            source = entry.document
-            if source.get("source_inventory"):
-                raise ValueError("SAC source inventory must contain original leaf replays")
-            roles = replay_roles(root, source)
-            check_compatible(replay, source)
-            for row, role in zip(source["transitions"], roles):
-                originals[(entry.file.sha256, row["id"])] = (row, role)
-    result = []
-    seen = set()
-    for row in replay["transitions"]:
-        provenance = row.get("provenance", {})
-        key = (provenance.get("replay_sha256"), provenance.get("transition_id"))
-        if key not in originals or key in seen:
-            raise ValueError("SAC transition lacks a unique original source")
-        original, role = originals[key]
-        if _signature(row) != _signature(original):
-            raise ValueError("SAC transition differs from its sealed original source")
-        seen.add(key)
-        result.append(role)
-    return result
+
+
+@contextmanager
+def replay_roles(root: Path, replay: dict[str, Any]) -> Iterator[ReplayRoles]:
+    with provenance_index() as roles:
+        _validate_document(replay, roles)
+        if not replay.get("source_inventory"):
+            role = _leaf_role(replay)
+            for _ in replay["transitions"]:
+                roles.add_role(role)
+        else:
+            with closing(source_replays(root, replay)) as sources:
+                for entry in sources:
+                    source = entry.document
+                    if source.get("source_inventory"):
+                        raise ValueError("SAC source inventory must contain original leaf replays")
+                    _validate_document(source, roles)
+                    role = _leaf_role(source)
+                    check_compatible(replay, source)
+                    for row in source["transitions"]:
+                        roles.add_original(entry.file.sha256, row, role)
+            for row in replay["transitions"]:
+                provenance = row.get("provenance", {})
+                original, role = roles.take_original(
+                    provenance.get("replay_sha256"), provenance.get("transition_id")
+                )
+                if _signature(row) != _signature(original):
+                    raise ValueError("SAC transition differs from its sealed original source")
+                roles.add_role(role)
+        yield roles
 
 
 class ReplaySampling:
     """Fixed quotas, no replacement within a batch and no hidden small-pool backfill."""
 
-    def __init__(self, roles: list[str], batch_size: int, fraction: float | None) -> None:
+    def __init__(self, roles: ReplayRoles, batch_size: int, fraction: float | None) -> None:
         if fraction is not None and (
             type(fraction) not in (int, float)
             or not math.isfinite(fraction)
@@ -126,17 +133,13 @@ class ReplaySampling:
         ):
             raise ValueError("SAC demonstration fraction must be finite and in [0, 1]")
         self.roles, self.batch_size, self.fraction = roles, batch_size, fraction
-        self.pools = {
-            role: [i for i, value in enumerate(roles) if value == role]
-            for role in ("demonstration", "online")
-        }
         self.quotas = None
         if fraction is not None:
             demo_count = math.floor(batch_size * fraction + 0.5)
             self.quotas = {"demonstration": demo_count, "online": batch_size - demo_count}
-            if any(count and not self.pools[role] for role, count in self.quotas.items()):
+            if any(count and not roles.counts[role] for role, count in self.quotas.items()):
                 raise ValueError("SAC sampling quota requires a nonempty source pool")
-        self.sampled = dict.fromkeys(self.pools, 0)
+        self.sampled = dict.fromkeys(roles.counts, 0)
 
     def sample(self, torch: Any) -> list[int]:
         if self.quotas is None:
@@ -145,8 +148,10 @@ class ReplaySampling:
             indices = []
             for role, count in self.quotas.items():
                 if count:
-                    pool = self.pools[role]
-                    indices.extend(pool[i] for i in torch.randperm(len(pool))[:count].tolist())
+                    indices.extend(
+                        self.roles.position(role, i)
+                        for i in torch.randperm(self.roles.counts[role])[:count].tolist()
+                    )
             indices = [indices[i] for i in torch.randperm(len(indices)).tolist()]
         for index in indices:
             self.sampled[self.roles[index]] += 1
@@ -159,7 +164,7 @@ class ReplaySampling:
             "demonstration_fraction": self.fraction,
             "requested_batch_size": self.batch_size,
             "quotas": self.quotas,
-            "available": {role: len(pool) for role, pool in self.pools.items()},
+            "available": dict(self.roles.counts),
             "sampled": dict(self.sampled),
             "small_pool_policy": "shrink_without_replacement_or_backfill",
         }

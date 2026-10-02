@@ -108,7 +108,7 @@ def test_number_of_explicit_additions_is_not_an_extra_learning_budget(tmp_path):
     assert (parent / "policy.json").read_bytes() == original
 
 
-@pytest.mark.parametrize("failure", ["index", "copy"])
+@pytest.mark.parametrize("failure", ["index", "union_index", "copy"])
 def test_expansion_io_failure_preserves_parent_and_cleans_disk_index(
     tmp_path, monkeypatch, failure
 ):
@@ -121,7 +121,8 @@ def test_expansion_io_failure_preserves_parent_and_cleans_disk_index(
     observed = []
 
     def connect(database, *args, **kwargs):
-        if failure == "index" and Path(database).parent.name.startswith("fh5-expansion-assets-"):
+        prefix = "fh5-experience-union-" if failure == "union_index" else "fh5-expansion-assets-"
+        if failure != "copy" and Path(database).parent.name.startswith(prefix):
             observed.append(True)
             raise sqlite3.OperationalError("database or disk is full")
         return connected(database, *args, **kwargs)

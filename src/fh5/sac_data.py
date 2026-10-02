@@ -58,7 +58,7 @@ class LearningReplay:
         self.torch, self.actor, self.bounds = torch, actor, bounds
         self.file = VerifiedFile(path, expected)
         self.replay = replay = resources.enter_context(replay_document(self.file))
-        self.roles = replay_roles(path.parent, replay)
+        self.roles = resources.enter_context(replay_roles(path.parent, replay))
         if replay["pixel_contract"] != actor.contract.metadata():
             raise ValueError("Unsupported SAC learning replay contract")
         self.rows = replay["transitions"]

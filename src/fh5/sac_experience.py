@@ -1,4 +1,4 @@
-"""Explicit, bounded additions to immutable SAC experience."""
+"""Stream explicit additions into immutable SAC experience."""
 
 from __future__ import annotations
 
@@ -14,6 +14,7 @@ from fh5.replay_document import ReplayArray, write_replay_document
 from fh5.sac_actions import ActionBounds
 from fh5.sac_data import LearningReplay
 from fh5.sac_experience_assets import ExperienceAssets, experience_assets
+from fh5.sac_experience_index import ExperienceUnion, experience_union
 from fh5.sac_source_files import source_replays
 from fh5.sac_sources import check_compatible
 
@@ -27,9 +28,22 @@ def expand_experience(
     bc: FrozenNumericActor,
     bounds: ActionBounds,
 ) -> tuple[Path, str, int, dict[str, Any]]:
-    with experience_assets() as assets, ExitStack() as parent_resources:
+    with (
+        experience_assets() as assets,
+        experience_union() as union,
+        ExitStack() as parent_resources,
+    ):
         return _expand(
-            torch, parent, parent_sha, additions, output, bc, bounds, assets, parent_resources
+            torch,
+            parent,
+            parent_sha,
+            additions,
+            output,
+            bc,
+            bounds,
+            assets,
+            union,
+            parent_resources,
         )
 
 
@@ -42,14 +56,12 @@ def _expand(
     bc: FrozenNumericActor,
     bounds: ActionBounds,
     assets: ExperienceAssets,
+    union: ExperienceUnion,
     parent_resources: ExitStack,
 ) -> tuple[Path, str, int, dict[str, Any]]:
     if not additions:
         raise ValueError("SAC expansion requires sealed replay additions")
     sources = chain(((parent, parent_sha),), additions)
-    inventory: list[dict[str, Any]] = []
-    rows: list[dict[str, Any]] = []
-    hashes, source_ids, transition_ids = set(), set(), set()
     added = 0
     combined: dict[str, Any] | None = None
     for number, (path, sha) in enumerate(sources):
@@ -87,37 +99,28 @@ def _expand(
             else:
                 assets.add_source(VerifiedFile(path, sha))
             for entry in entries:
-                # Re-reviewing or reformatting metadata does not create another interaction.
-                identity = entry["source_hashes"]["packets"]
-                if entry["replay_sha256"] in hashes or identity in source_ids:
-                    raise ValueError("Duplicate SAC experience cannot earn new update credit")
-                hashes.add(entry["replay_sha256"])
-                source_ids.add(identity)
-                inventory.append({**entry, "path": f"sources/{entry['replay_sha256']}.json"})
+                union.add_source(number, entry)
             for original in replay["transitions"]:
                 row = deepcopy(original)
                 provenance = row.get("provenance") or {
                     "replay_sha256": sha,
                     "transition_id": row["id"],
                 }
-                if provenance["replay_sha256"] not in {e["replay_sha256"] for e in entries}:
+                if not union.contains_source(number, provenance["replay_sha256"]):
                     raise ValueError("SAC transition lacks its source inventory")
                 row["provenance"] = provenance
                 row["id"] = provenance["replay_sha256"] + ":" + provenance["transition_id"]
-                if row["id"] in transition_ids:
-                    raise ValueError("Duplicate SAC transition")
-                transition_ids.add(row["id"])
                 for observation in (row["current"], row["next"]):
                     if observation is None:
                         continue
                     for entry in observation["frames"]:
                         entry["path"] = assets.add_frame(path.parent, entry)
-                rows.append(row)
+                union.add_transition(row)
                 added += int(number > 0)
-                if len(rows) > 10_000:
-                    raise ValueError("Expanded SAC replay exceeds 10000 transitions")
     assert combined is not None
-    combined.update(transitions=rows, source_inventory=inventory)
+    combined.update(
+        transitions=union.array("transitions"), source_inventory=union.array("source_inventory")
+    )
     if combined["version"] in (2, 3):
         combined["source_role"] = "mixed"
     # Recording-specific identities belong to each inventory entry, not to the union.

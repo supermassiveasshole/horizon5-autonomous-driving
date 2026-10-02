@@ -62,7 +62,7 @@ def test_sac_loads_selected_observations_without_retaining_the_metadata_corpus(t
     assert states[0] == states[1]
 
 
-@pytest.mark.parametrize("failure", ["index", "pixels", "memory"])
+@pytest.mark.parametrize("failure", ["index", "pixels", "memory", "roles"])
 def test_training_input_failure_saves_completed_updates_without_consuming_sampling_rng(
     tmp_path, monkeypatch, failure
 ):
@@ -84,7 +84,8 @@ def test_training_input_failure_saves_completed_updates_without_consuming_sampli
             return super().execute(sql, *args, **kwargs)
 
     def connect(database, *args, **kwargs):
-        if failure != "pixels" and Path(database).parent.name.startswith("fh5-learning-data-"):
+        prefix = "fh5-provenance-" if failure == "roles" else "fh5-learning-data-"
+        if failure != "pixels" and Path(database).parent.name.startswith(prefix):
             kwargs["factory"] = UnavailableIndex
         return connected(database, *args, **kwargs)
 
@@ -111,7 +112,7 @@ def test_training_input_failure_saves_completed_updates_without_consuming_sampli
     assert trained["steps_completed"] == 3
     assert trained["stop_reason"] == "training_data_unavailable"
     assert "learning input" in trained["training_error"]
-    assert trained["predictions"]["status"] == "unavailable"
+    assert trained["predictions"]["status"] == ("complete" if failure == "roles" else "unavailable")
     resumed = run_experiment(
         SACResume(tmp_path / "stopped", tmp_path / "resumed", steps=2)
     ).summary["sac_learning"]

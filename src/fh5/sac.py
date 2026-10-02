@@ -196,7 +196,7 @@ def _run(
     replay = stack.enter_context(replay_document(replay_file))
     from fh5.sac_sources import replay_roles
 
-    replay_roles(request.replay_file.parent, replay)
+    stack.enter_context(replay_roles(request.replay_file.parent, replay))
     pixels = PixelContract.from_metadata(replay["pixel_contract"])
     model_payload = {
         name: read_bounded(model_dir / name, 256 * 1024**2) for name in ("model.json", "actor.pt")
