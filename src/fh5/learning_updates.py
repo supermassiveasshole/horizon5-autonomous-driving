@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -21,10 +22,8 @@ class UpdateProgress:
 
 
 def retained_update_progress(
-    request: SACCycle | SACRealtimeCycle, parent: dict[str, Any], segments: list[dict[str, Any]]
+    request: SACCycle | SACRealtimeCycle, parent: dict[str, Any], segments: Iterable[dict[str, Any]]
 ) -> UpdateProgress:
-    if len(segments) > 10:
-        raise ValueError("Learning round exceeds 10 retained update continuations")
     summary, learner = completed_sampling(request, parent, allow_stopped_updates=True)
     attempt = summary["attempts"][0]
     earned = sampling_update_budget(

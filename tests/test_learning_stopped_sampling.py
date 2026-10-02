@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from learning_files import update_bindings
 from test_candidate_store import candidates as candidates
 from test_evaluation import sha
 from test_learning_loop import SharedBackend, loop_request
@@ -98,7 +99,7 @@ def test_stopped_sampling_recovery_completes_earned_updates_without_another_samp
     assert recovered["eligible_transitions"] == recovered["learner_updates"] == 3
     assert recovered["rounds_completed"] == 1
     assert recovered["latest_learner"]["total_steps"] == 33
-    assert len(recovered["rounds"][0]["update_segments"]) == 1
+    assert len(update_bindings(root, recovered["rounds"][0])) == 1
     assert recovered["rounds"][0]["evaluation"]["execution_metrics"]["bound_runs"] == 2
     assert len(backend.leases) == 1 and backend.closed and recovered["resources_released"]
     assert all(sha(path) == digest for path, digest in originals.items())

@@ -26,3 +26,21 @@ def stage_records(root, summary):
     records = [row for segment in reversed(segments) for row in segment]
     assert records[-2:] == binding["tail"]
     return records
+
+
+def update_bindings(root, row):
+    binding = row.get("update_segments", [])
+    if isinstance(binding, list):
+        return binding
+    previous = None
+    entries = []
+    for number in range(binding["count"]):
+        path = root / f"round-{row['number']:03d}/update-history/{number:06d}.json"
+        raw = path.read_bytes()
+        node = json.loads(raw)
+        assert node["format"] == "learning-update-node-v1"
+        assert node["previous_sha256"] == previous
+        previous = hashlib.sha256(raw).hexdigest()
+        entries.append(node["entry"])
+    assert previous == binding["head_sha256"]
+    return entries

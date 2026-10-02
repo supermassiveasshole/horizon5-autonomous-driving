@@ -8,6 +8,7 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
+from itertools import chain
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
@@ -39,6 +40,7 @@ from fh5.learning_recovery import (
     verify_archived_sampling,
 )
 from fh5.learning_stages import StageHistory
+from fh5.learning_update_history import UpdateHistory
 from fh5.learning_updates import UpdateProgress, retained_update_progress
 from fh5.numeric_images import PixelContract
 from fh5.presentation import optional_report
@@ -684,7 +686,12 @@ class _Loop:
             return False
         return True
 
-    def update_progress(self, number: int, row: dict[str, Any]) -> UpdateProgress:
+    def update_history(self, number: int, row: dict[str, Any]) -> UpdateHistory:
+        return UpdateHistory(self.root / f"round-{number:03d}", row.get("update_segments", []))
+
+    def update_progress(
+        self, number: int, row: dict[str, Any], *, proposed_entry: dict[str, Any] | None = None
+    ) -> UpdateProgress:
         parent = row.get("sampling_parent", self.state["explorer"])
         if (
             parent["sha256"] != row["sampling_checkpoint_sha256"]
@@ -696,7 +703,10 @@ class _Loop:
             checkpoint_dir=Path(parent["directory"]),
             expected_checkpoint_sha256=parent["sha256"],
         )
-        progress = retained_update_progress(request, parent, row.get("update_segments", []))
+        segments = iter(self.update_history(number, row))
+        if proposed_entry is not None:
+            segments = chain(segments, (proposed_entry,))
+        progress = retained_update_progress(request, parent, segments)
         if (
             progress.earned != self.update_budget(row)
             or progress.completed != row["learner_updates"]
@@ -713,20 +723,18 @@ class _Loop:
         output: Path,
         kind: Literal["resumed_updates", "sealed_updates"],
     ) -> None:
-        segments = row.get("update_segments", [])
+        history = self.update_history(number, row)
         learner = _learner(output, _sha(output / "policy.json"))
         learned = json.loads(read_bounded(output / "training-report.json", 128 * 1024**2))
         proposed = {
             **row,
             "sampling_parent": dict(row.get("sampling_parent", self.state["explorer"])),
-            "update_segments": [
-                *segments,
-                {"directory": str(output), "sha256": learner["sha256"]},
-            ],
             "learner_updates": row["learner_updates"] + learned["steps_completed"],
             "candidate_sha256": learner["sha256"],
         }
-        checked = self.update_progress(number, proposed)
+        entry = {"directory": str(output), "sha256": learner["sha256"]}
+        checked = self.update_progress(number, proposed, proposed_entry=entry)
+        proposed["update_segments"] = history.append(entry)
         row.update(proposed)
         self.state["learner_updates"] += checked.completed - progress.completed
         self.state["latest_learner"] = checked.learner
@@ -745,9 +753,8 @@ class _Loop:
         if not rows or rows[-1]["complete"]:
             return
         row, number = rows[-1], len(rows) - 1
-        output = (
-            self.root / f"round-{number:03d}" / f"updates-{len(row.get('update_segments', [])):03d}"
-        )
+        count = self.update_history(number, row).count
+        output = self.root / f"round-{number:03d}" / f"updates-{count:03d}"
         if not output.exists():
             return
         phase = self.state["phase"]
@@ -771,12 +778,10 @@ class _Loop:
         progress = self.update_progress(number, row)
         if progress.learner != self.state["latest_learner"]:
             raise ValueError("Stopped updates differ from the current learner")
-        segments = row.get("update_segments", [])
-        if len(segments) >= 10:
-            raise ValueError("Learning round exceeds 10 retained update continuations")
+        count = self.update_history(number, row).count
         if not self.capacity("updating"):
             return False
-        output = self.root / f"round-{number:03d}" / f"updates-{len(segments):03d}"
+        output = self.root / f"round-{number:03d}" / f"updates-{count:03d}"
         self.save("resuming_updates")
         learned = run_experiment(
             SACResume(

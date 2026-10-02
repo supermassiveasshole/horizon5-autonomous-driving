@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from learning_files import update_bindings
 from test_candidate_store import candidates as candidates
 from test_evaluation import sha
 from test_learning_loop import SharedBackend
@@ -89,7 +90,7 @@ def test_sealed_update_survives_parent_exit_without_duplicate_credit_or_sampling
     assert result["latest_learner"]["sha256"] == sha(checkpoint / "policy.json")
     assert result["eligible_transitions"] == 3 and result["learner_updates"] == 0
     assert result["latest_learner"]["total_steps"] == pending["latest_learner"]["total_steps"] == 30
-    assert result["rounds_completed"] == 0 and len(result["rounds"][0]["update_segments"]) == 1
+    assert result["rounds_completed"] == 0 and len(update_bindings(root, result["rounds"][0])) == 1
     assert result["recoveries"][-1]["kind"] == "sealed_updates"
     assert not backend.leases and backend.closed and result["resources_released"]
     assert all(sha(path) == digest for path, digest in originals.items())
@@ -100,7 +101,7 @@ def test_sealed_update_survives_parent_exit_without_duplicate_credit_or_sampling
     assert repeated["latest_learner"] == result["latest_learner"]
     assert repeated["learner_updates"] == 0 and repeated["eligible_transitions"] == 3
     assert repeated["recoveries"] == result["recoveries"]
-    assert len(repeated["rounds"][0]["update_segments"]) == 1
+    assert len(update_bindings(root, repeated["rounds"][0])) == 1
     assert not (root / "round-000/updates-001").exists()
     assert not next_backend.leases and next_backend.closed
 
@@ -184,7 +185,7 @@ def test_sealed_update_after_audit_read_failure_is_acknowledged_on_continue(tmp_
     assert result["stop_reason"] == "stop_requested", result.get("error")
     assert result["latest_learner"]["directory"] == str(checkpoint)
     assert result["eligible_transitions"] == 3 and result["learner_updates"] == 0
-    assert len(result["rounds"][0]["update_segments"]) == 2
+    assert len(update_bindings(root, result["rounds"][0])) == 2
     assert result["recoveries"][-1]["kind"] == "sealed_updates"
     assert result["interruptions"][-1]["stop_reason"] == "interface_error"
     assert all(sha(path) == digest for path, digest in originals.items())
