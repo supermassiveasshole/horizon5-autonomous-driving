@@ -101,5 +101,6 @@
 Ruff lint、342 文件格式及 strict mypy（131 源文件）通过。
 补充核对新历史节点在存储规划中的元数据角色和字节统计后，存储专项 **15 passed / 55.95 秒**，
 结果 `runs/resource-linked-storage-final-20261002-results.xml`。
+固定 `e5d04cb...be22e33` 独立只读复审：Standards 0 项、Spec 0 项。
 
 这里没有解决单段训练报告整体生成、归档文件清单及其他表中遗留阈值，清理继续。
