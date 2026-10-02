@@ -2,17 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
 import importlib
-import json
 from collections import OrderedDict
 from pathlib import Path
 from typing import Any
 
-from fh5.artifact_io import VerifiedFile
+from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.bc_learning import ARCHITECTURE, MODEL_METADATA_KEYS, _numeric
 from fh5.bc_network import make_actor
 from fh5.numeric_images import NumericFrame, PixelContract
+from fh5.replay_document import read_document_fields
 from fh5.temporal_features import (
     TEMPORAL_ARCHITECTURE,
     TEMPORAL_METADATA_KEYS,
@@ -28,19 +27,20 @@ class FrozenNumericActor:
     def __init__(
         self,
         model_dir: Path,
-        contract: PixelContract,
+        contract: PixelContract | None = None,
         device: str = "cpu",
         *,
         legacy_diagnostic: bool = False,
         expected_manifest_sha256: str | None = None,
     ) -> None:
-        manifest_bytes = (model_dir / "model.json").read_bytes()
-        if (
-            expected_manifest_sha256 is not None
-            and hashlib.sha256(manifest_bytes).hexdigest() != expected_manifest_sha256
-        ):
+        path = model_dir / "model.json"
+        digest = sha256_file(path)
+        if expected_manifest_sha256 is not None and digest != expected_manifest_sha256:
             raise ValueError("Frozen numerical actor manifest changed from its bound batch")
-        original = json.loads(manifest_bytes)
+        self.manifest_file = VerifiedFile(path, digest)
+        original = read_document_fields(
+            self.manifest_file, {*TEMPORAL_METADATA_KEYS, "weights_sha256"}
+        )
         temporal = original.get("version") == 2
         if not temporal and not legacy_diagnostic:
             raise ValueError("Old BC weights require explicit legacy_diagnostic=True")
@@ -49,6 +49,10 @@ class FrozenNumericActor:
             (2, TEMPORAL_ARCHITECTURE),
         ):
             raise ValueError("Unsupported frozen numerical actor model")
+        # Checkpoint consumers derive the pixel contract from verified metadata;
+        # live adapters may additionally require their explicit external contract.
+        if contract is None:
+            contract = PixelContract.from_metadata(original["numeric_contract"])
         c = original["contract"]
         self.temporal = c.get("temporal") if temporal else None
         if temporal and (

@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from fh5.artifact_io import VerifiedFile, copy_evidence, sha256_file
 from fh5.checkpoint_history import HistorySource, empty_history
-from fh5.collection_store import encode, read_bounded, write_file
+from fh5.collection_store import encode, write_file
 from fh5.learning_diagnostics import PredictionRecorder, RecordJournal
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
@@ -199,11 +199,12 @@ def _run(
 
     stack.enter_context(replay_roles(request.replay_file.parent, replay))
     pixels = PixelContract.from_metadata(replay["pixel_contract"])
-    model_bytes = read_bounded(model_dir / "model.json", 256 * 1024**2)
-    model_digest = hashlib.sha256(model_bytes).hexdigest()
-    if saved is not None and model_digest != manifest["actor_manifest_sha256"]:
-        raise ValueError("Critic's frozen BC manifest changed")
-    actor = FrozenNumericActor(model_dir, pixels, expected_manifest_sha256=model_digest)
+    actor = FrozenNumericActor(
+        model_dir,
+        pixels,
+        expected_manifest_sha256=manifest["actor_manifest_sha256"] if saved is not None else None,
+    )
+    model_digest = actor.manifest_file.sha256
     weights = VerifiedFile(model_dir / "actor.pt", actor.manifest["weights_sha256"])
     for parameter in actor.model.parameters():
         parameter.requires_grad_(False)
@@ -287,7 +288,7 @@ def _run(
         output.mkdir(parents=True)
         history = history_source.retain(output) if history_source is not None else empty_history()
         experience = seal_experience(replay, replay_file, output / "experience")
-        copy_evidence(output / "actor", {"model.json": model_bytes, "actor.pt": weights})
+        copy_evidence(output / "actor", {"model.json": actor.manifest_file, "actor.pt": weights})
         # Validate the sealed actor/experience before spending update budget.
         # Constructing a reload model must not alter the learner sampling RNG.
         with preserve_torch_state(torch):

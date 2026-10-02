@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import json
 import math
 import time
 from collections.abc import Callable, Iterator
@@ -17,11 +16,10 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from fh5.artifact_io import VerifiedFile, copy_evidence
 from fh5.checkpoint_history import HistorySource, empty_history
-from fh5.collection_store import encode, read_bounded
+from fh5.collection_store import encode
 from fh5.learning_diagnostics import PredictionRecorder, RecordJournal
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
-from fh5.numeric_images import PixelContract
 from fh5.presentation import optional_report
 from fh5.sac import _q_heads, _values
 from fh5.sac_actions import ActionBounds
@@ -225,10 +223,8 @@ def validate_sac_candidate(root: Path, expected_sha256: str) -> dict[str, Any]:
         request = SACTrain(root, replay_file, root, **configuration)
         _validate_configuration(request)
         torch.manual_seed(request.seed)
-        bc_manifest = json.loads(read_bounded(root / "bc/model.json", 1024**2))
         bc = FrozenNumericActor(
             root / "bc",
-            PixelContract.from_metadata(bc_manifest["numeric_contract"]),
             expected_manifest_sha256=manifest["bc_manifest_sha256"],
         )
         data = LearningReplay(
@@ -371,11 +367,6 @@ def _train(
         warm_sha = manifest["warmup_manifest_sha256"]
         bc_dir = request.warmup_dir / "bc"
     bounds = ActionBounds(**warm["bounds"])
-    bc_bytes = read_bounded(bc_dir / "model.json", 256 * 1024**2)
-    bc_manifest = json.loads(bc_bytes)
-    bc_digest = hashlib.sha256(bc_bytes).hexdigest()
-    if bc_digest != warm["actor_manifest_sha256"]:
-        raise ValueError("BC bytes changed while loading SAC initialization")
     imitation = (
         initial_imitation(
             request.imitation_weights,
@@ -392,8 +383,8 @@ def _train(
         assert isinstance(operation, SACResume)
         history_blobs.update(imitation_evidence(operation.checkpoint_dir, imitation))
     imitation_review = None
-    pixels = PixelContract.from_metadata(bc_manifest["numeric_contract"])
-    bc = FrozenNumericActor(bc_dir, pixels, expected_manifest_sha256=warm["actor_manifest_sha256"])
+    bc = FrozenNumericActor(bc_dir, expected_manifest_sha256=warm["actor_manifest_sha256"])
+    bc_digest = bc.manifest_file.sha256
     bc_weights = VerifiedFile(bc_dir / "actor.pt", bc.manifest["weights_sha256"])
     if restored is None:
         saved = initial_critic
@@ -450,7 +441,7 @@ def _train(
             operation.imitation_registry,
             root / "comparison",
             parent_sha256=hashlib.sha256(parent_bytes).hexdigest(),
-            bc_manifest=bc_manifest,
+            bc_manifest=bc.manifest,
             learning_origins=recording_origins(request.replay_file.parent, replay),
         )
         history_blobs.update(proof_blobs)
@@ -510,7 +501,7 @@ def _train(
     history = history_source.retain(output) if history_source is not None else empty_history()
     experience = seal_experience(data.replay, data.file, output / "experience")
     copy_evidence(output, history_blobs)
-    copy_evidence(output / "bc", {"model.json": bc_bytes, "actor.pt": bc_weights})
+    copy_evidence(output / "bc", {"model.json": bc.manifest_file, "actor.pt": bc_weights})
     updates, encoder_actor_change, actor_critic_change = 0, 0.0, 0.0
     started = time.monotonic()
     journal = RecordJournal(output, "diagnostics/updates.jsonl", "sac-update-jsonl-v1")

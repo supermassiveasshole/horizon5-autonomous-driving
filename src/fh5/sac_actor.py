@@ -3,16 +3,14 @@
 from __future__ import annotations
 
 import hashlib
-import json
 from copy import deepcopy
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from fh5.collection_store import read_bounded
 from fh5.control import Command
 from fh5.numeric_actor import FrozenNumericActor
-from fh5.numeric_images import NumericDecision, PixelContract, validate_decision
+from fh5.numeric_images import NumericDecision, validate_decision
 from fh5.sac_actions import ActionBounds
 from fh5.sac_checkpoint import read_checkpoint
 from fh5.sac_policy import encode_history, make_policy
@@ -30,11 +28,10 @@ class FrozenSAC:
         self.sha = hashlib.sha256(raw).hexdigest()
         self.manifest = manifest
         model_dir = checkpoint / "bc"
-        bc_metadata = json.loads(read_bounded(model_dir / "model.json", 1024**2))
-        self.pixels = PixelContract.from_metadata(bc_metadata["numeric_contract"])
         self.bc = FrozenNumericActor(
-            model_dir, self.pixels, expected_manifest_sha256=manifest["bc_manifest_sha256"]
+            model_dir, expected_manifest_sha256=manifest["bc_manifest_sha256"]
         )
+        self.pixels = self.bc.contract
         self.bounds = ActionBounds(**manifest["bounds"])
         self.encoder = torch.nn.ModuleDict(
             {"images": deepcopy(self.bc.model.encoder), "state": deepcopy(self.bc.model.state)}

@@ -163,6 +163,58 @@ class _JSONInput:
         self.take("]")
         return ReplayArray(index, section, count)
 
+    def discard(self) -> None:
+        """Validate an unused value without retaining its growing containers."""
+        token = self.peek()
+        if token not in ("[", "{"):
+            self.value()
+            return
+        self.take(token)
+        end = "]" if token == "[" else "}"
+        if self.peek() != end:
+            while True:
+                if token == "{":
+                    if not isinstance(self.value(), str):
+                        raise ValueError("JSON object keys must be strings")
+                    self.take(":")
+                self.discard()
+                if self.peek() != ",":
+                    break
+                self.take(",")
+        self.take(end)
+
+    def fields(self, wanted: set[str]) -> dict[str, Any]:
+        self.take("{")
+        result: dict[str, Any] = {}
+        if self.peek() != "}":
+            while True:
+                key = self.value()
+                if not isinstance(key, str):
+                    raise ValueError("JSON object keys must be strings")
+                self.take(":")
+                if key in wanted:
+                    result[key] = self.value()
+                else:
+                    self.discard()
+                if self.peek() != ",":
+                    break
+                self.take(",")
+        self.take("}")
+        if self.peek():
+            raise ValueError("Trailing data after JSON document")
+        return result
+
+
+def read_document_fields(source: VerifiedFile, wanted: set[str]) -> dict[str, Any]:
+    """Project verified metadata while validating/discarding unused histories.
+
+    Selected fields and individual scalar values are decoded as usual. Growing
+    unselected arrays/objects are visited incrementally, not materialized.
+    """
+    with source.snapshot() as frozen:
+        with io.TextIOWrapper(frozen, encoding="utf-8-sig") as text:
+            return _JSONInput(text).fields(wanted)
+
 
 @contextmanager
 def replay_document(source: VerifiedFile) -> Iterator[dict[str, Any]]:
