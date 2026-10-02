@@ -443,7 +443,11 @@ class _Loop:
                     verify_sampling_sources(attempt.get("source_assets", {}))
             if "candidate_evaluation" in row:
                 _input(self.root, row["candidate_evaluation"]).verify()
-            if row["complete"] and "candidate_sha256" in row:
+            if row["complete"] and (
+                "sampling_parent" in row
+                or "update_segments" in row
+                or (round_dir / "updates-000").exists()
+            ):
                 progress = self.update_progress(number, row)
                 if progress.learner["sha256"] != row["candidate_sha256"]:
                     raise ValueError("Completed round has unacknowledged updates")
@@ -757,6 +761,7 @@ class _Loop:
         if row["candidate_sha256"] != self.state["latest_learner"]["sha256"]:
             raise ValueError("Pending updates differ from the current learner")
         progress = self.update_progress(number, row)
+        row.setdefault("sampling_parent", dict(self.state["explorer"]))
         if progress.learner != self.state["latest_learner"]:
             self.accept_updates(number, row, progress, "sealed_updates")
         row.pop("update_segments", None)

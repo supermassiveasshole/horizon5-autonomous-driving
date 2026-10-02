@@ -7,7 +7,7 @@ import pytest
 from learning_files import update_bindings
 from test_candidate_store import candidates as candidates
 from test_evaluation import sha
-from test_learning_loop import SharedBackend
+from test_learning_loop import SharedBackend, loop_request
 from test_learning_loop import seeded_loop as seeded_loop
 from test_learning_update_resume import stop_on_creation, stopped_sampling
 
@@ -58,6 +58,64 @@ def test_legacy_update_bindings_are_removed_without_changing_old_files(tmp_path,
     assert backend.closed and continued["resources_released"]
     assert sha(checkpoint) == sealed
     assert node_path.read_bytes() == original
+
+
+def test_legacy_completed_sampling_keeps_its_parent_after_evaluation_and_repeated_continue(
+    tmp_path, seeded_loop
+):
+    request = loop_request(tmp_path, seeded_loop, rounds=1)
+    root = request.output_dir
+
+    class UnavailableEvaluation(SharedBackend):
+        def evaluation(self, identity):
+            raise OSError("synthetic evaluation receiver unavailable")
+
+    failed = run_experiment(
+        request, learning_environment=UnavailableEvaluation(seeded_loop[0])
+    ).summary["learning_loop"]
+    assert failed["stop_reason"] == "interface_error"
+    assert failed["learner_updates"] == failed["eligible_transitions"] == 3
+    assert failed["latest_learner"]["total_steps"] == 33
+    parent = failed["explorer"]
+    originals = {
+        path: sha(path)
+        for learner in (parent, failed["latest_learner"])
+        for path in Path(learner["directory"]).rglob("*")
+        if path.is_file()
+    }
+    state_file = root / "state.json"
+    legacy = json.loads(state_file.read_bytes())
+    legacy["rounds"][0].pop("sampling_parent")
+    state_file.write_text(json.dumps(legacy))
+
+    backend = SharedBackend(seeded_loop[0])
+    completed = run_experiment(
+        LearningContinue(root, sha(state_file)), learning_environment=backend
+    ).summary["learning_loop"]
+    assert completed["stop_reason"] == "budget_completed", completed.get("error")
+    assert completed["rounds_completed"] == 1
+    assert completed["learner_updates"] == completed["eligible_transitions"] == 3
+    assert completed["latest_learner"] == failed["latest_learner"]
+    assert json.loads(state_file.read_bytes())["rounds"][0].get("sampling_parent") == parent
+    assert len(backend.leases) == 1 and not hasattr(backend.leases[0], "commands")
+    assert backend.closed and completed["resources_released"]
+
+    # Also accept an already-completed legacy round without saved sampling ancestry.
+    legacy = json.loads(state_file.read_bytes())
+    legacy["rounds"][0].pop("sampling_parent")
+    state_file.write_text(json.dumps(legacy))
+    repeated_backend = SharedBackend(seeded_loop[0])
+    repeated = run_experiment(
+        LearningContinue(root, sha(state_file)), learning_environment=repeated_backend
+    ).summary["learning_loop"]
+    assert repeated["stop_reason"] == "budget_completed", repeated.get("error")
+    assert repeated["rounds_completed"] == 1
+    assert repeated["learner_updates"] == repeated["eligible_transitions"] == 3
+    assert repeated["latest_learner"] == completed["latest_learner"]
+    assert not repeated_backend.leases and repeated_backend.closed
+    assert repeated["resources_released"]
+    assert not (root / "round-000/updates-000").exists()
+    assert all(sha(path) == digest for path, digest in originals.items())
 
 
 def test_more_than_ten_stopped_continuations_keep_the_original_credit(tmp_path, seeded_loop):
