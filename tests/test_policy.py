@@ -3,6 +3,7 @@
 import json
 import math
 import struct
+import time
 from dataclasses import replace
 from io import BytesIO
 
@@ -64,6 +65,10 @@ class DrivingGame:
         return self.time_ns
 
     def read(self, period_s):
+        # This environment shares real disk/inference worker threads. Advancing
+        # only a virtual clock makes a nominal 50 Hz source run at disk speed
+        # and spuriously exhaust the persistence queue under host contention.
+        time.sleep(period_s)
         self.time_ns += int(period_s * 1e9)
         speed = 2 if self.command.throttle_u8 else 0
         self.x += speed * period_s
@@ -155,6 +160,32 @@ def test_visual_policy_sends_bounded_actions_with_causal_history_and_stops(
     assert replay.summary["vision"]["integrity_errors"] == []
     assert replay.summary["control"]["artifact_errors"] == []
     assert replay.summary["control"]["timing"]["max_interval_ms"] is not None
+
+
+def test_declared_sampling_cadence_does_not_turn_normal_file_latency_into_backpressure(
+    tmp_path, monkeypatch
+):
+    from pathlib import Path
+
+    original = Path.write_bytes
+
+    def write(file, value):
+        if file.parent.name == "frames":
+            # Half the normal 20 ms acquisition period; the real writer must
+            # get the same passage of time as the simulated game environment.
+            time.sleep(0.01)
+        return original(file, value)
+
+    monkeypatch.setattr(Path, "write_bytes", write)
+    game = DrivingGame()
+    result = run_experiment(
+        PolicyDrive(config(tmp_path), tmp_path / "drive"),
+        policy_environment=game,
+        policy_actor=VisualActor(),
+    )
+    assert result.summary["policy"]["stop_reason"] == "local_end"
+    assert result.summary["policy"]["release_sent"] and game.closed
+    assert result.summary["policy"]["image_writer_released"]
 
 
 def test_policy_rejects_steering_above_the_calibrated_range_before_sending(tmp_path):

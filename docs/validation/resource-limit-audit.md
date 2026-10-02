@@ -787,3 +787,21 @@ CLI 错把数据资源停止返回为 0 的反例 **1 failed / 2.17 秒**；现�
 `test_visual_policy_sends_bounded_actions_with_causal_history_and_stops[0.2-6553]`：
 预期 `local_end`，实际 `image_writer_backpressure`。该全量不包含本节修改，不能报告为通过；
 写入队列/模拟环境时钟的原因另行诊断，不以加大队列或超时绕过。
+
+## 全量中的模拟时钟与真实写入线程竞争
+
+上述失败孤立执行为 **2 passed / 0.79 秒**，因此保留全量失败材料并建立外部文件延迟对照。
+原测试的 `DrivingGame.read(period_s)` 只增加虚拟时钟，真实磁盘线程仍按墙钟执行，
+名义 50 Hz 的流可在远少于一帧间隔的时间内提交下一张图。写入开销变化遂改变队列积压，
+使正常完成测试偶发命中已有停止保护。
+
+公开实验入口原型加入单帧 10 ms 文件延迟（小于通常的 20 ms 采集间隔）：原时钟两次均停止于
+`image_writer_backpressure`，仅等待 writer 打开日志的两次仍失败；按请求间隔实际推进时间的
+两次均 `local_end`。原型及测量位于 `runs/resource-policy-backpressure-*`，
+不是实机吞吐或队列容量依据。新回归在修改前 **1 failed / 1.24 秒**，
+`runs/resource-policy-clock-red-results.xml`。
+
+仅修改测试环境，使其等待所声明的 `period_s` 后推进模拟时钟；生产队列、控制阈值和超时不变。
+保留原完成断言，以及真实写入挂起时解除控制的反例。整组 **27 passed / 41.90 秒**，
+`runs/resource-policy-clock-green-results.xml`，包括新增延迟对照、原全量失败案例及停止保护。
+修正的是测试时钟与实际工作线程不一致，未把旧策略队列默认值追认为已测容量；该资源审计仍开放。
