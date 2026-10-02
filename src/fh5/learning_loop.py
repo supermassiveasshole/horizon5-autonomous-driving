@@ -567,25 +567,31 @@ class _Loop:
         summary: dict[str, Any],
         verified_learner: dict[str, Any] | None = None,
     ) -> None:
-        row["learning"] = {
+        # Authenticate before acknowledging any counters or binding. A volume
+        # outage may also affect this new validation index; the sealed child
+        # must remain eligible for reconciliation after storage recovers.
+        proposed = dict(row)
+        proposed["learning"] = {
             "directory": str(directory),
             "summary_sha256": _sha(directory / "summary.json"),
         }
-        row["sampling_stop_reason"] = summary["stop_reason"]
-        self.state["child_resources_released"] &= summary["resources_released"]
-        row["eligible_transitions"] = sum(
+        proposed["sampling_stop_reason"] = summary["stop_reason"]
+        proposed["eligible_transitions"] = sum(
             a.get("eligible_transitions", 0) for a in summary["attempts"]
         )
-        row["learner_updates"] = sum(a.get("learner_updates", 0) for a in summary["attempts"])
-        row["update_budget"] = self.update_budget(row)
-        self.state["eligible_transitions"] += row["eligible_transitions"]
-        self.state["learner_updates"] += row["learner_updates"]
+        proposed["learner_updates"] = sum(a.get("learner_updates", 0) for a in summary["attempts"])
+        proposed["update_budget"] = self.update_budget(proposed)
+        learner = None
         if summary.get("latest_candidate"):
             candidate = directory / summary["latest_candidate"]
-            self.state["latest_learner"] = verified_learner or _learner(
-                candidate, _sha(candidate / "policy.json")
-            )
-            row["candidate_sha256"] = self.state["latest_learner"]["sha256"]
+            learner = verified_learner or _learner(candidate, _sha(candidate / "policy.json"))
+            proposed["candidate_sha256"] = learner["sha256"]
+        row.update(proposed)
+        self.state["child_resources_released"] &= summary["resources_released"]
+        self.state["eligible_transitions"] += row["eligible_transitions"]
+        self.state["learner_updates"] += row["learner_updates"]
+        if learner is not None:
+            self.state["latest_learner"] = learner
 
     def reconcile_sampling(self) -> None:
         rows = self.state["rounds"]
@@ -595,8 +601,11 @@ class _Loop:
         request = self.sampling_request(len(rows) - 1)
         if not request.output_dir.exists():
             return
+        phase = self.state["phase"]
+        if phase == "stopped":
+            phase = self.stages.before_stop(phase)
         if (
-            self.state["phase"] != "updating"
+            phase != "updating"
             or self.state["rounds_completed"] != len(rows) - 1
             or not all(prior["complete"] for prior in rows[:-1])
             or row.get("sampling_checkpoint_sha256") != self.state["latest_learner"]["sha256"]

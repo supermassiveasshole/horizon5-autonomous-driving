@@ -17,15 +17,18 @@ from fh5.sac import SACCriticWarmup
 
 
 @contextmanager
-def unavailable_after_update(monkeypatch, output):
+def unavailable_after_update(monkeypatch, output, *, volume_failure=False):
     connected, opened = sqlite3.connect, Path.open
     connections, faults = [], []
+    volume_unavailable = False
 
     class UnavailableIndex(sqlite3.Connection):
         unavailable = False
 
         def execute(self, sql, *args, **kwargs):
-            if self.unavailable and sql.lstrip().upper().startswith("SELECT"):
+            if (self.unavailable or volume_unavailable) and sql.lstrip().upper().startswith(
+                "SELECT"
+            ):
                 faults.append(True)
                 raise sqlite3.OperationalError("temporary learning volume unavailable")
             return super().execute(sql, *args, **kwargs)
@@ -48,8 +51,10 @@ def unavailable_after_update(monkeypatch, output):
             return getattr(self.stream, name)
 
         def write(self, raw):
+            nonlocal volume_unavailable
             written = self.stream.write(raw)
             self.connection.unavailable = True
+            volume_unavailable = volume_failure
             return written
 
     def open_file(path, mode="r", *args, **kwargs):
@@ -98,6 +103,32 @@ def test_parent_resumes_remaining_credit_after_input_failures_in_sampling_and_co
     assert resumed["learner_updates"] == resumed["eligible_transitions"] == 3
     assert len(backend.leases) == 1  # Evaluation only; no duplicate sampling.
     assert replay.read_bytes() == original
+
+
+def test_persistent_index_failure_leaves_sealed_sampling_available_for_later_acknowledgment(
+    tmp_path, seeded_loop, monkeypatch
+):
+    request = loop_request(tmp_path, seeded_loop, rounds=1)
+    root = request.output_dir
+    candidate = root / "round-000/learning/candidate-000"
+    with unavailable_after_update(monkeypatch, candidate, volume_failure=True):
+        stopped = run_experiment(
+            request, learning_environment=SharedBackend(seeded_loop[0])
+        ).summary["learning_loop"]
+    assert stopped["resources_released"]
+    assert stopped["stop_reason"] == "interface_error"
+    assert (candidate / "policy.json").exists()
+    sealed = {path: sha(path) for path in candidate.rglob("*") if path.is_file()}
+    backend = SharedBackend(seeded_loop[0])
+    resumed = run_experiment(
+        LearningContinue(root, sha(root / "state.json")), learning_environment=backend
+    ).summary["learning_loop"]
+    assert resumed["stop_reason"] == "budget_completed", resumed.get("error")
+    assert resumed["learner_updates"] == resumed["eligible_transitions"] == 3
+    assert resumed["rounds_completed"] == 1
+    assert len(backend.leases) == 1  # Only evaluation; sealed sampling was recovered.
+    assert any(item["kind"] == "sealed_sampling" for item in resumed["recoveries"])
+    assert all(sha(path) == digest for path, digest in sealed.items())
 
 
 def test_cli_reports_saved_but_incomplete_training(tmp_path, monkeypatch, capsys):
