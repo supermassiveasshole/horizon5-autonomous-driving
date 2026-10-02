@@ -913,3 +913,12 @@ mypy 142 源文件、Ruff 与 380 文件格式检查通过。
 `runs/resource-bc-presentation-integrated-results.xml`。覆盖 HTML I/O/内存故障、预览中途写失败、
 模型冻结后核验回放、必需预测证据不可写时拒绝完整核验。类型检查 142 源文件通过。
 这一片段不解决 BC 数据集/预测记录整体驻留及训练预算旧门槛；全仓审计继续。
+
+固定 `de71ca2...b08c478` 初审：Standards 0 项；Spec 1 项 P2——失败的半成品 PNG/HTML
+若继续占用最后的磁盘空间，仍会阻挡必需证据或最终模型核验清单。外部文件接口模拟这一
+容量条件，两个公开入口反例分别 **1 failed / 1.98 秒** 和 **1 failed / 2.02 秒**，
+`runs/resource-bc-partial-space-red-results.xml`、`runs/resource-bc-html-space-red-results.xml`。
+异常路径现在尽力删除本次未发布的可选文件；删除失败保留原错误及独立清理错误，不覆盖
+必要证据的失败。没有扩大存储上限，也没有强行将 ENOSPC 当作成功。
+最终组合 **66 passed / 15.77 秒**，`runs/resource-bc-presentation-reviewed-results.xml`，
+包含空间回收后继续核验和回放、清理权限失败与原有采集/数值/BC/SAC 行为。

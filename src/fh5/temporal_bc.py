@@ -405,6 +405,7 @@ def _run(
         previews: list[str | None] = []
         for frame in decision.frames:
             if id(frame) not in preview_paths and preview_export["status"] == "complete":
+                temporary: Path | None = None
                 try:
                     pixel_digest = hashlib.sha256(frame.pixels).hexdigest()
                     relative = f"previews/{pixel_digest}.png"
@@ -423,6 +424,13 @@ def _run(
                         "error": f"{type(error).__name__}: {error}",
                         "remaining": "deferred; rebuild with temporal-bc-replay",
                     }
+                    if temporary is not None:
+                        try:
+                            temporary.unlink(missing_ok=True)
+                        except (OSError, MemoryError) as cleanup_error:
+                            preview_export["cleanup_error"] = (
+                                f"{type(cleanup_error).__name__}: {cleanup_error}"
+                            )
             previews.append(preview_paths.get(id(frame)))
         if training:
             with torch.inference_mode():

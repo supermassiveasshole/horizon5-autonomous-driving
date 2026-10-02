@@ -223,6 +223,12 @@ def _result(
             "error": f"{type(error).__name__}: {error}",
             "retained_result": str(path.with_suffix(".json")),
         }
+        try:
+            path.unlink(missing_ok=True)
+        except (OSError, MemoryError) as cleanup_error:
+            summary["presentation"]["cleanup_error"] = (
+                f"{type(cleanup_error).__name__}: {cleanup_error}"
+            )
         path = path.with_suffix(".json")
     return RunResult({"source_kind": "numeric_diagnostic"}, [], [], {section: summary}, path)
 
