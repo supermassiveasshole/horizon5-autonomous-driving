@@ -212,7 +212,18 @@ def _result(
         raise FileExistsError(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.with_suffix(".json").write_bytes(_encode(summary))
-    write_numeric_report(path, summary, root or path.parent)
+    try:
+        write_numeric_report(path, summary, root or path.parent)
+    except (OSError, MemoryError) as error:
+        # The numerical evidence is already durable. A viewer is optional;
+        # return that evidence so callers can finish publishing the model.
+        summary["presentation"] = {
+            "status": "unavailable",
+            "path": str(path),
+            "error": f"{type(error).__name__}: {error}",
+            "retained_result": str(path.with_suffix(".json")),
+        }
+        path = path.with_suffix(".json")
     return RunResult({"source_kind": "numeric_diagnostic"}, [], [], {section: summary}, path)
 
 

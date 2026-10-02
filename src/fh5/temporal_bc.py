@@ -389,8 +389,8 @@ def _run(
     if actor.original_contract != contract:
         raise ValueError("Snapshot model contract mismatch")
     records, max_error = [], 0.0
-    (output / "previews").mkdir(exist_ok=True)
     preview_paths: dict[int, str] = {}
+    preview_export: dict[str, Any] = {"status": "complete"}
     for row in rows:
         checkpoint("prediction", config["steps"] if training else 0)
         decision = row["decision"]
@@ -402,15 +402,28 @@ def _run(
             actions=[None] * count, action_mask=[False] * count, action_age_ms=[None] * count
         )
         without_history = actor.predict(masked_actions, decision.frames)
-        previews = []
+        previews: list[str | None] = []
         for frame in decision.frames:
-            if id(frame) not in preview_paths:
-                pixel_digest = hashlib.sha256(frame.pixels).hexdigest()
-                relative = f"previews/{pixel_digest}.png"
-                preview_paths[id(frame)] = relative
-                if not (output / relative).exists():
-                    (output / relative).write_bytes(preview_png(bytes(frame.pixels), frame.size))
-            previews.append(preview_paths[id(frame)])
+            if id(frame) not in preview_paths and preview_export["status"] == "complete":
+                try:
+                    pixel_digest = hashlib.sha256(frame.pixels).hexdigest()
+                    relative = f"previews/{pixel_digest}.png"
+                    target = output / relative
+                    target.parent.mkdir(exist_ok=True)
+                    if not target.exists():
+                        # Publish only a complete image; a failed write must not
+                        # become an apparently reusable preview on later replay.
+                        temporary = target.with_name(".pending-" + target.name)
+                        temporary.write_bytes(preview_png(bytes(frame.pixels), frame.size))
+                        temporary.replace(target)
+                    preview_paths[id(frame)] = relative
+                except (OSError, MemoryError) as error:
+                    preview_export = {
+                        "status": "unavailable",
+                        "error": f"{type(error).__name__}: {error}",
+                        "remaining": "deferred; rebuild with temporal-bc-replay",
+                    }
+            previews.append(preview_paths.get(id(frame)))
         if training:
             with torch.inference_mode():
                 model.eval()
@@ -516,6 +529,7 @@ def _run(
         "groups": data["groups"],
         "closed_loop_validated": False,
         "verification": verification,
+        "preview_export": preview_export,
     }
     result = _result(report, summary, section="temporal_bc", root=output)
     if training:
