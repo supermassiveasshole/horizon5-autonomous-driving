@@ -8,11 +8,13 @@ from pathlib import Path
 import pytest
 from test_sac_learning import warm_start
 
+from fh5.candidate_archive import CandidateArchive, CandidateRestore
 from fh5.experiment import run_experiment
 from fh5.sac_learning import SACResume, SACTrain
 
 
-def test_resume_streams_large_training_evidence_and_preserves_learning_state(tmp_path):
+@pytest.mark.parametrize("flow", ["continue", "archive_restore"])
+def test_resume_streams_large_training_evidence_and_preserves_learning_state(tmp_path, flow):
     torch = pytest.importorskip("torch")
     replay = warm_start(tmp_path)
     first = tmp_path / "first"
@@ -26,7 +28,7 @@ def test_resume_streams_large_training_evidence_and_preserves_learning_state(tmp
     report = first / "training-report.json"
     with report.open("ab") as stream:
         padding = b" " * 1024**2
-        for _ in range(129):
+        for _ in range(129 if flow == "continue" else 257):
             stream.write(padding)
     with report.open("rb") as stream:
         report_sha = hashlib.file_digest(stream, "sha256").hexdigest()
@@ -42,7 +44,20 @@ def test_resume_streams_large_training_evidence_and_preserves_learning_state(tmp
     continued = tmp_path / "continued"
     tracemalloc.start()
     try:
-        result = run_experiment(SACResume(first, continued, steps=2)).summary["sac_learning"]
+        source = first
+        if flow == "archive_restore":
+            identity = hashlib.sha256((first / "policy.json").read_bytes()).hexdigest()
+            archive = tmp_path / "archive"
+            retained = run_experiment(
+                CandidateArchive(first, archive, identity, "Retain complete training evidence")
+            ).summary["candidate_archive"]
+            source = tmp_path / "restored"
+            restored = run_experiment(
+                CandidateRestore(archive, source, retained["archive_sha256"], "Continue training")
+            ).summary["candidate_restore"]
+            assert restored["checkpoint_sha256"] == identity
+            assert restored["total_steps"] == 3
+        result = run_experiment(SACResume(source, continued, steps=2)).summary["sac_learning"]
         _, peak = tracemalloc.get_traced_memory()
     finally:
         tracemalloc.stop()

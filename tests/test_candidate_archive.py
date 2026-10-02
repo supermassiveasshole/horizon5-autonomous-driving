@@ -175,6 +175,43 @@ def test_storage_failure_never_publishes_a_loadable_candidate(
         assert not (archive / "archive.json").exists()
 
 
+@pytest.mark.parametrize("operation", ["archive", "restore"])
+def test_dependency_lost_during_publication_does_not_leave_a_complete_archive(
+    tmp_path, candidate, monkeypatch, operation
+):
+    from fh5.candidate_archive import CandidateRestore
+
+    checkpoint, identity = candidate
+    archive = tmp_path / "archive"
+    request = CandidateArchive(checkpoint, archive, identity, "Preserve candidate")
+    artifact = archive / "checkpoint"
+    if operation == "restore":
+        archived = run_experiment(request).summary["candidate_archive"]
+        artifact = tmp_path / "restored"
+        request = CandidateRestore(archive, artifact, archived["archive_sha256"], "Restore")
+    manifest = json.loads((checkpoint / "policy.json").read_text())
+    name = manifest["history"][0]["report"]
+    original_open = Path.open
+    fault_injected = False
+
+    def remove_prior_dependency(path, mode="r", *args, **kwargs):
+        nonlocal fault_injected
+        if path == artifact / "policy.pt" and mode == "xb":
+            (artifact / name).unlink()
+            fault_injected = True
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", remove_prior_dependency)
+    with pytest.raises((ValueError, OSError)):
+        run_experiment(request)
+    assert fault_injected
+    assert not (artifact / "policy.json").exists()
+    assert not (artifact / "restored-from.json").exists()
+    assert (checkpoint / name).exists()
+    if operation == "archive":
+        assert not (archive / "archive.json").exists()
+
+
 @pytest.mark.parametrize("version", [2, 3, 4])
 def test_archive_keeps_training_phase_history_and_excludes_unrelated_files(tmp_path, version):
     first = tmp_path / "first"

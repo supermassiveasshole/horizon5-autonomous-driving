@@ -9,7 +9,8 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
-from fh5.collection_store import encode, read_bounded, write_file
+from fh5.artifact_io import VerifiedFile, read_json, sha256_file
+from fh5.collection_store import encode, write_file
 from fh5.numeric_images import asset
 
 if TYPE_CHECKING:
@@ -33,11 +34,11 @@ class CandidateRestore:
 
 
 def _paths(source: Path, expected: str) -> tuple[dict[str, Any], set[str]]:
-    raw = read_bounded(source / "policy.json", 1024**2)
+    raw = (source / "policy.json").read_bytes()
     if hashlib.sha256(raw).hexdigest() != expected:
         raise ValueError("Candidate differs from its expected checkpoint identity")
     manifest = json.loads(raw)
-    replay = json.loads(read_bounded(source / "experience/replay.json", 128 * 1024**2))
+    replay = read_json(source / "experience/replay.json")
     return manifest, checkpoint_asset_names(manifest, replay)
 
 
@@ -65,11 +66,21 @@ def checkpoint_asset_names(manifest: dict[str, Any], replay: dict[str, Any]) -> 
     return names
 
 
-def _publish_checkpoint(source: Path, output: Path, names: set[str]) -> None:
-    for name in sorted(names, key=lambda value: (value == "policy.json", value)):
+def _copy_file(source: Path, target: Path, digest: str) -> dict[str, Any]:
+    target.parent.mkdir(parents=True, exist_ok=True)
+    VerifiedFile(source, digest).copy_to(target)
+    return {"sha256": digest, "bytes": target.stat().st_size}
+
+
+def _publish_checkpoint(source: Path, output: Path, inventory: dict[str, Any]) -> None:
+    for name in sorted(inventory, key=lambda value: (value == "policy.json", value)):
+        if name == "policy.json":
+            for prior, entry in inventory.items():
+                if prior != "policy.json":
+                    VerifiedFile(asset(output, prior), entry["sha256"]).verify()
         target = asset(output, name)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        write_file(target, read_bounded(asset(source, name), 256 * 1024**2))
+        if _copy_file(asset(source, name), target, inventory[name]["sha256"]) != inventory[name]:
+            raise ValueError("Candidate archive dependency changed: " + name)
 
 
 def archive_candidate(request: CandidateArchive) -> RunResult:
@@ -91,14 +102,10 @@ def archive_candidate(request: CandidateArchive) -> RunResult:
         inventory: dict[str, Any] = {}
         total = 0
         for name in sorted(names):
-            raw = read_bounded(asset(source, name), 256 * 1024**2)
-            total += len(raw)
-            if total > 1024**3 or len(inventory) >= 50000:
-                raise ValueError("Candidate archive exceeds its 1 GiB / 50000 file capacity")
+            original = asset(source, name)
             target = asset(frozen, name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            write_file(target, raw)
-            inventory[name] = {"sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+            inventory[name] = _copy_file(original, target, sha256_file(original))
+            total += inventory[name]["bytes"]
         verified = validate_sac_candidate(frozen, request.expected_checkpoint_sha256)
         summary = {
             "version": 1,
@@ -113,10 +120,8 @@ def archive_candidate(request: CandidateArchive) -> RunResult:
             "driving_qualification": "not_established_by_archive",
         }
         payload = encode(summary)
-        if len(payload) > 16 * 1024**2:
-            raise ValueError("Candidate archive manifest exceeds capacity")
         output.mkdir()
-        _publish_checkpoint(frozen, output / "checkpoint", names)
+        _publish_checkpoint(frozen, output / "checkpoint", inventory)
         write_file(output / "archive.json", payload)
     result = {**summary, "archive_sha256": hashlib.sha256(payload).hexdigest()}
     return RunResult({}, [], [], {"candidate_archive": result}, output / "archive.json")
@@ -133,7 +138,7 @@ def restore_candidate(request: CandidateRestore) -> RunResult:
         raise ValueError("Candidate restore must be outside its archive")
     if not isinstance(request.reason, str) or not 1 <= len(request.reason.strip()) <= 2000:
         raise ValueError("Candidate restore requires a reason of 1..2000 characters")
-    payload = read_bounded(source / "archive.json", 16 * 1024**2)
+    payload = (source / "archive.json").read_bytes()
     if hashlib.sha256(payload).hexdigest() != request.expected_archive_sha256:
         raise ValueError("Candidate archive manifest changed")
     manifest = json.loads(payload)
@@ -146,20 +151,13 @@ def restore_candidate(request: CandidateRestore) -> RunResult:
     with TemporaryDirectory(prefix="fh5-restore-", dir=output.parent) as temporary:
         root = Path(temporary)
         frozen = root / "checkpoint"
-        total = 0
         for name in sorted(names):
-            raw = read_bounded(asset(source / "checkpoint", name), 256 * 1024**2)
-            total += len(raw)
-            if total > 1024**3 or len(names) > 50000:
-                raise ValueError("Candidate archive exceeds capacity")
-            if manifest["files"][name] != {
-                "sha256": hashlib.sha256(raw).hexdigest(),
-                "bytes": len(raw),
-            }:
-                raise ValueError("Candidate archive dependency changed: " + name)
             target = asset(frozen, name)
-            target.parent.mkdir(parents=True, exist_ok=True)
-            write_file(target, raw)
+            actual = _copy_file(
+                asset(source / "checkpoint", name), target, manifest["files"][name]["sha256"]
+            )
+            if manifest["files"][name] != actual:
+                raise ValueError("Candidate archive dependency changed: " + name)
         verified = validate_sac_candidate(frozen, manifest["checkpoint_sha256"])
         if any(manifest[key] != verified[key] for key in ("learner_state_sha256", "total_steps")):
             raise ValueError("Candidate archive learner summary differs")
@@ -174,6 +172,6 @@ def restore_candidate(request: CandidateRestore) -> RunResult:
             "driving_qualification": "not_established_by_archive",
         }
         output.mkdir()
-        _publish_checkpoint(frozen, output, names)
+        _publish_checkpoint(frozen, output, manifest["files"])
         write_file(output / "restored-from.json", encode(receipt))
     return RunResult({}, [], [], {"candidate_restore": receipt}, output / "restored-from.json")
