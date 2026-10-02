@@ -3,7 +3,6 @@
 import hashlib
 import json
 import tracemalloc
-from pathlib import Path
 
 import pytest
 
@@ -216,38 +215,12 @@ def test_training_configuration_requires_every_schema_field(tmp_path, kind):
 
 
 @pytest.mark.parametrize("kind", ["preparation", "schedule", "training"])
-def test_training_configuration_rejects_changed_private_bytes(tmp_path, monkeypatch, kind):
+def test_training_configuration_rejects_changed_private_bytes(
+    tmp_path, corrupt_private_reads, kind
+):
     config, request = configuration_request(kind, tmp_path)
     original = config.read_bytes()
-    opening = Path.open
-    changed = []
-
-    class ChangingStream:
-        def __init__(self, wrapped):
-            self.wrapped = wrapped
-
-        def __getattr__(self, name):
-            return getattr(self.wrapped, name)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            self.wrapped.close()
-
-        def read(self, size=-1):
-            raw = self.wrapped.read(size)
-            if b'"version": 1' in raw:
-                changed.append(True)
-                return raw.replace(b'"version": 1', b'"version": 9')
-            return raw
-
-    def changing(path, mode="r", *args, **kwargs):
-        stream = opening(path, mode, *args, **kwargs)
-        return ChangingStream(stream) if path == config and mode == "rb" else stream
-
-    with monkeypatch.context() as fault:
-        fault.setattr(Path, "open", changing)
+    with corrupt_private_reads(config, b'"version": 1', b'"version": 9') as changed:
         with pytest.raises(ValueError, match="changed"):
             run_experiment(request, learning_resources=InterruptedResources())
     assert changed

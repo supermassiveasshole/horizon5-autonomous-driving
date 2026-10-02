@@ -1217,6 +1217,9 @@ JUnit 为 `.scratch/streaming-experience/runs/resource-loss-full-20261003-result
 运行期间源码不变，这份全量结果不包含其后的配置/图像尺寸改动或尚未接入的 BC 恢复原型。
 
 固定 `dd804c1...d5f38d1` 独立双轴复审：**Standards 0 项、Spec 0 项**。
-完整回归已在独立检出冻结 `d5f38d1` 启动，屏蔽真实 CUDA 设备；
-`runs/resource-loss-full-20261003-results.xml` 结果待定。
-下一项尺寸契约的未提交回归不在此冻结版本中，不将其预报为通过。
+尺寸与配置切片的专项结果见前文，不将其归入此冻结版本的全量结果。
+
+配置/尺寸切片 `4ae68a7...a0cd62a` 初审没有硬性规范或规格问题；
+Standards 提出一项 P3 维护建议：两个配置测试重复实现文件读取故障包装。
+已提取共享外部文件故障夹具，相关配置检查 **25 passed / 2 deselected / 1.27 秒**，
+`runs/resource-config-review-fixture.xml`。同时删除了已过时的旧回归待定文字。

@@ -3,7 +3,6 @@
 import hashlib
 import json
 import tracemalloc
-from pathlib import Path
 
 import pytest
 
@@ -56,39 +55,13 @@ def test_strict_assessment_projection_rejects_unknown_or_malformed_fields(tmp_pa
     assert not output.exists()
 
 
-def test_assessment_rejects_changed_private_configuration_before_inputs(tmp_path, monkeypatch):
+def test_assessment_rejects_changed_private_configuration_before_inputs(
+    tmp_path, corrupt_private_reads
+):
     config = assessment_config(tmp_path)
     original = config.read_bytes()
-    opening = Path.open
-    changed = []
-
-    class ChangingStream:
-        def __init__(self, wrapped):
-            self.wrapped = wrapped
-
-        def __getattr__(self, name):
-            return getattr(self.wrapped, name)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *args):
-            self.wrapped.close()
-
-        def read(self, size=-1):
-            raw = self.wrapped.read(size)
-            if b'"final"' in raw:
-                changed.append(True)
-                return raw.replace(b'"final"', b'"other"')
-            return raw
-
-    def changing(path, mode="r", *args, **kwargs):
-        stream = opening(path, mode, *args, **kwargs)
-        return ChangingStream(stream) if path == config and mode == "rb" else stream
-
     output = tmp_path / "assessment"
-    with monkeypatch.context() as fault:
-        fault.setattr(Path, "open", changing)
+    with corrupt_private_reads(config, b'"final"', b'"other"') as changed:
         with pytest.raises(ValueError, match="changed"):
             run_experiment(CollectionBCAssess(config, output))
     assert changed
