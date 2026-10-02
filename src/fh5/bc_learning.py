@@ -327,9 +327,11 @@ def _checked_config(value: Any) -> dict[str, Any]:
         "device",
     }:
         raise ValueError("Unsupported BC config")
-    for key, low, high in (("seed", 0, 2**32 - 1), ("steps", 1, 10000), ("batch_size", 1, 256)):
+    for key, low, high in (("seed", 0, 2**32 - 1), ("steps", 1, 10000)):
         if type(value[key]) is not int or not low <= value[key] <= high:
             raise ValueError("Invalid bounded BC budget: " + key)
+    if type(value["batch_size"]) is not int or value["batch_size"] < 1:
+        raise ValueError("Invalid BC batch budget: batch_size")
     if (
         not isinstance(value["learning_rate"], (int, float))
         or not 0 < value["learning_rate"] <= 0.1
