@@ -4,9 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import json
 import math
-from collections import Counter, deque
+from collections import Counter
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -15,6 +14,8 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.bc_checkpoint import BCRecovery, read_bc_checkpoint
 from fh5.collection_store import encode, read_bounded, write_file
+from fh5.learning_diagnostics import RecordJournal
+from fh5.learning_observation import resource_observation
 from fh5.replay_document import read_document_fields
 from fh5.temporal_bc import TemporalBCTrain, _configuration, run_temporal_bc
 
@@ -62,29 +63,39 @@ def _configuration_schedule(path: Path) -> dict[str, Any]:
     )
     if set(config) != fields or config["version"] != 1:
         raise ValueError("Unsupported learning schedule")
-    limits = {
-        "cpu_threads": (1, 2),
-        "poll_interval_s": (0.05, 5),
-        "max_wait_s": (0.1, 3600),
-        "max_total_s": (1, 86400),
-        "max_unit_s": (0.01, 60),
-        "max_private_bytes": (1024**2, 128 * 1024**3),
-        "min_free_disk_bytes": (0, 16 * 1024**4),
-        "max_status_age_ms": (100, 10000),
-        "max_image_age_ms": (1, 5000),
-        "max_pending_bytes": (0, 1024**3),
-        "max_gpu_memory_mib": (1, 131072),
-        "max_gpu_utilization_percent": (1, 100),
+    budget_fields = {
+        "cpu_threads",
+        "poll_interval_s",
+        "max_wait_s",
+        "max_total_s",
+        "max_unit_s",
+        "max_private_bytes",
+        "min_free_disk_bytes",
+        "max_status_age_ms",
+        "max_image_age_ms",
+        "max_pending_bytes",
+        "max_gpu_memory_mib",
+        "max_gpu_utilization_percent",
     }
     budget = config["budget"]
-    if not isinstance(budget, dict) or set(budget) != set(limits):
+    if not isinstance(budget, dict) or set(budget) != budget_fields:
         raise ValueError("Incomplete learning resource budget")
-    for name, (low, high) in limits.items():
+    for name in budget_fields:
         value = budget[name]
-        if type(value) not in (int, float) or not math.isfinite(value) or not low <= value <= high:
+        if (
+            type(value) not in (int, float)
+            or (type(value) is float and not math.isfinite(value))
+            or value < 0
+        ):
             raise ValueError("Invalid learning resource budget: " + name)
-    if type(budget["cpu_threads"]) is not int:
-        raise ValueError("CPU thread budget must be an integer")
+    if type(budget["cpu_threads"]) is not int or budget["cpu_threads"] == 0:
+        raise ValueError("CPU thread budget must be a positive integer")
+    if budget["poll_interval_s"] == 0:
+        raise ValueError("Resource polling interval must be positive")
+    # Utilization is a percentage; other maxima come from this experiment,
+    # not a second hard-coded capacity or duration ceiling.
+    if budget["max_gpu_utilization_percent"] > 100:
+        raise ValueError("GPU utilization budget must be a percentage from 0 to 100")
     for key in ("training_config_sha256", "collector_manifest_sha256"):
         if (
             not isinstance(config[key], str)
@@ -105,7 +116,9 @@ class LearningSchedule:
         self.unit_started: int | None = None
         self.completed = self.pauses = self.samples = 0
         self.last_dropped = 0
-        self.events: deque[dict[str, Any]] = deque(maxlen=1000)
+        self.events = RecordJournal(
+            stop_path.parent, "diagnostics/schedule-events.jsonl", "learning-schedule-events-v1"
+        )
         self.reasons: Counter[str] = Counter()
         self.max_unit_s = self.wait_s = 0.0
 
@@ -113,10 +126,10 @@ class LearningSchedule:
         cfg = self.budget
 
         def number(value: Any) -> bool:
-            return type(value) in (int, float) and math.isfinite(value)
+            return type(value) is int or (type(value) is float and math.isfinite(value))
 
         if not number(sample.get("observed_ns")) or not (
-            0 <= now - sample["observed_ns"] <= cfg["max_status_age_ms"] * 1e6
+            0 <= now - sample["observed_ns"] <= cfg["max_status_age_ms"] * 1_000_000
         ):
             return ["resource_status_stale"]
         for field, limit, below in (
@@ -154,7 +167,7 @@ class LearningSchedule:
                 reasons.append("collector_state_unverified")
             for field in ("heartbeat_ns", "last_poll_ns"):
                 if not number(collector.get(field)) or not (
-                    0 <= now - collector[field] <= cfg["max_status_age_ms"] * 1e6
+                    0 <= now - collector[field] <= cfg["max_status_age_ms"] * 1_000_000
                 ):
                     reasons.append("collection_status_stale")
             if (
@@ -163,7 +176,7 @@ class LearningSchedule:
                 or not (
                     0
                     <= collector["last_poll_ns"] - collector["latest_image_source_ns"]
-                    <= cfg["max_image_age_ms"] * 1e6
+                    <= cfg["max_image_age_ms"] * 1_000_000
                 )
             ):
                 reasons.append("collection_images_stale")
@@ -218,7 +231,7 @@ class LearningSchedule:
             raise ScheduleStopped("requested_stop")
         if elapsed > self.budget["max_unit_s"]:
             raise ScheduleStopped("work_unit_overrun")
-        if now < self.started or now - self.started > self.budget["max_total_s"] * 1e9:
+        if now < self.started or now - self.started >= self.budget["max_total_s"] * 1_000_000_000:
             raise ScheduleStopped("total_time_limit")
 
     def _checkpoint(
@@ -235,17 +248,20 @@ class LearningSchedule:
         while True:
             now = self.source.now_ns()
             self._check_limits(now)
-            if waiting_since is not None and now - waiting_since >= self.budget["max_wait_s"] * 1e9:
+            if (
+                waiting_since is not None
+                and now - waiting_since >= self.budget["max_wait_s"] * 1_000_000_000
+            ):
                 raise ScheduleStopped("resource_wait_timeout")
-            sample = self.source.sample()
-            payload = json.dumps(sample, allow_nan=False)
-            if len(payload) > 16384:
-                raise ValueError("Learning resource sample exceeds 16 KiB budget")
-            sample = json.loads(payload)
+            sample = resource_observation(self.source.sample(), include_gpu=self.device == "cuda")
             self.samples += 1
             now = self.source.now_ns()
-            self._check_limits(now)
-            reasons = self._reasons(sample, now)
+            stopped: ScheduleStopped | None = None
+            try:
+                self._check_limits(now)
+                reasons = self._reasons(sample, now)
+            except ScheduleStopped as error:
+                stopped, reasons = error, [str(error)]
             self.reasons.update(reasons)
             self.events.append(
                 {
@@ -256,6 +272,8 @@ class LearningSchedule:
                     "sample": sample,
                 }
             )
+            if stopped is not None:
+                raise stopped
             if not reasons:
                 healthy += 1
                 if waiting_since is None or healthy >= 2:
@@ -273,8 +291,18 @@ class LearningSchedule:
                     transfer_started = self.source.now_ns()
                     suspend()
                     self._check_limits(self.source.now_ns(), transfer_started)
-            self.source.wait(self.budget["poll_interval_s"])
-            self.wait_s += self.budget["poll_interval_s"]
+            now = self.source.now_ns()
+            self._check_limits(now)
+            wait_ns = min(
+                self.budget["poll_interval_s"] * 1_000_000_000,
+                self.budget["max_wait_s"] * 1_000_000_000 - (now - waiting_since),
+                self.budget["max_total_s"] * 1_000_000_000 - (now - self.started),
+            )
+            if wait_ns <= 0:
+                raise ScheduleStopped("resource_wait_timeout")
+            wait_s = wait_ns / 1_000_000_000
+            self.source.wait(wait_s)
+            self.wait_s += wait_s
 
 
 def run_scheduled_bc(
@@ -345,10 +373,10 @@ def run_scheduled_bc(
         )
     if resources.source_kind not in ("synthetic", "native_resources"):
         raise ValueError("Unknown learning resource source")
+    request.output_dir.mkdir(parents=True)
     schedule = LearningSchedule(
         config["budget"], training["device"], resources, request.output_dir / "stop.request"
     )
-    request.output_dir.mkdir(parents=True)
     training["dataset"] = str(dataset)
     frozen_config = request.output_dir / "training.json"
     state, reason, failure = "stopped", None, None
@@ -403,6 +431,10 @@ def run_scheduled_bc(
             failure = failure or error
     completed = max(schedule.completed, recovery.completed if recovery is not None else 0)
     latest = recovery.latest if recovery is not None else None
+    event_history = schedule.events.finish()
+    event_history["sample_contract"] = (
+        "typed admission evidence; unstructured source details omitted"
+    )
     summary = {
         "version": 1,
         "state": state,
@@ -420,8 +452,8 @@ def run_scheduled_bc(
         "wait_s": schedule.wait_s,
         "max_work_unit_s": schedule.max_unit_s,
         "sample_count": schedule.samples,
-        "events": list(schedule.events),
-        "events_omitted": max(0, schedule.samples - len(schedule.events)),
+        "event_history": event_history,
+        "events_omitted": max(0, schedule.samples - event_history["records"]),
         "pressure_counts": dict(schedule.reasons),
         "config": config,
         "candidate": "candidate" if state == "completed" else None,

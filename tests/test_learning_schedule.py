@@ -141,7 +141,10 @@ def test_pressure_pauses_actual_training_without_changing_the_frozen_candidate(t
     assert result["steps_completed"] == 3
     assert resources.closed and resources.waited > 0
     assert result["pauses"] >= 1
-    assert any("collection_backlog" in e["reasons"] for e in result["events"])
+    with (tmp_path / "scheduled" / result["event_history"]["path"]).open(
+        encoding="utf-8"
+    ) as stream:
+        assert any("collection_backlog" in json.loads(line)["reasons"] for line in stream)
     assert result["commands_sent"] is False
     assert result["diagnostic_only"] is True
     actual = json.loads((tmp_path / "scheduled/candidate/report.json").read_bytes())

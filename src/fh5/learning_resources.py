@@ -9,10 +9,12 @@ import time
 from pathlib import Path
 from typing import Any
 
+from fh5.artifact_io import sha256_file
 from fh5.capture_resources import WindowsResources
 from fh5.collection import CollectionControl
 from fh5.collection_process import control_bundle
 from fh5.collection_store import read_bounded
+from fh5.learning_observation import resource_observation
 
 
 class NativeLearningResources:
@@ -34,8 +36,7 @@ class NativeLearningResources:
         self._check_manifest()
 
     def _check_manifest(self) -> None:
-        raw = read_bounded(self.bundle / "frozen.json", 4 * 1024**2)
-        if hashlib.sha256(raw).hexdigest() != self.digest:
+        if sha256_file(self.bundle / "frozen.json") != self.digest:
             raise ValueError("Collector manifest differs from scheduled resource binding")
 
     def now_ns(self) -> int:
@@ -98,11 +99,9 @@ class NativeLearningResources:
             "free_disk_bytes": shutil.disk_usage(self.disk_path).free,
             "observed_ns": self.now_ns(),
         }
-        # Bound diagnostics even when a resource reader returns unexpected data.
-        if len(json.dumps(result, allow_nan=False)) > 16384:
-            raise ValueError("Learning resource diagnostics exceed metadata budget")
-        self.cached = result
-        return result
+        # Admission consumes its schema, not arbitrary host diagnostic payloads.
+        self.cached = resource_observation(result, include_gpu=self.resources.include_gpu)
+        return self.cached
 
     def wait(self, seconds: float) -> None:
         time.sleep(seconds)
