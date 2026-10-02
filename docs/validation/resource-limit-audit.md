@@ -149,3 +149,4 @@ Ruff、343 文件格式及 131 源文件 strict mypy 通过。私有快照需要
 该反例 **1 passed / 8.82 秒**，最终资源专项 **10 passed / 48.87 秒**，
 结果 `runs/resource-history-busy-green-20261002-results.xml`、
 `runs/resource-history-busy-final-20261002-results.xml`。Ruff、343 文件格式及 131 源文件 mypy 通过。
+固定 `3804fad...a51b8c0` 最终独立只读复审：**Standards 0 项、Spec 0 项**。
