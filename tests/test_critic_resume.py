@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
-from checkpoint_files import history_entries
+from checkpoint_files import history_entries, update_records
 from test_sac import experience
 from test_temporal_bc import temporal_fixture
 
@@ -45,7 +45,9 @@ def test_stopped_preheating_resumes_remaining_budget_with_same_q_state_and_froze
     assert second["total_steps"] == 8
     assert second["warmup_remaining_steps"] == 0
     assert second["phase_status"] == "complete"
-    assert first["updates"] + second["updates"] == whole["updates"]
+    assert update_records(tmp_path / "first") + update_records(tmp_path / "second") == (
+        update_records(tmp_path / "whole")
+    )
     assert second["learner_state_sha256"] == whole["learner_state_sha256"]
     assert second["predictions"] == whole["predictions"]
     assert second["actor_change_max"] == 0

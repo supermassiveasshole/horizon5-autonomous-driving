@@ -10,7 +10,7 @@ uv run --locked fh5 sac-warmup --model runs/temporal-bc --replay runs/sac-replay
 uv run --locked fh5 sac-warmup-resume --checkpoint runs/critic-001 --output runs/critic-002
 ```
 
-首次 `--steps` 为整个预热阶段预算，范围 1–10000。恢复默认只完成剩余步数；可选 `--steps N` 限制本段执行数量，不能超过剩余预算。`--steps 0` 只核验并导出快照。阶段已完成时再次恢复执行零次更新，不重跑 BC、不重新初始化 Q，也不隐式延长预热。
+首次 `--steps` 为整个预热阶段的正整数实验预算，不叠加任意次数上限。恢复默认只完成剩余步数；可选 `--steps N` 限制本段执行数量，不能超过剩余预算。恢复时 `--steps 0` 只核验并导出快照。阶段已完成时再次恢复执行零次更新，不重跑 BC、不重新初始化 Q，也不隐式延长预热。
 
 输出目录必须全新且位于源模型、经验及检查点之外。`--checkpoint-sha256` 可绑定预期父清单摘要。batch、学习率、种子、动作包络及总预算沿用原配置，当前目标软更新率固定为 0.005。
 
@@ -30,7 +30,9 @@ uv run --locked fh5 sac-warmup-resume --checkpoint runs/critic-001 --output runs
 
 祖先清单改为与 SAC 共用的[摘要关联历史节点](sac-resume.md)，权重与清单仅绑定链头和条数。旧数组格式可以读取，续训输出转换为新格式，原快照保持不变。预热交接 SAC、归档和恢复均保留这些节点及其原始证据。
 
-依据[资源约束](resource-policy.md)，正常增长不能用任意数字阻止续训。经验清单、封存帧、步数范围等旧限制仍待清理；单段明细也需要继续结构化，见[审计](validation/resource-limit-audit.md)。这些遗留项不构成容量依据，不能要求用户单纯缩短训练以迁就它们。实际写入失败保留父快照，可选报告失败不撤销完成的训练。
+每步更新明细改为[可选 JSONL 日志](training-diagnostics.md)，报告仅保存其描述，不累计 loss/目标数组；诊断失败不丢弃训练，丢失日志仍可续训。原始报告字节及旧数组格式保持可读。
+
+依据[资源约束](resource-policy.md)，正常增长不能用任意数字阻止续训。经验清单、封存帧、batch 等旧限制及按转移展开的预测/特征仍待清理，见[审计](validation/resource-limit-audit.md)。这些遗留项不构成容量依据，不能要求用户单纯缩短训练以迁就它们。实际写入失败保留父快照，可选报告失败不撤销完成的训练。
 
 旧版本 1 保留冻结预测和原有 SAC 初始化能力，但缺少封存经验与完整历史，明确拒绝预热续训。`sac-critic-replay` 只接受全新的 `.html` 输出，不能覆盖权重或已有报告。
 

@@ -9,6 +9,7 @@ import json
 import math
 import time
 from collections.abc import Callable
+from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -16,6 +17,7 @@ from typing import TYPE_CHECKING, Any
 
 from fh5.checkpoint_history import HistorySource, empty_history
 from fh5.collection_store import encode, read_bounded, write_file
+from fh5.learning_diagnostics import RecordJournal
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import PixelContract
@@ -110,16 +112,17 @@ def run_critic(
         if request.report_path.suffix.lower() != ".html":
             raise ValueError("Critic replay requires a new HTML report")
     torch = importlib.import_module("torch")
-    with preserve_torch_state(torch):
+    with preserve_torch_state(torch), ExitStack() as stack:
         torch.set_num_threads(2)
         torch.use_deterministic_algorithms(True)
-        return _run(request, torch, stop_requested)
+        return _run(request, torch, stop_requested, stack)
 
 
 def _run(
     operation: SACCriticWarmup | SACCriticReplay | SACCriticResume,
     torch: Any,
     stop_requested: Callable[[int], bool] | None,
+    stack: ExitStack,
 ) -> RunResult:
     from fh5.experiment import RunResult
 
@@ -170,8 +173,8 @@ def _run(
             raise FileExistsError(request.output_dir)
         if (
             type(request.steps) is not int
-            or not 0 <= request.steps <= 10_000
-            or not 1 <= phase_budget <= 10_000
+            or request.steps < 0
+            or phase_budget < 1
             or type(request.batch_size) is not int
             or not 1 <= request.batch_size <= 256
             or not 0 < request.learning_rate <= 0.01
@@ -304,7 +307,8 @@ def _run(
         target.load_state_dict(saved["target"], strict=True)
     with torch.no_grad():
         before_q = _values(torch, critic, state_tensor, command_tensor)
-    losses, target_values, updates = [], [], []
+    updates = 0
+    journal = None
     started = time.monotonic()
     stop_reason = "budget_completed" if training else "frozen_replay"
     if isinstance(request, SACCriticWarmup):
@@ -319,6 +323,8 @@ def _run(
         if saved is not None:
             optimizer.load_state_dict(saved["optimizer"])
             torch.set_rng_state(saved["rng"])
+        journal = RecordJournal(output, "diagnostics/updates.jsonl", "critic-update-jsonl-v1")
+        stack.callback(journal.close)
         for step in range(start_step, start_step + request.steps):
             if (output / "stop.request").exists() or (
                 stop_requested is not None and stop_requested(step)
@@ -343,16 +349,20 @@ def _run(
             with torch.no_grad():
                 for destination, source in zip(target.parameters(), critic.parameters()):
                     destination.lerp_(source, 0.005)
-            losses.append(float(loss.item()))
-            target_values.append(expected_value.tolist())
-            updates.append(
-                {
-                    "step": step + 1,
-                    "transition_ids": [replay["transitions"][i]["id"] for i in indices.tolist()],
-                    "loss": losses[-1],
-                    "targets": target_values[-1],
-                }
-            )
+            updates += 1
+            try:
+                journal.append(
+                    {
+                        "step": step + 1,
+                        "transition_ids": [
+                            replay["transitions"][i]["id"] for i in indices.tolist()
+                        ],
+                        "loss": float(loss.item()),
+                        "targets": expected_value.tolist(),
+                    }
+                )
+            except MemoryError as error:
+                journal.unavailable(error)
     with torch.no_grad():
         after_q = _values(torch, critic, state_tensor, command_tensor)
     if not torch.isfinite(after_q).all():
@@ -367,19 +377,17 @@ def _run(
     summary = {
         "stage": "critic_warmup",
         "steps_requested": request.steps if isinstance(request, SACCriticWarmup) else 0,
-        "steps_completed": len(updates),
-        "total_steps": start_step + len(updates),
+        "steps_completed": updates,
+        "total_steps": start_step + updates,
         "warmup_budget": phase_budget,
-        "warmup_remaining_steps": phase_budget - start_step - len(updates),
-        "phase_status": "complete" if start_step + len(updates) == phase_budget else "warming",
+        "warmup_remaining_steps": phase_budget - start_step - updates,
+        "phase_status": "complete" if start_step + updates == phase_budget else "warming",
         "stop_reason": stop_reason,
-        "updates": updates,
+        "updates": journal.finish() if journal is not None else None,
         "actor_optimizer_steps": 0,
         "actor_change_max": actor_change,
         "q_change_max": float((after_q - before_q).abs().max()) if training else None,
         "predictions": predictions,
-        "losses": losses,
-        "target_values": target_values,
         "target_actions": next_actions,
         "target_policy": "deterministic bounded BC; no SAC entropy update yet",
         "replay_sha256": expected,
@@ -397,7 +405,7 @@ def _run(
             "target_encoder": original,
             "optimizer": optimizer.state_dict(),
             "rng": torch.get_rng_state(),
-            "step": start_step + len(updates),
+            "step": start_step + updates,
         }
         reloaded = FrozenNumericActor(
             output / "actor", pixels, expected_manifest_sha256=model_digest

@@ -131,7 +131,7 @@ def read_critic_checkpoint(torch: Any, root: Path) -> tuple[dict[str, Any], dict
         budget = manifest["configuration"]["steps"]
         if (
             type(budget) is not int
-            or not 1 <= budget <= 10_000
+            or budget < 1
             or (type(saved["step"]) is not int or not 0 <= saved["step"] <= budget)
         ):
             raise ValueError("Invalid finite critic warm-up progress")
