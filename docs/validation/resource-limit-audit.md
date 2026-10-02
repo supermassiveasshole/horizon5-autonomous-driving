@@ -868,4 +868,20 @@ mypy 142 源文件、Ruff 和 379 文件格式检查通过。
 损坏的未使用 JSON、模型资格核验后被替换、既有权重复制故障与 BC/SAC 学习接续。
 大清单首轮新实现已完成回放，但测试误用预测描述符的 `count` 字段而非 `records`，
 导致 **1 failed / 4 passed / 34.44 秒**；修正为实际两条预测与完整状态断言后通过上述组合，
-未以放宽产品门槛或学习相等断言修复。独立复审待完成。
+未以放宽产品门槛或学习相等断言修复。
+固定 `6ebf8fe...2e83fad` 独立双轴复审：**Standards 0 项、Spec 0 项**；
+mypy 142 源文件、Ruff 与 380 文件格式检查通过。
+
+## 新全量的资格夹具失败（待诊断）
+
+隔离冻结 `6ebf8fe` 的全量已结束：**528 passed / 1 error / 1099.93 秒**，
+`runs/resource-bc-full-20261002-results.xml` 与 `runs/resource-bc-full-20261002-console.txt`。
+它包含 BC 权重流式迁移，不包含之后的清单投影；不能报告为全量通过。
+
+失败是 `tests/test_learning_loop.py::test_two_rounds_keep_default_and_continue_rejected_explorer`
+的候选夹具初始化。保留记录 `persistent-candidates5/incumbent-run/run.json` 显示第一段
+`stale_telemetry`，因而第二段未开始，原资格检查正确拒绝了缺失的计划与执行证据。
+`attempt-0000/execution/report.json` 显示推理已预热、无模型错误，输入已归零并释放资源。
+当前 `2e83fad` 的孤立入口复测 **1 passed / 56.09 秒**，
+`runs/resource-full-qualification-isolated-results.xml`；这不是同版本全量通过或因果解释。
+正在以保留输入建立更小的时序/负载对照，尚未扩大时间阈值、跳过资格条件或改变生产保护。
