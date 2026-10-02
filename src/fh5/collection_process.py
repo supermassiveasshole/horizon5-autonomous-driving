@@ -18,7 +18,7 @@ from fh5.capture_config import parse_capture_config
 from fh5.collection import CollectionConfig, CollectionControl
 from fh5.collection_host import process_identity
 from fh5.collection_status import PROCESS_FIELDS, control_source, read_control_status
-from fh5.collection_store import atomic_json, read_bounded
+from fh5.collection_store import atomic_control_json, atomic_json, read_bounded
 from fh5.demonstrations import _profile
 
 if TYPE_CHECKING:
@@ -258,9 +258,11 @@ def start_collection(request: CollectionStart) -> RunResult:
             "state": "launched",
             "commands_sent": False,
         }
-        atomic_json(root / "process.json", value)
+        atomic_control_json(root / "process.json", value)
     except Exception as error:
-        atomic_json(root / "launch-failed.json", {"error": f"{type(error).__name__}: {error}"})
+        atomic_control_json(
+            root / "launch-failed.json", {"error": f"{type(error).__name__}: {error}"}
+        )
         raise
     return RunResult({}, [], [], {"collection": value}, root / "process.json")
 

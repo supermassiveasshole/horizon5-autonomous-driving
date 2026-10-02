@@ -55,8 +55,10 @@ process 超过 16 KiB 或 worker/启动失败状态超过 64 KiB 拒绝查询。
 因此引用不是当前返回值的不可变快照。
 
 动态状态从同一次打开的文件读取并检查完整 JSON 语法。Windows 读取允许文件替换共享，
-既有状态的发布使用保留属性/ACL 错误的 [`ReplaceFileW`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew)，让正在读取旧版本的调用完成，
-后续调用读到新版本。已完成原型和公开控制入口的文件系统检查；冻结进程集成仍待验证。
+采集动态状态的发布使用保留属性/ACL 错误的 [`ReplaceFileW`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew)，让正在读取旧版本的调用完成，
+后续调用读到新版本。该接口不用于学习进度、评估账本、块索引或冻结清单。
+它不是所有故障下都保留旧文件名的承诺；发布失败须报告错误，不能继续把缺失状态当作健康依据。
+已完成原型和公开控制入口的文件系统检查；冻结进程集成仍待验证。
 原生学习准入另以状态提供的摘要校验整个 session 私有副本，只提取嵌套的软件绑定，
 文件增大不会绕过摘要或进程身份检查。
 

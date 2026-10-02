@@ -15,7 +15,7 @@ from fh5.capture_config import parse_capture_config
 from fh5.collection import CollectionConfig, CollectionInput, CollectionRun
 from fh5.collection_host import process_identity
 from fh5.collection_process import verify_bundle
-from fh5.collection_store import atomic_json, read_bounded
+from fh5.collection_store import atomic_control_json, read_bounded
 from fh5.numeric_images import NumericFrame, PixelContract
 
 
@@ -111,7 +111,7 @@ def main() -> int:
         if digest != expected or (root / "start.claim").read_text(encoding="utf-8") != token:
             raise ValueError("Collector launch identity or snapshot changed")
         state.update(state="recording", software_snapshot_verified=True, manifest_sha256=digest)
-        atomic_json(root / "worker-state.json", state)
+        atomic_control_json(root / "worker-state.json", state)
         project = root / "project"
         document = json.loads(read_bounded(project / "capture.json", 1024**2))
         capture, target = parse_capture_config(document)
@@ -150,7 +150,7 @@ def main() -> int:
     except Exception as error:
         state.update(state="failed", error=f"{type(error).__name__}: {error}", exit_code=4)
     finally:
-        atomic_json(root / "worker-state.json", state)
+        atomic_control_json(root / "worker-state.json", state)
     return code
 
 

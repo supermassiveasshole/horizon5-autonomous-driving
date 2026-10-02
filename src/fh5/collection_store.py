@@ -62,6 +62,15 @@ def write_file(path: Path, data: bytes) -> None:
 
 
 def atomic_json(path: Path, value: Any) -> None:
+    _write_json(path, value, Path.replace)
+
+
+def atomic_control_json(path: Path, value: Any) -> None:
+    """Publish replaceable collector status, not durable training state or indexes."""
+    _write_json(path, value, replace_control_file)
+
+
+def _write_json(path: Path, value: Any, publish: Callable[[Path, Path], object]) -> None:
     temporary = path.with_suffix(".tmp")
     with temporary.open("wb") as stream:
         stream.write(encode(value))
@@ -70,7 +79,7 @@ def atomic_json(path: Path, value: Any) -> None:
     deadline = time.monotonic() + 0.25
     while True:
         try:
-            replace_control_file(temporary, path)
+            publish(temporary, path)
             break
         except PermissionError as error:
             # Windows readers can briefly deny delete/rename sharing. Retry only
@@ -257,7 +266,7 @@ class CollectionArchive:
     def _heartbeat(self) -> None:
         if self.abort.is_set():
             return
-        atomic_json(
+        atomic_control_json(
             self.root / "status.json",
             {
                 **self.status(),

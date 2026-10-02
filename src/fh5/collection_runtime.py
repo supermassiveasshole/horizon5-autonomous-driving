@@ -19,7 +19,7 @@ from fh5.collection_status import (
 from fh5.collection_store import (
     CollectionArchive,
     WriteFile,
-    atomic_json,
+    atomic_control_json,
     collection_complete,
     encode,
     write_file,
@@ -139,6 +139,6 @@ def collect(
         training_eligible=False,
     )
     result["complete"] = collection_complete(result)
-    atomic_json(root / "final.json", result)
-    atomic_json(root / "status.json", result)
+    atomic_control_json(root / "final.json", result)
+    atomic_control_json(root / "status.json", result)
     return collection_result(root / "report.html", result)

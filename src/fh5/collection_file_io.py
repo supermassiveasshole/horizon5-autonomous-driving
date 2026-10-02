@@ -85,6 +85,7 @@ def replace_control_file(source: Path, target: Path) -> None:
     kernel = _windows_kernel()
     # Flags=0 preserves ACL/attribute errors. In particular, 1175/1176/1177
     # can describe a partial replacement and must propagate without blind retry
-    # or deleting the surviving source. atomic_json retries only 5/32/33.
+    # or deleting the surviving source. This is only for mutable collector status;
+    # atomic_control_json retries only 5/32/33. Durable state uses Path.replace.
     if not kernel.ReplaceFileW(_windows_path(target), _windows_path(source), None, 0, None, None):
         raise ctypes.WinError(ctypes.get_last_error())

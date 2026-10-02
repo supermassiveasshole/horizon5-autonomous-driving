@@ -1412,6 +1412,19 @@ Python 分配峰值为 107,345 字节。现有状态/停止与索引竞争用例
 151 源文件 strict mypy、Ruff、415 文件格式检查通过。
 冻结进程和实际 CPU 训练集成仍待验证。session 生产端与离线消费者的门槛未包含在此片段。
 
+固定 `c29feca...5a4f209` Standards 与 Spec 审阅均指出共享发布函数的影响范围过大：
+Windows `ReplaceFileW` 无备份时的 1176 错误可能使旧目标失去原路径，
+不能直接用于学习进度和评估账本。公开两帧采集/块恢复反例
+**2 failed / 0.43 秒**（`runs/resource-control-publication-scope-red-20261003-results.xml`），
+在外部 Win32 文件 API 注入故障，未替换内部学习器。
+现以 `atomic_control_json` 明确限定动态采集状态；通用 `atomic_json` 恢复 `Path.replace`，
+学习进度、评估账本、块索引和冻结清单保持原有发布契约。
+新增组合与既有状态/索引竞争回归 **45 passed / 3.05 秒**，
+`runs/resource-control-publication-scope-green-20261003-a-results.xml`。
+Standards 另有一项非阻塞维护建议：共享 JSON 解析器的对象循环可提取；
+留待旧来源清单的逐项解析扩展时一并处理，不作为功能缺陷修复或已完成事项。
+修复后固定复审仍待记录。
+
 ## 后续重点（2026-10-03 静态核对）
 
 以下仍未获得容量、测量或外部接口依据，不能因为旧文档陈述过就继续保留：

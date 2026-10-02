@@ -13,7 +13,7 @@ import pytest
 
 from fh5.artifact_io import sha256_file
 from fh5.collection import CollectionControl
-from fh5.collection_store import atomic_json, encode
+from fh5.collection_store import atomic_control_json, encode
 from fh5.experiment import run_experiment
 
 OLD_LIMITS = [
@@ -294,7 +294,7 @@ def test_dynamic_document_replacement_uses_one_consistent_opened_snapshot(
                 # Exercise the project's real filesystem publisher while the
                 # reader still owns the prior OS handle. The producer and reader
                 # must support one another's Windows sharing semantics.
-                atomic_json(target, newer)
+                atomic_control_json(target, newer)
                 replaced.append(True)
 
         def read(self, *args):
