@@ -14,6 +14,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fh5.artifact_io import VerifiedFile, copy_evidence
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
@@ -126,7 +127,7 @@ def _run(
     saved = None
     start_step = 0
     history: list[dict[str, Any]] = []
-    history_blobs: dict[str, bytes] = {}
+    history_blobs: dict[str, bytes | VerifiedFile] = {}
     continuation = None
     if isinstance(operation, SACCriticResume):
         manifest, saved, parent_bytes = read_critic_checkpoint(torch, operation.checkpoint_dir)
@@ -316,10 +317,7 @@ def _run(
         (output / "actor").mkdir()
         for name, value in model_payload.items():
             write_file(output / "actor" / name, value)
-        for name, value in history_blobs.items():
-            destination = output / name
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            write_file(destination, value)
+        copy_evidence(output, history_blobs)
         optimizer = torch.optim.Adam(critic.parameters(), lr=request.learning_rate)
         if saved is not None:
             optimizer.load_state_dict(saved["optimizer"])

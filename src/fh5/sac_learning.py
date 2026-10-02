@@ -15,6 +15,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any, NamedTuple
 
+from fh5.artifact_io import VerifiedFile, copy_evidence
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
@@ -214,7 +215,7 @@ def validate_sac_candidate(root: Path, expected_sha256: str) -> dict[str, Any]:
             raise ValueError("Candidate checkpoint changed during validation")
         if manifest["version"] not in (2, 3, 4):
             raise ValueError("Candidate requires a sealed SAC continuation checkpoint")
-        checkpoint_history(root, manifest, raw)
+        checkpoint_history(root, manifest)
         replay_file = root / "experience/replay.json"
         configuration = dict(manifest["configuration"], steps=0)
         request = SACTrain(root, replay_file, root, **configuration)
@@ -308,7 +309,7 @@ def _train(
     continuation = None
     restored = None
     history: list[dict[str, Any]] = []
-    history_blobs: dict[str, bytes] = {}
+    history_blobs: dict[str, bytes | VerifiedFile] = {}
     if isinstance(operation, SACResume):
         manifest, restored, parent_bytes = read_checkpoint(torch, operation.checkpoint_dir)
         if (
@@ -495,10 +496,7 @@ def _train(
     output = request.output_dir
     output.mkdir(parents=True)
     experience = seal_experience(data.raw, request.replay_file, output / "experience")
-    for name, value in history_blobs.items():
-        target = output / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        write_file(target, value)
+    copy_evidence(output, history_blobs)
     (output / "bc").mkdir()
     for name, value in bc_bytes.items():
         write_file(output / "bc" / name, value)

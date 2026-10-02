@@ -10,6 +10,7 @@ import threading
 import time
 from collections.abc import Callable
 from copy import deepcopy
+from io import DEFAULT_BUFFER_SIZE
 from pathlib import Path
 from queue import Empty, Full, Queue
 from typing import Any
@@ -21,11 +22,14 @@ WriteFile = Callable[[Path, bytes], None]
 
 
 def read_bounded(path: Path, limit: int) -> bytes:
+    """Legacy budgeted reader; allocate for received bytes, not the maximum budget."""
+    payload = bytearray()
     with path.open("rb") as stream:
-        payload = stream.read(limit + 1)
-    if len(payload) > limit:
-        raise ValueError("Collection asset exceeds bounded limit: " + path.name)
-    return payload
+        while chunk := stream.read(min(DEFAULT_BUFFER_SIZE, limit + 1 - len(payload))):
+            payload.extend(chunk)
+            if len(payload) > limit:
+                raise ValueError("Collection asset exceeds bounded limit: " + path.name)
+    return bytes(payload)
 
 
 def collection_complete(status: dict[str, Any]) -> bool:

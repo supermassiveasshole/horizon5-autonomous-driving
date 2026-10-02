@@ -4,20 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from collections.abc import Iterator
-from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.numeric_images import NumericFrame, asset
 from fh5.numeric_recording import read_numeric_frame
 from fh5.sac_imitation import checkpoint_imitation, imitation_evidence
-
-MANIFEST_LIMIT_BYTES = 1024**2
-WEIGHTS_LIMIT_BYTES = 256 * 1024**2
-REPORT_LIMIT_BYTES = 128 * 1024**2
-HISTORY_LIMIT_BYTES = 128 * 1024**2
 
 
 def _read_state(
@@ -28,10 +24,9 @@ def _read_state(
     *,
     require_metadata: bool = True,
 ) -> dict[str, Any]:
-    payload = read_bounded(root / weights_file, WEIGHTS_LIMIT_BYTES)
-    if hashlib.sha256(payload).hexdigest() != manifest["weights_sha256"]:
-        raise ValueError("Checkpoint weights changed")
-    saved: dict[str, Any] = torch.load(BytesIO(payload), map_location="cpu", weights_only=True)
+    weights = VerifiedFile(root / weights_file, manifest["weights_sha256"])
+    with weights.snapshot() as stream:
+        saved: dict[str, Any] = torch.load(stream, map_location="cpu", weights_only=True)
     if require_metadata and saved.get("metadata") != {
         k: v for k, v in manifest.items() if k != "weights_sha256"
     }:
@@ -42,8 +37,7 @@ def _read_state(
 def _verify_training_state(
     torch: Any, root: Path, manifest: dict[str, Any], saved: dict[str, Any]
 ) -> None:
-    report = read_bounded(root / "training-report.json", REPORT_LIMIT_BYTES)
-    if hashlib.sha256(report).hexdigest() != manifest["training_report_sha256"]:
+    if sha256_file(root / "training-report.json") != manifest["training_report_sha256"]:
         raise ValueError("Checkpoint training report changed")
     if (
         state_digest(torch, {k: v for k, v in saved.items() if k != "metadata"})
@@ -80,7 +74,7 @@ def resume_contract(torch: Any, version: int = 2) -> dict[str, Any]:
 
 
 def read_checkpoint(torch: Any, root: Path) -> tuple[dict[str, Any], dict[str, Any], bytes]:
-    raw = read_bounded(root / "policy.json", MANIFEST_LIMIT_BYTES)
+    raw = (root / "policy.json").read_bytes()
     manifest = json.loads(raw)
     if manifest.get("version") not in (1, 2, 3, 4) or (
         manifest.get("architecture"),
@@ -115,7 +109,7 @@ def critic_resume_contract(torch: Any) -> dict[str, Any]:
 
 
 def read_critic_checkpoint(torch: Any, root: Path) -> tuple[dict[str, Any], dict[str, Any], bytes]:
-    raw = read_bounded(root / "critic.json", MANIFEST_LIMIT_BYTES)
+    raw = (root / "critic.json").read_bytes()
     manifest = json.loads(raw)
     if manifest.get("version") not in (1, 2) or manifest.get("stage") != "critic_warmup":
         raise ValueError("Unsupported critic checkpoint version or stage")
@@ -146,63 +140,40 @@ def read_critic_checkpoint(torch: Any, root: Path) -> tuple[dict[str, Any], dict
 def publish_checkpoint(
     torch: Any, root: Path, metadata: dict[str, Any], state: dict[str, Any], report: bytes
 ) -> None:
-    """Publish only artifacts that fit the same limits used when reading and continuing."""
+    """Publish the manifest last, after state and required evidence are durable."""
     name = {"critic_warmup": "critic", "sac_updates": "policy"}[metadata["stage"]]
-    if len(report) > REPORT_LIMIT_BYTES:
-        raise ValueError("Training report exceeds capacity")
     weights = root / (name + ".pt")
     with weights.open("xb") as stream:
         torch.save({"metadata": metadata, **state}, stream)
-    if weights.stat().st_size > WEIGHTS_LIMIT_BYTES:
-        raise ValueError("Checkpoint weights exceed capacity")
-    payload = read_bounded(weights, WEIGHTS_LIMIT_BYTES)
-    manifest = {**metadata, "weights_sha256": hashlib.sha256(payload).hexdigest()}
+        stream.flush()
+        os.fsync(stream.fileno())
+    manifest = {**metadata, "weights_sha256": sha256_file(weights)}
     raw = encode(manifest)
-    if len(raw) > MANIFEST_LIMIT_BYTES:
-        raise ValueError("Checkpoint manifest exceeds capacity")
-    history_size = sum(
-        asset(root, entry[kind]).stat().st_size
-        for entry in metadata["history"]
-        for kind in ("checkpoint", "report")
-    )
-    if len(metadata["history"]) >= 1000 or (
-        history_size + len(report) + len(raw) > HISTORY_LIMIT_BYTES
-    ):
-        raise ValueError("Continuation history exceeds capacity")
     write_file(root / "training-report.json", report)
     write_file(root / (name + ".json"), raw)
 
 
 def checkpoint_history(
-    root: Path, manifest: dict[str, Any], raw: bytes
-) -> tuple[list[dict[str, Any]], dict[str, bytes], bytes]:
+    root: Path, manifest: dict[str, Any]
+) -> tuple[list[dict[str, Any]], dict[str, bytes | VerifiedFile], VerifiedFile]:
     """Validate retained history and the current stage without adding a successor."""
     history = list(manifest["history"])
-    report = read_bounded(root / "training-report.json", REPORT_LIMIT_BYTES)
-    if hashlib.sha256(report).hexdigest() != manifest["training_report_sha256"]:
+    report = VerifiedFile(root / "training-report.json", manifest["training_report_sha256"])
+    if sha256_file(report.path) != report.sha256:
         raise ValueError("SAC training report changed")
-    blobs = {}
-    total = len(raw) + len(report)
-    if total > HISTORY_LIMIT_BYTES:
-        raise ValueError("SAC continuation history exceeds 128 MiB")
-    if len(history) >= 1000:
-        raise ValueError("SAC continuation history exceeds 1000 segments")
+    artifacts: dict[str, bytes | VerifiedFile] = {}
     for prior in history:
         for kind in ("checkpoint", "report"):
-            payload = read_bounded(asset(root, prior[kind]), HISTORY_LIMIT_BYTES)
-            if hashlib.sha256(payload).hexdigest() != prior[kind + "_sha256"]:
-                raise ValueError("SAC continuation history changed")
-            total += len(payload)
-            if total > HISTORY_LIMIT_BYTES:
-                raise ValueError("SAC continuation history exceeds 128 MiB")
-            blobs[prior[kind]] = payload
-    return history, blobs, report
+            artifact = VerifiedFile(asset(root, prior[kind]), prior[kind + "_sha256"])
+            artifact.verify()
+            artifacts[prior[kind]] = artifact
+    return history, artifacts, report
 
 
 def continuation_history(
     root: Path, manifest: dict[str, Any], raw: bytes
-) -> tuple[list[dict[str, Any]], dict[str, bytes]]:
-    history, blobs, report = checkpoint_history(root, manifest, raw)
+) -> tuple[list[dict[str, Any]], dict[str, bytes | VerifiedFile]]:
+    history, blobs, report = checkpoint_history(root, manifest)
     parent_sha = hashlib.sha256(raw).hexdigest()
     entry = {
         "checkpoint": f"history/{parent_sha}-checkpoint.json",

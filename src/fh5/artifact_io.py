@@ -4,13 +4,65 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import shutil
+from collections.abc import Iterator
+from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from tempfile import TemporaryFile
+from typing import Any, BinaryIO, cast
 
 
 def sha256_file(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+@dataclass(frozen=True)
+class VerifiedFile:
+    """A hash-bound artifact copied without retaining its payload in memory."""
+
+    path: Path
+    sha256: str
+
+    def verify(self) -> None:
+        if sha256_file(self.path) != self.sha256:
+            raise ValueError("SAC continuation history changed: " + str(self.path))
+
+    def copy_to(self, target: Path) -> None:
+        with self.path.open("rb") as source, target.open("xb") as destination:
+            shutil.copyfileobj(source, destination)
+            destination.flush()
+            os.fsync(destination.fileno())
+        # Verify the copied bytes, not a source that might change between reads.
+        if sha256_file(target) != self.sha256:
+            raise ValueError("Checkpoint history changed during copy: " + str(self.path))
+
+    @contextmanager
+    def snapshot(self) -> Iterator[BinaryIO]:
+        """Only deserialize the private copy whose digest was actually checked."""
+        with TemporaryFile(mode="w+b") as frozen:
+            with self.path.open("rb") as source:
+                shutil.copyfileobj(source, frozen)
+            frozen.seek(0)
+            if hashlib.file_digest(frozen, "sha256").hexdigest() != self.sha256:
+                raise ValueError("Checkpoint weights changed: " + str(self.path))
+            frozen.seek(0)
+            yield cast(BinaryIO, frozen)
+
+
+def copy_evidence(root: Path, artifacts: dict[str, bytes | VerifiedFile]) -> None:
+    from fh5.collection_store import write_file
+    from fh5.numeric_images import asset
+
+    for name, value in artifacts.items():
+        target = asset(root, name)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        if isinstance(value, VerifiedFile):
+            value.copy_to(target)
+        else:
+            write_file(target, value)
 
 
 def read_json(path: Path, *, expected_sha256: str | None = None) -> Any:
