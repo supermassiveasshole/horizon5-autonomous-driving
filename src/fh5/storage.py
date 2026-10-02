@@ -9,13 +9,14 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fh5.artifact_io import sha256_file
+from fh5.artifact_io import read_json, sha256_file
 from fh5.candidate_archive import checkpoint_asset_names
 from fh5.candidate_store import _read_events
-from fh5.collection_store import encode, read_bounded, write_file
+from fh5.collection_store import encode, write_file
 from fh5.learning_recovery import sampling_bindings
 from fh5.numeric_images import asset
 from fh5.sampling_evidence import sampling_sources
+from fh5.storage_inventory import StorageInventory, storage_inventory
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -28,12 +29,9 @@ class LearningStoragePlan:
 
 
 class _Inventory:
-    def __init__(self, root: Path, output: Path | None) -> None:
+    def __init__(self, root: Path, output: Path | None, index: StorageInventory) -> None:
         self.root, self.output = root, output
-        self.files: dict[str, dict[str, Any]] = {}
-        self.documents: dict[Path, tuple[str, dict[str, Any]]] = {}
-        self.walked: set[tuple[Path, str]] = set()
-        self.evaluations: set[tuple[Path, str, Path, str]] = set()
+        self.index = index
         self.metadata_bytes = 0
 
     def path(self, path: Path) -> Path:
@@ -54,22 +52,7 @@ class _Inventory:
             raise ValueError("Storage dependency is not a regular file: " + str(path))
         if expected_bytes is not None and status.st_size != expected_bytes:
             raise ValueError("Storage dependency size changed: " + str(path))
-        name = str(path)
-        entry = self.files.get(name)
-        if entry is None:
-            if len(self.files) >= 100_000:
-                raise ValueError("Storage inventory exceeds 100000 files")
-            entry = {
-                "path": name,
-                "bytes": status.st_size,
-                "mtime_ns": status.st_mtime_ns,
-                "roles": [],
-            }
-            self.files[name] = entry
-        elif (entry["bytes"], entry["mtime_ns"]) != (status.st_size, status.st_mtime_ns):
-            raise ValueError("Storage dependency changed during accounting: " + name)
-        if role not in entry["roles"]:
-            entry["roles"].append(role)
+        self.index.file(path, status, role)
         return path
 
     def asset(self, root: Path, name: str) -> Path:
@@ -78,27 +61,21 @@ class _Inventory:
 
     def document(self, path: Path, role: str, expected: str | None = None) -> dict[str, Any]:
         path = self.file(path, role)
-        if path not in self.documents:
-            raw = self.read_metadata(path, 128 * 1024**2)
-            value = json.loads(raw)
-            if not isinstance(value, dict):
-                raise ValueError("Storage dependency manifest must be an object")
-            self.documents[path] = hashlib.sha256(raw).hexdigest(), value
-        digest, value = self.documents[path]
+        raw = self.read_metadata(path)
+        digest = hashlib.sha256(raw).hexdigest()
         if expected is not None and digest != expected:
             raise ValueError("Storage dependency manifest changed: " + str(path))
+        self.index.document(path, digest)
+        value = json.loads(raw)
+        if not isinstance(value, dict):
+            raise ValueError("Storage dependency manifest must be an object")
         return value
 
-    def reserve_metadata(self, size: int) -> None:
-        if self.metadata_bytes + size > 256 * 1024**2:
-            raise ValueError("Storage metadata read budget exceeded")
-        self.metadata_bytes += size
-
-    def read_metadata(self, path: Path, limit: int) -> bytes:
+    def read_metadata(self, path: Path) -> bytes:
         path = self.file(path, "metadata")
-        size = self.files[str(path)]["bytes"]
-        self.reserve_metadata(size)
-        return read_bounded(path, min(limit, size))
+        raw = path.read_bytes()
+        self.metadata_bytes += len(raw)
+        return raw
 
     def tree(self, root: Path, role: str) -> None:
         root = self.path(root)
@@ -106,22 +83,19 @@ class _Inventory:
             raise ValueError("Storage report must be outside retained source directories")
         if not root.is_dir():
             raise ValueError("Missing retained storage directory: " + str(root))
-        if (root, role) in self.walked:
+        if self.index.visited("tree", str(root), role):
             return
-        self.walked.add((root, role))
-        directories = 0
 
-        def fail_scan(error: OSError) -> None:
-            raise error
-
-        for directory, folders, files in os.walk(root, followlinks=False, onerror=fail_scan):
-            directories += 1
-            if directories > 100_000:
-                raise ValueError("Storage inventory exceeds 100000 directories")
-            for name in folders:
-                self.path(Path(directory) / name)
-            for name in files:
-                self.file(Path(directory) / name, role)
+        self.index.queue_directory(root, role)
+        while (pending := self.index.next_directory()) is not None:
+            directory, role = pending
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    path = Path(entry.path)
+                    if entry.is_dir(follow_symlinks=False):
+                        self.index.queue_directory(self.path(path), role)
+                    else:
+                        self.file(path, role)
 
     def checkpoint(self, root: Path, expected: str, role: str) -> None:
         root = self.path(root)
@@ -167,10 +141,10 @@ class _Inventory:
     def evaluation(self, base: Path, binding: dict[str, Any]) -> None:
         batch = self.path(base / binding["batch"])
         ledger = self.path(base / binding["ledger"])
-        key = batch, binding["batch_sha256"], ledger, binding["ledger_sha256"]
-        if key in self.evaluations:
+        if self.index.visited(
+            "evaluation", str(batch), binding["batch_sha256"], str(ledger), binding["ledger_sha256"]
+        ):
             return
-        self.evaluations.add(key)
         role = "evaluation_original"
         frozen = self.document(batch / "batch.json", role, binding["batch_sha256"])
         entries = self.document(ledger, role, binding["ledger_sha256"])
@@ -298,23 +272,26 @@ class _Inventory:
         self.store(Path(config["store"]["directory"]), state["store_revision"])
 
     def stable(self) -> None:
-        for name, entry in self.files.items():
-            self.file(Path(name), entry["roles"][0])
-        for path, (digest, _) in self.documents.items():
-            if hashlib.sha256(self.read_metadata(path, 128 * 1024**2)).hexdigest() != digest:
+        for entry in self.index.files():
+            path = self.path(Path(entry["path"]))
+            status = path.stat()
+            if not path.is_file() or (status.st_size, status.st_mtime_ns) != (
+                entry["bytes"],
+                entry["mtime_ns"],
+            ):
+                raise ValueError("Storage dependency changed during accounting: " + str(path))
+        for path, digest in self.index.documents():
+            if sha256_file(path) != digest:
                 raise ValueError("Storage manifest changed during accounting: " + str(path))
 
 
 def measure_learning_storage(namespace: Path, run_dir: Path, state_sha256: str) -> dict[str, int]:
     """Account at a quiescent learning boundary without writing an external report."""
-    inventory = _Inventory(namespace.resolve(), None)
-    inventory.session(run_dir, state_sha256)
-    inventory.stable()
-    return {
-        "protected_bytes": sum(entry["bytes"] for entry in inventory.files.values()),
-        "protected_files": len(inventory.files),
-        "metadata_read_bytes": inventory.metadata_bytes,
-    }
+    with storage_inventory() as index:
+        inventory = _Inventory(namespace.resolve(), None, index)
+        inventory.session(run_dir, state_sha256)
+        inventory.stable()
+        return {**index.totals(), "metadata_read_bytes": inventory.metadata_bytes}
 
 
 def plan_learning_storage(request: LearningStoragePlan) -> RunResult:
@@ -322,36 +299,40 @@ def plan_learning_storage(request: LearningStoragePlan) -> RunResult:
 
     if request.output_dir.exists():
         raise FileExistsError(request.output_dir)
-    config = json.loads(read_bounded(request.config_file, 1024**2))
+    config = read_json(request.config_file)
     if set(config) != {"version", "root", "learning", "budget_bytes"} or config["version"] != 1:
         raise ValueError("Unsupported learning storage configuration")
-    if type(config["budget_bytes"]) is not int or not 0 < config["budget_bytes"] <= 2**50:
-        raise ValueError("Storage budget must be an integer from 1 to 2**50 bytes")
+    if type(config["budget_bytes"]) is not int or config["budget_bytes"] <= 0:
+        raise ValueError("Storage budget must be a positive integer number of bytes")
     if set(config["learning"]) != {"directory", "state_sha256"}:
         raise ValueError("Storage planning requires an immutable learning state reference")
     root = (request.config_file.parent / config["root"]).resolve()
-    inventory = _Inventory(root, request.output_dir.resolve())
-    inventory.session(root / config["learning"]["directory"], config["learning"]["state_sha256"])
-    inventory.stable()
-    files = sorted(inventory.files.values(), key=lambda row: row["path"])
-    total = sum(row["bytes"] for row in files)
+    with storage_inventory() as index:
+        inventory = _Inventory(root, request.output_dir.resolve(), index)
+        inventory.session(
+            root / config["learning"]["directory"], config["learning"]["state_sha256"]
+        )
+        inventory.stable()
+        totals = index.totals()
+        request.output_dir.mkdir(parents=True)
+        files = index.publish(request.output_dir / "files.jsonl")
     summary = {
-        "version": 1,
+        "version": 2,
         "scope": "learning_session_and_retained_dependencies",
         "root": str(root),
         "state_sha256": config["learning"]["state_sha256"],
         "budget_bytes": config["budget_bytes"],
-        "metadata_budget_bytes": 256 * 1024**2,
         "metadata_read_bytes": inventory.metadata_bytes,
-        "protected_bytes": total,
-        "status": "within_budget" if total <= config["budget_bytes"] else "over_budget",
+        **totals,
+        "status": "within_budget"
+        if totals["protected_bytes"] <= config["budget_bytes"]
+        else "over_budget",
         "files": files,
         "files_deleted": 0,
         "cleanup_authorized": False,
         "integrity_scope": "manifest_bindings_and_file_presence; not model_or_driving_qualification",
         "byte_basis": "unique_resolved_paths; logical_size_not_physical_disk_allocation",
     }
-    request.output_dir.mkdir(parents=True)
     path = request.output_dir / "storage-plan.json"
     write_file(path, encode(summary))
     return RunResult({}, [], [], {"storage": summary}, path)

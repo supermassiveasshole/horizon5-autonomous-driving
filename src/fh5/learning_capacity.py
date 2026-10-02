@@ -17,7 +17,7 @@ def validate_storage_budget(value: Any, base: Path) -> dict[str, Any]:
         raise ValueError("Learning storage requires an explicit dependency namespace")
     for field in fields - {"root"}:
         low = 0 if field == "min_free_bytes" else 1
-        if type(value[field]) is not int or not low <= value[field] <= 2**50:
+        if type(value[field]) is not int or value[field] < low:
             raise ValueError("Invalid learning storage bound: " + field)
     return {**value, "root": str((base / value["root"]).resolve())}
 

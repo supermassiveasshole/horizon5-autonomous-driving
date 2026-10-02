@@ -8,9 +8,9 @@ import subprocess
 from contextlib import redirect_stdout
 from io import StringIO
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
+from storage_files import storage_files
 from test_candidate_store import candidates as candidates
 from test_evaluation import sha
 from test_event_run import verified_config
@@ -57,18 +57,19 @@ def test_plan_protects_shared_learners_and_the_original_evaluation_without_mutat
     state_hash = sha(run / "state.json")
     operation = storage_request(tmp_path, recorded_storage)
     plan = run_experiment(operation).summary["storage"]
+    files = list(storage_files(operation.output_dir, plan))
     assert plan["status"] == "within_budget"
     assert plan["files_deleted"] == 0
     assert plan["cleanup_authorized"] is False
-    paths = [entry["path"] for entry in plan["files"]]
+    paths = [entry["path"] for entry in files]
     assert len(paths) == len(set(paths))
     weight = Path(state["latest_learner"]["directory"]) / "policy.pt"
-    entry = next(row for row in plan["files"] if row["path"] == str(weight.resolve()))
+    entry = next(row for row in files if row["path"] == str(weight.resolve()))
     assert {"latest_learner", "explorer"} <= set(entry["roles"])
     assert entry["bytes"] == weight.stat().st_size
     manifest = json.loads((weight.parent / "policy.json").read_bytes())
     history_node = (weight.parent / manifest["history"]["head"]["path"]).resolve()
-    node_entry = next(row for row in plan["files"] if row["path"] == str(history_node))
+    node_entry = next(row for row in files if row["path"] == str(history_node))
     assert {"latest_learner", "metadata"} <= set(node_entry["roles"])
     assert node_entry["bytes"] == history_node.stat().st_size
     for original in (
@@ -79,7 +80,7 @@ def test_plan_protects_shared_learners_and_the_original_evaluation_without_mutat
     ):
         assert str(original.resolve()) in paths
     assert plan["protected_bytes"] > entry["bytes"]
-    assert plan["protected_bytes"] == sum(entry["bytes"] for entry in plan["files"])
+    assert plan["protected_bytes"] == sum(entry["bytes"] for entry in files)
     assert sha(run / "state.json") == state_hash
     assert all(Path(path).is_relative_to(scope.resolve()) for path in paths)
 
@@ -94,8 +95,9 @@ def test_plan_retains_original_route_needed_by_continuation(tmp_path, recorded_s
     originals = [route_path] + [
         route_path.parent / item["path"] for item in [*route["assets"].values(), *route["evidence"]]
     ]
-    plan = run_experiment(storage_request(tmp_path, recorded_storage)).summary["storage"]
-    paths = {entry["path"] for entry in plan["files"]}
+    request = storage_request(tmp_path, recorded_storage)
+    plan = run_experiment(request).summary["storage"]
+    paths = {entry["path"] for entry in storage_files(request.output_dir, plan)}
     assert all(str(path.resolve()) in paths for path in originals)
 
 
@@ -120,7 +122,7 @@ def test_cli_reports_over_budget_without_deleting_retained_files(tmp_path, recor
     assert result["files_deleted"] == 0
     assert result["cleanup_authorized"] is False
     plan = json.loads((request.output_dir / "storage-plan.json").read_bytes())
-    assert all(Path(row["path"]).is_file() for row in plan["files"])
+    assert all(Path(row["path"]).is_file() for row in storage_files(request.output_dir, plan))
     assert sha(run / "state.json") == original
 
 
@@ -160,8 +162,9 @@ def test_plan_retains_original_automatic_start_templates(tmp_path, recorded_stor
     task_path = tmp_path / "task.json"
     task_path.write_text(json.dumps(task))
     source = session_with_task(tmp_path, recorded_storage, task_path)
-    plan = run_experiment(storage_request(tmp_path, source)).summary["storage"]
-    paths = {entry["path"] for entry in plan["files"]}
+    request = storage_request(tmp_path, source)
+    plan = run_experiment(request).summary["storage"]
+    paths = {entry["path"] for entry in storage_files(request.output_dir, plan)}
     originals = (
         [event]
         + [
@@ -294,9 +297,7 @@ def test_changed_continuation_manifest_cannot_shrink_dependency_accounting(
     assert not operation.output_dir.exists()
 
 
-def test_metadata_budget_counts_materialized_reads_separately_from_streamed_hashes(
-    tmp_path, recorded_storage
-):
+def test_metadata_read_count_is_distinct_from_streamed_hashes(tmp_path, recorded_storage):
     request = storage_request(tmp_path, recorded_storage)
     open_file = Path.open
     observed = []
@@ -327,7 +328,8 @@ def test_metadata_budget_counts_materialized_reads_separately_from_streamed_hash
 
     def counting_open(path, *args, **kwargs):
         stream = open_file(path, *args, **kwargs)
-        if args == ("rb",) and path.suffix == ".json" and path != request.config_file:
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if mode == "rb" and path.suffix == ".json" and path != request.config_file:
             return CountedReader(stream)
         return stream
 
@@ -336,35 +338,25 @@ def test_metadata_budget_counts_materialized_reads_separately_from_streamed_hash
         plan = run_experiment(request).summary["storage"]
     assert plan["metadata_read_bytes"] >= sum(observed) > 0
     assert sum(streamed) > 0
-    assert plan["metadata_read_bytes"] <= plan["metadata_budget_bytes"] == 256 * 1024**2
+    assert "metadata_budget_bytes" not in plan
 
 
-def test_nested_metadata_over_budget_is_rejected_before_reading(tmp_path, recorded_storage):
+def test_valid_metadata_is_not_rejected_by_the_old_size_limits(tmp_path, recorded_storage):
     run, _ = recorded_storage
-    state = json.loads((run / "state.json").read_bytes())
-    oversized = Path(state["default"]["directory"]) / "experience/replay.json"
-    request = storage_request(tmp_path, recorded_storage)
-    stat_file, open_file = Path.stat, Path.open
-
-    def oversized_status(path, *args, **kwargs):
-        status = stat_file(path, *args, **kwargs)
-        if path == oversized:
-            return SimpleNamespace(
-                st_size=256 * 1024**2 + 1, st_mode=status.st_mode, st_mtime_ns=status.st_mtime_ns
-            )
-        return status
-
-    def reject_read(path, *args, **kwargs):
-        if path == oversized:
-            pytest.fail("The oversized nested manifest was opened before checking its budget")
-        return open_file(path, *args, **kwargs)
-
-    with pytest.MonkeyPatch.context() as filesystem:
-        filesystem.setattr(Path, "stat", oversized_status)
-        filesystem.setattr(Path, "open", reject_read)
-        with pytest.raises(ValueError, match="metadata read budget"):
-            run_experiment(request)
-    assert not request.output_dir.exists()
+    config = json.loads((run / "config.json").read_bytes())
+    session = session_with_task(tmp_path, recorded_storage, Path(config["task"]))
+    state = session[0] / "state.json"
+    # Valid JSON padding crosses both old 128 MiB and 256 MiB gates. This is
+    # legacy input compatibility, not a claim of 256 MiB of training history.
+    with state.open("ab") as stream:
+        for _ in range(257):
+            stream.write(b" " * 1024**2)
+    original = sha(state)
+    request = storage_request(tmp_path, session)
+    plan = run_experiment(request).summary["storage"]
+    assert plan["status"] == "within_budget"
+    assert plan["metadata_read_bytes"] > 256 * 1024**2
+    assert sha(state) == original
 
 
 def test_candidate_database_link_is_rejected_before_sqlite_access(tmp_path, recorded_storage):
@@ -373,12 +365,15 @@ def test_candidate_database_link_is_rejected_before_sqlite_access(tmp_path, reco
     database = Path(config["store"]["directory"]) / "state.sqlite"
     request = storage_request(tmp_path, recorded_storage)
     is_link = Path.is_symlink
+    connect = sqlite3.connect
 
     def database_link(path):
         return path == database or is_link(path)
 
     def reject_database_open(*args, **kwargs):
-        pytest.fail("SQLite opened before the candidate database link was checked")
+        if str(database) in str(args[0]) or database.as_uri() in str(args[0]):
+            pytest.fail("SQLite opened before the candidate database link was checked")
+        return connect(*args, **kwargs)
 
     with pytest.MonkeyPatch.context() as filesystem:
         filesystem.setattr(Path, "is_symlink", database_link)

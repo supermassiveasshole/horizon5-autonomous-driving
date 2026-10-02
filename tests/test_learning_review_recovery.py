@@ -4,6 +4,7 @@ import json
 import os
 from pathlib import Path
 
+from storage_files import storage_files
 from test_candidate_store import candidates as candidates
 from test_evaluation import sha
 from test_learning_loop import SharedBackend, loop_request
@@ -106,8 +107,9 @@ def test_frozen_parent_input_survives_exit_before_ledger_publication(tmp_path, s
     assert interrupted["rounds"][0]["review_input"]
     assert not (root / "round-000/parent-ledger.json").exists()
     scope = Path(os.path.commonpath([str(tmp_path), str(seeded_loop[0])]))
-    inventory = run_experiment(storage_request(tmp_path, (root, scope))).summary["storage"]
-    retained = {item["path"] for item in inventory["files"]}
+    storage = storage_request(tmp_path, (root, scope))
+    inventory = run_experiment(storage).summary["storage"]
+    retained = {item["path"] for item in storage_files(storage.output_dir, inventory)}
     proofs = {
         str(path.resolve())
         for path in (tmp_path / "independent-evidence").rglob("*")
