@@ -5,6 +5,7 @@ import json
 from copy import deepcopy
 
 import pytest
+from test_bc_loss_resources import loss_values
 from test_temporal_bc import temporal_fixture
 
 from fh5.bc import BCTrain
@@ -81,11 +82,14 @@ def test_explicit_large_bc_batch_consumes_all_129_observations_and_replays_exact
     # identity (p-1)^2 + (p+1)^2 - 2*p^2 = 2 cancels unknown initial predictions.
     # Two paired views and two action coordinates leave 1/129 after reduction.
     # Omitting that observation gives zero; consuming only 128 gives 1/128.
-    losses = {name: value["training"]["losses"][0] for name, value in summaries.items()}
+    losses = {
+        name: loss_values(tmp_path / name, value["training"])[0]
+        for name, value in summaries.items()
+    }
     assert losses["positive"] + losses["negative"] - 2 * losses["zero"] == pytest.approx(
         1 / 129, rel=0, abs=2e-7
     )
-    assert summaries["positive"]["training"]["losses"] == summaries["larger"]["training"]["losses"]
+    assert losses["positive"] == losses["larger"]
     assert summaries["positive"]["decisions"] == summaries["larger"]["decisions"]
     saved = {
         name: torch.load(tmp_path / name / "actor.pt", weights_only=True)["actor"]

@@ -159,7 +159,10 @@ def test_bc_accepts_large_dataset_representation_without_changing_learning(tmp_p
         options["dataset_sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
     config.write_text(json.dumps(options))
     trained = run_experiment(TemporalBCTrain(config, tmp_path / "model")).summary["temporal_bc"]
-    assert trained["training"]["losses"] == expected["training"]["losses"]
+    assert (
+        trained["training"]["loss_history"]["sha256"]
+        == expected["training"]["loss_history"]["sha256"]
+    )
     assert trained["decisions"] == expected["decisions"]
     rebuilt = run_experiment(
         TemporalBCReplay(tmp_path / "model", snapshot, tmp_path / "replay.html")

@@ -10,10 +10,12 @@ import os
 import tempfile
 import time
 from collections import Counter
+from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fh5.bc import BCReplay, BCTrain
+from fh5.bc_losses import BCLossHistory, read_bc_manifest
 from fh5.bc_network import make_actor
 from fh5.learning_runtime import preserve_torch_state
 
@@ -292,20 +294,36 @@ def _diagnostics(
     return records, metrics
 
 
-def _report(path: Path, summary: dict[str, Any]) -> None:
+def _report(path: Path, summary: dict[str, Any]) -> Path:
     if path.exists() or path.with_suffix(".json").exists():
         raise FileExistsError(path)
     if path.suffix != ".html":
         raise ValueError("Report must be .html")
     path.parent.mkdir(parents=True, exist_ok=True)
-    payload = (
-        json.dumps(summary, ensure_ascii=False, allow_nan=False)
-        .replace("<", "\\u003c")
-        .replace("&", "\\u0026")
-    )
-    template = Path(__file__).with_name("bc_report.html").read_text(encoding="utf-8")
-    path.write_text(template.replace("<!--BC_DATA-->", payload), encoding="utf-8")
-    _write(path.with_suffix(".json"), summary)
+    numerical = path.with_suffix(".json")
+    _write(numerical, summary)
+    try:
+        payload = (
+            json.dumps(summary, ensure_ascii=False, allow_nan=False)
+            .replace("<", "\\u003c")
+            .replace("&", "\\u0026")
+        )
+        template = Path(__file__).with_name("bc_report.html").read_text(encoding="utf-8")
+        path.write_text(template.replace("<!--BC_DATA-->", payload), encoding="utf-8")
+    except (OSError, MemoryError) as error:
+        presentation = {
+            "status": "unavailable",
+            "path": str(path),
+            "error": f"{type(error).__name__}: {error}",
+            "retained_result": str(numerical),
+        }
+        summary["presentation"] = presentation
+        try:
+            path.unlink(missing_ok=True)
+        except (OSError, MemoryError) as cleanup_error:
+            presentation["cleanup_error"] = f"{type(cleanup_error).__name__}: {cleanup_error}"
+        return numerical
+    return path
 
 
 def _config(path: Path) -> dict[str, Any]:
@@ -327,15 +345,20 @@ def _checked_config(value: Any) -> dict[str, Any]:
         "device",
     }:
         raise ValueError("Unsupported BC config")
-    for key, low, high in (("seed", 0, 2**32 - 1), ("steps", 1, 10000)):
-        if type(value[key]) is not int or not low <= value[key] <= high:
-            raise ValueError("Invalid bounded BC budget: " + key)
+    # torch.manual_seed accepts this signed/unsigned 64-bit union. Keep the
+    # original configured integer; remapping belongs to the Torch generator.
+    if type(value["seed"]) is not int or not -(2**63) <= value["seed"] <= 2**64 - 1:
+        raise ValueError("BC seed is outside the torch.manual_seed integer range")
+    if type(value["steps"]) is not int or value["steps"] < 1:
+        raise ValueError("Invalid BC steps budget")
     if type(value["batch_size"]) is not int or value["batch_size"] < 1:
         raise ValueError("Invalid BC batch budget: batch_size")
-    if (
-        not isinstance(value["learning_rate"], (int, float))
-        or not 0 < value["learning_rate"] <= 0.1
-    ):
+    rate = value["learning_rate"]
+    try:
+        valid_rate = type(rate) in (int, float) and rate > 0 and math.isfinite(rate)
+    except OverflowError:
+        valid_rate = False
+    if not valid_rate:
         raise ValueError("Invalid learning rate")
     size = value["image_size"]
     if (
@@ -353,11 +376,11 @@ def _checked_config(value: Any) -> dict[str, Any]:
 
 def run_offline(request: BCTrain | BCReplay) -> RunResult:
     torch = importlib.import_module("torch")
-    with preserve_torch_state(torch):
-        return _run_offline(request, torch)
+    with preserve_torch_state(torch), ExitStack() as resources:
+        return _run_offline(request, torch, resources)
 
 
-def _run_offline(request: BCTrain | BCReplay, torch: Any) -> RunResult:
+def _run_offline(request: BCTrain | BCReplay, torch: Any, resources: ExitStack) -> RunResult:
     from fh5.experiment import RunResult
 
     training = isinstance(request, BCTrain)
@@ -371,7 +394,7 @@ def _run_offline(request: BCTrain | BCReplay, torch: Any) -> RunResult:
         device = config["device"]
     else:
         output = request.model_dir
-        manifest = _json(output / "model.json")
+        manifest, _ = read_bc_manifest(output / "model.json")
         if (
             not {
                 "version",
@@ -420,7 +443,9 @@ def _run_offline(request: BCTrain | BCReplay, torch: Any) -> RunResult:
             raise ValueError("BC requires eligible independent train and holdout runs")
         optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
         initial = [p.detach().clone() for p in model.encoder.parameters()]
-        losses, visual_gradient = [], 0.0
+        losses = BCLossHistory()
+        resources.callback(losses.close)
+        completed, visual_gradient = 0, 0.0
         started = time.monotonic()
         for step in range(config["steps"]):
             indices = torch.randperm(len(eligible) // 2)[: config["batch_size"] // 2].tolist()
@@ -443,10 +468,10 @@ def _run_offline(request: BCTrain | BCReplay, torch: Any) -> RunResult:
                     if p.grad is not None
                 )
             optimizer.step()
-            losses.append(float(loss.item()))
+            completed = step + 1
+            losses.record(completed, loss)
         stats = {
-            "steps_completed": config["steps"],
-            "losses": losses,
+            "steps_completed": completed,
             "duration_s": time.monotonic() - started,
             "visual_gradient_l1": visual_gradient,
             "visual_parameter_change_l1": sum(
@@ -491,6 +516,7 @@ def _run_offline(request: BCTrain | BCReplay, torch: Any) -> RunResult:
             output / "actor.pt",
         )
         manifest["weights_sha256"] = _hash(output / "actor.pt")
+        stats["loss_history"] = losses.publish(output)
         model = make_actor(contract).to(device)
     try:
         saved = torch.load(output / "actor.pt", map_location=device, weights_only=True)
@@ -532,7 +558,7 @@ def _run_offline(request: BCTrain | BCReplay, torch: Any) -> RunResult:
             "proves_driving_benefit": False,
         },
     }
-    _report(report, summary)
+    report = _report(report, summary)
     return RunResult(
         {"source_kind": "offline_bc", "game_validation": "unverified"},
         [],

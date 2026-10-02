@@ -15,6 +15,7 @@ from typing import TYPE_CHECKING, Any
 
 from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.bc_learning import VIEWS, _checked_config, _write
+from fh5.bc_losses import BCLossHistory, read_bc_manifest
 from fh5.bc_network import make_actor
 from fh5.collection_store import read_bounded
 from fh5.learning_runtime import TrainingBudget, move_learning_state, preserve_torch_state
@@ -114,6 +115,7 @@ def _run(
 ) -> RunResult:
     from fh5.numeric_actor import FrozenNumericActor
 
+    manifest_digest = None
     if isinstance(request, TemporalBCTrain):
         if request.output_dir.exists():
             raise FileExistsError(request.output_dir)
@@ -125,7 +127,7 @@ def _run(
             config["device"],
         )
     else:
-        manifest, _ = _read(request.model_dir / "model.json")
+        manifest, manifest_digest = read_bc_manifest(request.model_dir / "model.json")
         config = manifest["config"]
         dataset, output, report, device = (
             request.dataset_file,
@@ -188,7 +190,9 @@ def _run(
             )
 
         optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
-        started, losses, gradient = time.monotonic(), [], 0.0
+        losses = BCLossHistory()
+        resources.callback(losses.close)
+        started, completed, gradient = time.monotonic(), 0, 0.0
         for step in range(config["steps"]):
             checkpoint("update", step)
             indices = torch.randperm(len(training_rows) // 2)[: config["batch_size"] // 2].tolist()
@@ -222,12 +226,12 @@ def _run(
                 features.grad[:, -2 * (len(first.frames) - 1) :: 2].abs().sum().item()
             )
             optimizer.step()
-            losses.append(float(loss.item()))
+            completed = step + 1
+            losses.record(completed, loss)
             del rgb, features, target, loss
-        checkpoint("freeze", config["steps"])
+        checkpoint("freeze", completed)
         stats = {
-            "steps_completed": config["steps"],
-            "losses": losses,
+            "steps_completed": completed,
             "duration_s": time.monotonic() - started,
             "time_gradient_l1": gradient,
             "selection": "fixed final update; no held-out model selection",
@@ -262,8 +266,9 @@ def _run(
             output / "actor.pt",
         )
         manifest["weights_sha256"] = sha256_file(output / "actor.pt")
+        stats["loss_history"] = losses.publish(output)
         _write(output / "model.json", manifest)
-    actor = FrozenNumericActor(output, pixels, device)
+    actor = FrozenNumericActor(output, pixels, device, expected_manifest_sha256=manifest_digest)
     models.append(actor.model)
     if actor.original_contract != contract:
         raise ValueError("Snapshot model contract mismatch")

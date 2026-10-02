@@ -17,7 +17,8 @@ def add_loss_history(model):
     path = model / "model.json"
     manifest = json.loads(path.read_bytes())
     stats = manifest.pop("training")
-    stats.pop("losses")
+    stats.pop("losses", None)
+    stats.pop("loss_history", None)
     # Real, finite diagnostic scalars, written incrementally. This is archived
     # history growth, not a request for half a million new optimizer updates.
     block = ",".join(["0.123456789"] * 1024)
