@@ -294,10 +294,13 @@ def test_changed_continuation_manifest_cannot_shrink_dependency_accounting(
     assert not operation.output_dir.exists()
 
 
-def test_metadata_budget_includes_nested_and_verification_reads(tmp_path, recorded_storage):
+def test_metadata_budget_counts_materialized_reads_separately_from_streamed_hashes(
+    tmp_path, recorded_storage
+):
     request = storage_request(tmp_path, recorded_storage)
     open_file = Path.open
     observed = []
+    streamed = []
 
     class CountedReader:
         def __init__(self, stream):
@@ -314,6 +317,14 @@ def test_metadata_budget_includes_nested_and_verification_reads(tmp_path, record
             observed.append(len(contents))
             return contents
 
+        def readable(self):
+            return self.stream.readable()
+
+        def readinto(self, buffer):
+            size = self.stream.readinto(buffer)
+            streamed.append(size)
+            return size
+
     def counting_open(path, *args, **kwargs):
         stream = open_file(path, *args, **kwargs)
         if args == ("rb",) and path.suffix == ".json" and path != request.config_file:
@@ -324,6 +335,7 @@ def test_metadata_budget_includes_nested_and_verification_reads(tmp_path, record
         filesystem.setattr(Path, "open", counting_open)
         plan = run_experiment(request).summary["storage"]
     assert plan["metadata_read_bytes"] >= sum(observed) > 0
+    assert sum(streamed) > 0
     assert plan["metadata_read_bytes"] <= plan["metadata_budget_bytes"] == 256 * 1024**2
 
 

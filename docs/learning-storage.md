@@ -35,7 +35,7 @@ uv run --locked fh5 learning-storage-plan --config runs/storage-request.json --o
 
 清单核对用于枚举依赖的清单摘要绑定（含主 replay 及来源 replay）、引用文件的存在性及读取期间已计量文件的大小/修改时间。它不重新加载 Torch 权重，也不替代模型完整性、驾驶有效性或可晋升性审核。目录读取失败直接报错，不静默跳过；引用中的目录链接和数据库链接在访问前拒绝。单次最多计量 100000 个文件。
 
-依赖元数据读取预算为 256 MiB，包含嵌套清单、候选历史附件及最后的摘要复核；相同 checkpoint 的清单解析复用缓存。SQLite 读取保守地按每次访问的整个数据库大小预留预算。计量值写入 `metadata_read_bytes` / `metadata_budget_bytes`；它是预算收费量，不是系统磁盘 I/O 指标。最外层请求配置另有 1 MiB 上限，不占用依赖预算。
+旧实现仍对整体物化的嵌套清单设 256 MiB 元数据预算、外层配置设 1 MiB 上限；这些未经容量论证的限制按[资源约束](resource-policy.md)待清理，不能视作后续设计要求。相同 checkpoint 的清单解析复用缓存。候选历史已改为 SQLite 游标逐条验证，附件逐块哈希，不再把整库大小或流式哈希的累计流量按物化内存收费；数据库与附件仍计入需要保留的磁盘字节。`metadata_read_bytes` / `metadata_budget_bytes` 目前只描述剩余物化读取的旧计量口径，不是 RSS 或系统磁盘 I/O 指标。完整磁盘索引迁移见[审计](validation/resource-limit-audit.md)。
 
 这是针对静止记录的保留依赖清单，尚不是并发写入时的事务快照、删除许可或完整磁盘配额管理器。只读报告明确记录 `files_deleted=0`、`cleanup_authorized=false`。
 

@@ -252,7 +252,7 @@ class _Loop:
     def initialize(self) -> bool:
         from fh5.experiment import run_experiment
 
-        history = run_experiment(CandidateHistory(self.store)).summary["candidate_store"]
+        history = run_experiment(CandidateHistory(self.store, limit=0)).summary["candidate_store"]
         if history["revision"] != self.config["store"]["revision"]:
             raise ValueError("Learning store revision changed before initialization")
         self.state["store_revision"] = history["revision"]
@@ -476,7 +476,7 @@ class _Loop:
             _sha(Path(path)) != expected for path, expected in self.state["source_files"].items()
         ):
             raise ValueError("Frozen learning inputs changed")
-        history = run_experiment(CandidateHistory(self.store)).summary["candidate_store"]
+        history = run_experiment(CandidateHistory(self.store, limit=0)).summary["candidate_store"]
         if history["revision"] != self.state["store_revision"]:
             raise ValueError("Learning store changed outside this loop")
         _input(self.root, self.state["incumbent"]).verify()
@@ -1025,7 +1025,7 @@ class _Loop:
     def reconcile_commit(self) -> None:
         from fh5.experiment import run_experiment
 
-        history = run_experiment(CandidateHistory(self.store)).summary["candidate_store"]
+        history = run_experiment(CandidateHistory(self.store, limit=0)).summary["candidate_store"]
         if history["revision"] == self.state["store_revision"]:
             return
         rows = self.state["rounds"]

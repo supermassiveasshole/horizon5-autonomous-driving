@@ -11,6 +11,8 @@
 ```powershell
 uv run --locked fh5 candidate-record --config configs/my-candidate-record.json --store runs/versions --registry runs/evidence-usage.sqlite
 uv run --locked fh5 candidate-history --store runs/versions
+uv run --locked fh5 candidate-history --store runs/versions --after-sequence 0 --limit 20
+uv run --locked fh5 candidate-history --store runs/versions --limit 0
 uv run --locked fh5 candidate-rollback --store runs/versions --expected-revision <当前摘要> --target-revision <历史摘要> --reason "回退说明" --registry runs/evidence-usage.sqlite
 ```
 
@@ -40,7 +42,9 @@ uv run --locked fh5 candidate-rollback --store runs/versions --expected-revision
 
 `state.sqlite` 中只有事务提交后的事件属于有效历史。事件绑定父版本摘要、协议、模型归档和选择理由；源证据审核、归档写入完成后才提交。过期请求或中途写盘失败不能覆盖已提交版本。未提交的工作目录可能留下，既不计入历史，也不自动清理。
 
-历史查询核验事件摘要链及保存的请求/比较报告摘要；查询不重新加载全部模型或宣称源证据仍可用于驾驶资格。历史最多 1000 个事件、每事件 4 MiB，数据库限 32 MiB。完整模型资产另受归档容量约束，且每次操作需要额外归档空间；长期去重与回收由资源管理切片处理。
+历史查询核验事件摘要链及保存的请求/比较报告摘要；查询不重新加载全部模型或宣称源证据仍可用于驾驶资格。SQLite 游标逐条读取，附件流式计算摘要，不设置事件条数、事件大小或数据库大小的人为拒绝阈值；写入按事务追加，真实磁盘/SQLite 接口错误保留已提交状态。完整模型资产及每次操作的临时副本仍需要实际磁盘空间，长期去重与回收另行处理。
+
+`CandidateHistory(store, after_sequence=N, limit=M)` / CLI 同名选项可按需获取历史页。序号从 1 起，返回 N 之后至多 M 条；示例的 20 只控制该次展示数量，不限制版本库继续增长。结果包含 `history_count`、`next_sequence` 和 `history_complete`；下一页使用返回的 `next_sequence`。不传 `limit` 保持完整历史查询行为，会显式物化全部返回条目；长历史应指定页面大小。`limit=0` 仅返回当前角色及统计，训练循环使用此模式，回退仅保留当前事件与目标事件。每页仍逐条验证完整摘要链和附件，页外损坏不会被跳过；累计历史越长，完整校验的 I/O 时间仍会增长。连续分页时应核对顶层 `revision`，若已变化则重新查询，避免把不同版本库快照的页面混用。
 
 回退指定历史事件的默认版本，并重新读取其冻结比较、原始评估证据和完整模型归档；资料缺失或改变时拒绝回退。回退自身追加一个事件，保留当前探索版本与所有中间失败记录。
 

@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fh5.artifact_io import sha256_file
 from fh5.candidate_archive import CandidateArchive, CandidateRestore
 from fh5.candidate_selection import CandidateCompare, _eligibility
 from fh5.collection_store import encode, read_bounded, write_file
@@ -33,6 +34,8 @@ class CandidateRecord:
 @dataclass(frozen=True)
 class CandidateHistory:
     store_dir: Path
+    after_sequence: int = 0
+    limit: int | None = None
 
 
 @dataclass(frozen=True)
@@ -57,8 +60,6 @@ def _database(root: Path, *, writable: bool = False) -> Iterator[sqlite3.Connect
         raise ValueError("Candidate store unavailable: " + str(error)) from error
     try:
         if writable:
-            page_size = db.execute("PRAGMA page_size").fetchone()[0]
-            db.execute(f"PRAGMA max_page_count={32 * 1024**2 // page_size}")
             db.execute("BEGIN IMMEDIATE")
         yield db
         if writable:
@@ -73,40 +74,48 @@ def _database(root: Path, *, writable: bool = False) -> Iterator[sqlite3.Connect
         db.close()
 
 
-def _events(db: sqlite3.Connection) -> list[dict[str, Any]]:
+def _events(db: sqlite3.Connection) -> Iterator[dict[str, Any]]:
     if db.execute("PRAGMA user_version").fetchone()[0] != 1:
         raise ValueError("Unsupported candidate store")
-    rows = db.execute("SELECT sequence, revision, payload FROM events ORDER BY sequence").fetchall()
-    if not 1 <= len(rows) <= 1000:
-        raise ValueError("Candidate store requires 1..1000 committed events")
-    result: list[dict[str, Any]] = []
+    rows = db.execute("SELECT sequence, revision, payload FROM events ORDER BY sequence")
+    count = 0
     parent = None
     for number, revision, raw in rows:
-        if len(raw) > 4 * 1024**2 or hashlib.sha256(raw).hexdigest() != revision:
+        if hashlib.sha256(raw).hexdigest() != revision:
             raise ValueError("Candidate history changed")
         event = json.loads(raw)
-        if number != len(result) + 1 or event["parent"] != parent:
+        if number != count + 1 or event["parent"] != parent:
             raise ValueError("Candidate history is not continuous")
         if event["scope"] != "synthetic_development_only":
             raise ValueError("Unsupported candidate qualification scope")
-        result.append({**event, "revision": revision})
+        yield {**event, "revision": revision}
+        count += 1
         parent = revision
-    return result
+    if not count:
+        raise ValueError("Candidate store requires committed events")
 
 
 def _read_events(
-    root: Path, *, read_file: Callable[[Path, int], bytes] = read_bounded
-) -> list[dict[str, Any]]:
+    root: Path, *, digest_file: Callable[[Path], str] = sha256_file
+) -> Iterator[dict[str, Any]]:
     database = root / "state.sqlite"
-    if not database.is_file() or database.stat().st_size > 32 * 1024**2:
-        raise ValueError("Missing or oversized candidate store")
+    if not database.is_file():
+        raise ValueError("Missing candidate store")
     with _database(root) as db:
-        events = _events(db)
-    for event in events:
-        for name, digest in event["evidence"].items():
-            if hashlib.sha256(read_file(asset(root, name), 128 * 1024**2)).hexdigest() != digest:
-                raise ValueError("Candidate history evidence changed: " + name)
-    return events
+        for event in _events(db):
+            for name, digest in event["evidence"].items():
+                if digest_file(asset(root, name)) != digest:
+                    raise ValueError("Candidate history evidence changed: " + name)
+            yield event
+
+
+def _latest(events: Iterator[dict[str, Any]]) -> dict[str, Any]:
+    latest = None
+    for latest in events:
+        pass
+    if latest is None:
+        raise ValueError("Candidate store requires committed events")
+    return latest
 
 
 def _commit(root: Path, event: dict[str, Any], expected: str | None) -> str:
@@ -120,15 +129,13 @@ def _commit(root: Path, event: dict[str, Any], expected: str | None) -> str:
             db.execute("PRAGMA user_version=1")
             number = 1
         else:
-            events = _events(db)
-            if events[-1]["revision"] != expected:
+            number = 1
+            latest = None
+            for latest in _events(db):
+                number += 1
+            if latest is None or latest["revision"] != expected:
                 raise ValueError("Candidate store revision changed")
-            number = len(events) + 1
-        if number > 1000:
-            raise ValueError("Candidate history exceeds 1000 events")
         raw = encode(event)
-        if len(raw) > 4 * 1024**2:
-            raise ValueError("Candidate event exceeds capacity")
         revision = hashlib.sha256(raw).hexdigest()
         db.execute("INSERT INTO events VALUES (?, ?, ?)", (number, revision, raw))
         return revision
@@ -143,8 +150,7 @@ def _publish(root: Path, work: Path, event: dict[str, Any]) -> RunResult:
         "request": (work / "request.json").relative_to(root).as_posix(),
     }
     event["evidence"] = {
-        event[key]: hashlib.sha256(read_bounded(asset(root, event[key]), 128 * 1024**2)).hexdigest()
-        for key in ("comparison", "request")
+        event[key]: sha256_file(asset(root, event[key])) for key in ("comparison", "request")
     }
     revision = _commit(root, event, event["parent"])
     return RunResult(
@@ -207,7 +213,7 @@ def record_candidate(request: CandidateRecord) -> RunResult:
         if root.exists():
             raise FileExistsError(root)
     else:
-        previous = _read_events(root)[-1]
+        previous = _latest(_read_events(root))
         if previous["revision"] != request.expected_revision:
             raise ValueError("Candidate store revision changed")
     raw = read_bounded(request.config_file, 1024**2)
@@ -304,23 +310,47 @@ def read_candidate_history(request: CandidateHistory) -> RunResult:
     from fh5.experiment import RunResult
 
     root = request.store_dir.resolve()
-    events = _read_events(root)
-    return RunResult(
-        {}, [], [], {"candidate_store": {**events[-1], "history": events}}, root / "state.sqlite"
-    )
+    if (
+        type(request.after_sequence) is not int
+        or request.after_sequence < 0
+        or (request.limit is not None and (type(request.limit) is not int or request.limit < 0))
+    ):
+        raise ValueError("Candidate history page requires nonnegative integers")
+    events: list[dict[str, Any]] = []
+    latest = None
+    count = 0
+    for count, latest in enumerate(_read_events(root), start=1):
+        if count > request.after_sequence and (
+            request.limit is None or len(events) < request.limit
+        ):
+            events.append(latest)
+    if latest is None:
+        raise ValueError("Candidate store requires committed events")
+    next_sequence = min(count, request.after_sequence + len(events))
+    summary = {
+        **latest,
+        "history": events,
+        "history_count": count,
+        "next_sequence": next_sequence,
+        "history_complete": next_sequence == count,
+    }
+    return RunResult({}, [], [], {"candidate_store": summary}, root / "state.sqlite")
 
 
 def rollback_candidate(request: CandidateRollback) -> RunResult:
     from fh5.experiment import run_experiment
 
     root = request.store_dir.resolve()
-    history = _read_events(root)
-    previous = history[-1]
+    target = previous = None
+    for previous in _read_events(root):
+        if previous["revision"] == request.target_revision:
+            target = previous
+    if previous is None:
+        raise ValueError("Candidate store requires committed events")
     if previous["revision"] != request.expected_revision:
         raise ValueError("Candidate store revision changed")
     if not isinstance(request.reason, str) or not 1 <= len(request.reason.strip()) <= 2000:
         raise ValueError("Candidate rollback requires a reason of 1..2000 characters")
-    target = next((e for e in history if e["revision"] == request.target_revision), None)
     if target is None or target["protocol_sha256"] != previous["protocol_sha256"]:
         raise ValueError("Rollback target is not a compatible retained default")
     folder = "events/" + uuid.uuid4().hex

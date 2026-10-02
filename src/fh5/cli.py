@@ -167,6 +167,10 @@ def main(argv: Sequence[str] | None = None) -> int:
     candidate_history = commands.add_parser(
         "candidate-history", help="Read committed synthetic candidate roles and history"
     )
+    candidate_history.add_argument("--after-sequence", type=int, default=0)
+    candidate_history.add_argument(
+        "--limit", type=int, help="Return at most this many events; 0 returns current roles only"
+    )
     storage_plan = commands.add_parser(
         "learning-storage-plan", help="Account for retained learning dependencies without deletion"
     )
@@ -659,7 +663,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                     args.registry,
                 )
             else:
-                operation = CandidateHistory(args.store)
+                operation = CandidateHistory(args.store, args.after_sequence, args.limit)
             print(
                 json.dumps(run_experiment(operation).summary["candidate_store"], ensure_ascii=False)
             )

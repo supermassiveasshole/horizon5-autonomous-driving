@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fh5.artifact_io import sha256_file
 from fh5.candidate_archive import checkpoint_asset_names
 from fh5.candidate_store import _read_events
 from fh5.collection_store import encode, read_bounded, write_file
@@ -201,12 +202,14 @@ class _Inventory:
     def store(self, root: Path, expected: str) -> None:
         root = self.path(root)
         self.tree(root, "candidate_history")
-        database = self.file(root / "state.sqlite", "candidate_history")
-        self.reserve_metadata(self.files[str(database)]["bytes"])
-        history = _read_events(root, read_file=self.read_metadata)
-        if history[-1]["revision"] != expected:
-            raise ValueError("Retained candidate store revision changed")
-        for event in history:
+        self.file(root / "state.sqlite", "candidate_history")
+
+        def digest_file(path: Path) -> str:
+            return sha256_file(self.file(path, "metadata"))
+
+        latest = None
+        for event in _read_events(root, digest_file=digest_file):
+            latest = event["revision"]
             for role in (
                 event["default"],
                 event["explorer"],
@@ -230,9 +233,11 @@ class _Inventory:
             comparison = self.document(path, "candidate_history", proof["comparison_sha256"])
             for side in ("incumbent", "candidate"):
                 self.evaluation(path.parent, comparison[side])
-        self.reserve_metadata(self.files[str(database)]["bytes"])
-        repeated = _read_events(root, read_file=self.read_metadata)
-        if repeated[-1]["revision"] != expected:
+        if latest != expected:
+            raise ValueError("Retained candidate store revision changed")
+        for event in _read_events(root, digest_file=digest_file):
+            latest = event["revision"]
+        if latest != expected:
             raise ValueError("Candidate store changed during storage accounting")
 
     def session(self, root: Path, expected: str) -> None:
