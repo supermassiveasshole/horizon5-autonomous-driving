@@ -13,7 +13,7 @@ from fh5.artifact_io import VerifiedFile, read_json, sha256_file
 from fh5.collection_store import atomic_json, encode, read_bounded
 from fh5.numeric_images import asset
 from fh5.realtime_numeric_replay import read_realtime_journal, read_realtime_recording
-from fh5.replay_document import replay_document
+from fh5.replay_document import read_document_fields, replay_document
 from fh5.sac_cycle import SACCycle, SACRealtimeCycle, sampling_update_budget
 from fh5.sac_learning import validate_sac_candidate
 from fh5.sampling_evidence import (
@@ -23,6 +23,27 @@ from fh5.sampling_evidence import (
 )
 
 _INVENTORY_LIMIT = 64 * 1024**2
+
+
+def checkpoint_learning_evidence(
+    root: Path, expected_sha256: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Read parent progress from verified files without retaining learner diagnostics."""
+    manifest = read_document_fields(
+        VerifiedFile(root / "policy.json", expected_sha256),
+        {"training_report_sha256", "configuration", "continuation", "replay_sha256"},
+    )
+    report = read_document_fields(
+        VerifiedFile(root / "training-report.json", manifest["training_report_sha256"]),
+        {
+            "steps_completed",
+            "steps_requested",
+            "stop_reason",
+            "training_error",
+            "experience_added_transitions",
+        },
+    )
+    return manifest, report
 
 
 def sampling_bindings(row: dict[str, Any]) -> list[dict[str, Any]]:
@@ -317,8 +338,7 @@ def completed_sampling(
         "sha256": manifest_sha,
         **validate_sac_candidate(candidate, manifest_sha),
     }
-    manifest = json.loads(read_bounded(candidate / "policy.json", 4 * 1024**2))
-    report = json.loads(read_bounded(candidate / "training-report.json", 128 * 1024**2))
+    manifest, report = checkpoint_learning_evidence(candidate, manifest_sha)
     count, updates = attempt["eligible_transitions"], attempt["learner_updates"]
     maximum = (
         int(request.seconds_per_attempt * request.runtime.decision_hz) + 1

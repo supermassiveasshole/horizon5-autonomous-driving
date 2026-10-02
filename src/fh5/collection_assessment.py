@@ -6,17 +6,20 @@ import hashlib
 import importlib
 import json
 import os
+from contextlib import ExitStack
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.bc_learning import VIEWS, _error
 from fh5.collection_store import read_bounded, write_file
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_recording import _result
 from fh5.numeric_report import preview_png
-from fh5.temporal_bc import _snapshot
+from fh5.replay_document import read_document_fields
+from fh5.temporal_data import temporal_snapshot
 from fh5.temporal_features import describe_time
 
 if TYPE_CHECKING:
@@ -147,7 +150,10 @@ def assess_collection_bc(request: CollectionBCAssess) -> RunResult:
     base = request.config_file.parent
     candidate_path, candidate = _model(config["candidate"], base)
     dataset_path = base / config["dataset"]
-    data, digest = _json(dataset_path)
+    digest = sha256_file(dataset_path)
+    data = read_document_fields(
+        VerifiedFile(dataset_path, digest), {"provenance", "groups", "pixel_contract"}
+    )
     if digest != config["dataset_sha256"]:
         raise ValueError("Assessment dataset hash changed")
     final = config["mode"] == "final"
@@ -200,14 +206,16 @@ def assess_collection_bc(request: CollectionBCAssess) -> RunResult:
     if any(request.output_dir.resolve().is_relative_to(p.resolve()) for p in roots):
         raise ValueError("Assessment output must be separate from frozen inputs")
     torch = importlib.import_module("torch")
-    with preserve_torch_state(torch):
+    with preserve_torch_state(torch), ExitStack() as resources:
         torch.set_num_threads(2)
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.benchmark = False
-        data, pixels, all_rows = _snapshot(dataset_path, expected_sha256=digest)
-        rows = [r for r in all_rows if r["split"] == split]
-        if not any(r["entry"]["bc_eligible"] for r in rows):
+        data, pixels, all_rows = resources.enter_context(
+            temporal_snapshot(dataset_path, expected_sha256=digest)
+        )
+        rows = all_rows.select(split)
+        if not all_rows.select(split, eligible=True):
             raise ValueError("No eligible independent observations for assessment")
         actor = FrozenNumericActor(candidate_path, pixels, config["device"])
         challenger = (
@@ -234,6 +242,9 @@ def assess_collection_bc(request: CollectionBCAssess) -> RunResult:
                     )
                     previews[pixel_hash] = path
                 images.append(previews[pixel_hash])
+            actor.clear_input_cache()
+            if challenger:
+                challenger.clear_input_cache()
             records.append(
                 {
                     "decision_id": decision.decision_id,
@@ -284,6 +295,7 @@ def assess_collection_bc(request: CollectionBCAssess) -> RunResult:
             for row, recorded in zip(rows, records):
                 d = row["decision"]
                 predicted = reloaded.predict(d.actor, d.frames)
+                reloaded.clear_input_cache()
                 max_error = max(
                     max_error, max(abs(a - b) for a, b in zip(predicted, recorded[field]))
                 )

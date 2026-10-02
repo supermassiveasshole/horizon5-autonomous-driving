@@ -7,12 +7,13 @@ import importlib
 import json
 import os
 import time
-from collections import Counter
+from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fh5.artifact_io import sha256_file
 from fh5.bc_learning import VIEWS, _checked_config, _error, _write
 from fh5.bc_network import make_actor
 from fh5.collection_store import read_bounded
@@ -20,12 +21,11 @@ from fh5.learning_runtime import TrainingBudget, move_learning_state, preserve_t
 from fh5.numeric_images import (
     NumericDecision,
     NumericFrame,
-    PixelContract,
     asset,
-    validate_decision,
 )
-from fh5.numeric_recording import _result, read_numeric_frame
+from fh5.numeric_recording import _result
 from fh5.numeric_report import preview_png
+from fh5.temporal_data import temporal_snapshot
 from fh5.temporal_features import (
     TEMPORAL_ARCHITECTURE,
     TEMPORAL_METADATA_KEYS,
@@ -88,146 +88,25 @@ def _configuration(path: Path, *, expected_sha256: str | None = None) -> dict[st
     return value
 
 
-def _snapshot(
-    path: Path, *, expected_sha256: str | None = None
-) -> tuple[dict[str, Any], PixelContract, list[dict[str, Any]]]:
-    data, digest = _read(path)
-    if expected_sha256 is not None and digest != expected_sha256:
-        raise ValueError("Numerical dataset changed before input reconstruction")
-    if (
-        data.get("version") != 1
-        or data.get("kind") != "numeric-bc-snapshot-v1"
-        or data.get("action_contract") != "xinput-lx-rt-lt-v1"
-    ):
-        raise ValueError("Unsupported numerical training snapshot")
-    pixels = PixelContract.from_metadata(data["pixel_contract"])
-    if any(not 32 <= v <= 640 for v in pixels.size):
-        raise ValueError("Temporal training image size outside bounded model range")
-    groups = {g["id"]: g["split"] for g in data["groups"]}
-    source_ranges = {g["id"]: g.get("source_ranges") for g in data["groups"]}
-    if (
-        len(groups) != len(data["groups"])
-        or not groups
-        or any(v not in ("train", "development", "evaluation") for v in groups.values())
-    ):
-        raise ValueError("Invalid independent attempt groups")
-    evidence = [g["evidence_id"] for g in data["groups"]]
-    if len(set(evidence)) != len(evidence):
-        raise ValueError("One source cannot be split between independent groups")
-    if not 1 <= len(data["decisions"]) <= 50_000:
-        raise ValueError("Numerical snapshot exceeds bounded decision count")
-    seen: set[str] = set()
-    identities: dict[tuple[str, str], tuple[dict[str, Any], str]] = {}
-    cache: dict[str, NumericFrame] = {}
-    total = 0
-    rows: list[dict[str, Any]] = []
-    shape = None
-    for entry in data["decisions"]:
-        if entry["decision_id"] in seen or entry["group"] not in groups:
-            raise ValueError("Duplicate decision or unknown attempt group")
-        seen.add(entry["decision_id"])
-        ranges = source_ranges[entry["group"]]
-        if ranges is not None:
-            sequence = entry.get("source_sequence")
-            if (
-                not isinstance(sequence, int)
-                or isinstance(sequence, bool)
-                or not any(
-                    entry["decision_id"] == f"{r['session_sha256']}:{sequence}"
-                    and r["start_sequence"] <= sequence < r["end_sequence"]
-                    and r["first_ns"] <= entry["decision_ns"] <= r["last_ns"]
-                    and all(
-                        r["first_ns"] <= f["source_time_ns"] <= entry["decision_ns"]
-                        and f["epoch"].startswith(r["session_sha256"] + ":")
-                        and f["frame_id"].startswith(r["session_sha256"] + ":")
-                        for f in entry["frames"]
-                    )
-                    for r in ranges
-                )
-            ):
-                raise ValueError("Numerical sample contradicts its declared source range")
-        frames = []
-        for metadata in entry["frames"]:
-            key = (metadata["epoch"], metadata["frame_id"])
-            identity = (metadata, entry["group"])
-            if key in identities and identities[key] != identity:
-                raise ValueError("Numerical frame identity or attempt group changed")
-            identities[key] = identity
-            # Each published frame has its own metadata, even if pixels deduplicate on disk.
-            encoded = json.dumps(metadata, sort_keys=True)
-            if encoded not in cache:
-                frame = read_numeric_frame(path.parent, metadata)
-                total += frame.pixels.nbytes
-                if total > 512 * 1024**2:
-                    raise ValueError("Snapshot exceeds 512 MiB offline frame budget")
-                cache[encoded] = frame
-            frames.append(cache[encoded])
-        if set(entry["views"]) != set(VIEWS):
-            raise ValueError("Snapshot requires paired reference views")
-        plain, assisted = (entry["views"][v] for v in VIEWS)
-        if any(plain["reference"]["mask"]) or {
-            k: v for k, v in plain.items() if k != "reference"
-        } != {k: v for k, v in assisted.items() if k != "reference"}:
-            raise ValueError("Reference views differ outside the reference branch")
-        for view in VIEWS:
-            actor = entry["views"][view]
-            current = actor_shape(actor, len(pixels.history_offsets_ms))
-            if shape is not None and shape != current:
-                raise ValueError("Numerical actor dimensions changed in snapshot")
-            shape = current
-            decision = NumericDecision(
-                entry["decision_id"] + ":" + view,
-                entry["epoch"],
-                entry["decision_ns"],
-                tuple(frames),
-                actor,
-                entry["supervision"],
-            )
-            reason = validate_decision(decision, pixels)
-            if reason:
-                raise ValueError("Invalid numerical training observation: " + reason)
-            supervision = entry["supervision"]
-            if entry["bc_eligible"] and (
-                not supervision.get("action_mask")
-                or supervision.get("quality") != "trusted"
-                or supervision.get("reasons")
-            ):
-                raise ValueError("Untrusted action cannot enter BC training")
-            if entry["bc_eligible"] and (
-                len(supervision["action"]) != 2
-                or any(
-                    not isinstance(a, (int, float)) or not -1 <= a <= 1
-                    for a in supervision["action"]
-                )
-            ):
-                raise ValueError("Invalid bounded demonstration action")
-            rows.append(
-                {
-                    "entry": entry,
-                    "decision": decision,
-                    "view": view,
-                    "split": groups[entry["group"]],
-                }
-            )
-    return data, pixels, rows
-
-
 def run_temporal_bc(
     request: TemporalBCTrain | TemporalBCReplay,
     budget: TrainingBudget | None = None,
     cpu_threads: int = 2,
 ) -> RunResult:
     torch = importlib.import_module("torch")
-    with preserve_torch_state(torch):
+    with preserve_torch_state(torch), ExitStack() as resources:
         torch.set_num_threads(cpu_threads)
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.benchmark = False
-        return _run(request, torch, budget)
+        return _run(request, torch, resources, budget)
 
 
 def _run(
-    request: TemporalBCTrain | TemporalBCReplay, torch: Any, budget: TrainingBudget | None = None
+    request: TemporalBCTrain | TemporalBCReplay,
+    torch: Any,
+    resources: ExitStack,
+    budget: TrainingBudget | None = None,
 ) -> RunResult:
     from fh5.numeric_actor import FrozenNumericActor
 
@@ -250,10 +129,10 @@ def _run(
             request.report_path,
             request.device,
         )
-    _, digest = _read(dataset)
+    digest = sha256_file(dataset)
     if digest != config["dataset_sha256"]:
         raise ValueError("Frozen numerical dataset hash mismatch")
-    data, pixels, rows = _snapshot(dataset, expected_sha256=digest)
+    data, pixels, rows = resources.enter_context(temporal_snapshot(dataset, expected_sha256=digest))
     if budget:
         budget.checkpoint("snapshot_validated", 0)
     if device not in ("cpu", "cuda") or (device == "cuda" and not torch.cuda.is_available()):
@@ -288,25 +167,21 @@ def _run(
         torch.manual_seed(config["seed"])
         model = make_actor(contract).to(device)
         models.append(model)
-        training_rows = [r for r in rows if r["split"] == "train" and r["entry"]["bc_eligible"]]
+        training_rows = rows.select("train", eligible=True)
         if not training_rows or not any(
-            r["split"] != "train" and r["entry"]["bc_eligible"] for r in rows
+            rows.select(split, eligible=True) for split in ("development", "evaluation")
         ):
             raise ValueError(
                 "Temporal BC requires eligible train and independent held-out attempts"
             )
-        tensor_cache: dict[int, Any] = {}
 
         def tensor(frame: NumericFrame) -> Any:
-            key = id(frame)
-            if key not in tensor_cache:
-                width, height = frame.size
-                tensor_cache[key] = (
-                    torch.frombuffer(bytearray(frame.pixels), dtype=torch.uint8)
-                    .reshape(height, width, 3)
-                    .permute(2, 0, 1)
-                )
-            return tensor_cache[key]
+            width, height = frame.size
+            return (
+                torch.frombuffer(bytearray(frame.pixels), dtype=torch.uint8)
+                .reshape(height, width, 3)
+                .permute(2, 0, 1)
+            )
 
         optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
         started, losses, gradient = time.monotonic(), [], 0.0
@@ -352,7 +227,7 @@ def _run(
             "duration_s": time.monotonic() - started,
             "time_gradient_l1": gradient,
             "selection": "fixed final update; no held-out model selection",
-            "train_by_view": dict(Counter(r["view"] for r in training_rows)),
+            "train_by_view": {view: len(training_rows) // 2 for view in VIEWS},
         }
         manifest = {
             "version": 2,
@@ -389,7 +264,7 @@ def _run(
     if actor.original_contract != contract:
         raise ValueError("Snapshot model contract mismatch")
     records, max_error = [], 0.0
-    preview_paths: dict[int, str] = {}
+    preview_paths: dict[str, str] = {}
     preview_export: dict[str, Any] = {"status": "complete"}
     for row in rows:
         checkpoint("prediction", config["steps"] if training else 0)
@@ -404,10 +279,12 @@ def _run(
         without_history = actor.predict(masked_actions, decision.frames)
         previews: list[str | None] = []
         for frame in decision.frames:
-            if id(frame) not in preview_paths and preview_export["status"] == "complete":
-                temporary: Path | None = None
-                try:
+            pixel_digest = ""
+            temporary: Path | None = None
+            try:
+                if preview_export["status"] == "complete":
                     pixel_digest = hashlib.sha256(frame.pixels).hexdigest()
+                if pixel_digest and pixel_digest not in preview_paths:
                     relative = f"previews/{pixel_digest}.png"
                     target = output / relative
                     target.parent.mkdir(exist_ok=True)
@@ -417,21 +294,21 @@ def _run(
                         temporary = target.with_name(".pending-" + target.name)
                         temporary.write_bytes(preview_png(bytes(frame.pixels), frame.size))
                         temporary.replace(target)
-                    preview_paths[id(frame)] = relative
-                except (OSError, MemoryError) as error:
-                    preview_export = {
-                        "status": "unavailable",
-                        "error": f"{type(error).__name__}: {error}",
-                        "remaining": "deferred; rebuild with temporal-bc-replay",
-                    }
-                    if temporary is not None:
-                        try:
-                            temporary.unlink(missing_ok=True)
-                        except (OSError, MemoryError) as cleanup_error:
-                            preview_export["cleanup_error"] = (
-                                f"{type(cleanup_error).__name__}: {cleanup_error}"
-                            )
-            previews.append(preview_paths.get(id(frame)))
+                    preview_paths[pixel_digest] = relative
+            except (OSError, MemoryError) as error:
+                preview_export = {
+                    "status": "unavailable",
+                    "error": f"{type(error).__name__}: {error}",
+                    "remaining": "deferred; rebuild with temporal-bc-replay",
+                }
+                if temporary is not None:
+                    try:
+                        temporary.unlink(missing_ok=True)
+                    except (OSError, MemoryError) as cleanup_error:
+                        preview_export["cleanup_error"] = (
+                            f"{type(cleanup_error).__name__}: {cleanup_error}"
+                        )
+            previews.append(preview_paths.get(pixel_digest))
         if training:
             with torch.inference_mode():
                 model.eval()
@@ -448,6 +325,7 @@ def _run(
                     .tolist()
                 )
             max_error = max(max_error, max(abs(a - b) for a, b in zip(before, prediction)))
+        actor.clear_input_cache()
         records.append(
             {
                 "decision_id": decision.decision_id,

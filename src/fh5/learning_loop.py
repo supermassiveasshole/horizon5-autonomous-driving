@@ -34,6 +34,7 @@ from fh5.learning_io import (
 from fh5.learning_monitor import StorageMonitor, validate_monitor
 from fh5.learning_recovery import (
     archive_failed_sampling,
+    checkpoint_learning_evidence,
     completed_sampling,
     retryable_sampling,
     sampling_bindings,
@@ -734,7 +735,7 @@ class _Loop:
     ) -> None:
         history = self.update_history(number, row)
         learner = _learner(output, _sha(output / "policy.json"))
-        learned = json.loads(read_bounded(output / "training-report.json", 128 * 1024**2))
+        _, learned = checkpoint_learning_evidence(output, learner["sha256"])
         proposed = {
             **row,
             "sampling_parent": dict(row.get("sampling_parent", self.state["explorer"])),

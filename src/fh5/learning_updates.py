@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fh5.collection_store import read_bounded
-from fh5.learning_recovery import completed_sampling
+from fh5.artifact_io import VerifiedFile
+from fh5.learning_recovery import checkpoint_learning_evidence, completed_sampling
+from fh5.replay_document import read_document_fields
 from fh5.sac_cycle import SACCycle, SACRealtimeCycle, sampling_update_budget
 from fh5.sac_learning import validate_sac_candidate
 
@@ -35,14 +35,16 @@ def retained_update_progress(
         path = request.output_dir.parent / f"updates-{number:03d}"
         if Path(segment["directory"]) != path or completed >= earned:
             raise ValueError("Update continuation differs from its remaining credit")
-        previous = json.loads(read_bounded(Path(learner["directory"]) / "policy.json", 1024**2))
+        previous = read_document_fields(
+            VerifiedFile(Path(learner["directory"]) / "policy.json", learner["sha256"]),
+            {"configuration", "replay_sha256"},
+        )
         current = {
             "directory": str(path),
             "sha256": segment["sha256"],
             **validate_sac_candidate(path, segment["sha256"]),
         }
-        manifest = json.loads(read_bounded(path / "policy.json", 1024**2))
-        report = json.loads(read_bounded(path / "training-report.json", 128 * 1024**2))
+        manifest, report = checkpoint_learning_evidence(path, segment["sha256"])
         updates = report["steps_completed"]
         configuration = dict(previous["configuration"], steps=earned - completed)
         configuration.setdefault("raw_cache_bytes", 512 * 1024**2)
