@@ -4,6 +4,8 @@ import hashlib
 import json
 import shutil
 import sqlite3
+import subprocess
+import sys
 import threading
 import tracemalloc
 from pathlib import Path
@@ -205,4 +207,51 @@ def test_unavailable_snapshot_reports_an_error_without_changing_the_store(
     assert not output.out
     assert json.loads(output.err)["status"] == "error"
     assert "Snapshot storage unavailable" in output.err
+    assert database.read_bytes() == original
+
+
+def test_locked_source_reports_retryable_failure_without_unbounded_backup(tmp_path):
+    store = tmp_path / "versions"
+    store.mkdir()
+    database = store / "state.sqlite"
+    raw = json.dumps(
+        {"parent": None, "scope": "synthetic_development_only", "evidence": {}}
+    ).encode()
+    with sqlite3.connect(database) as setup:
+        setup.execute(
+            "CREATE TABLE events (sequence INTEGER PRIMARY KEY, revision TEXT, payload BLOB)"
+        )
+        setup.execute("PRAGMA user_version=1")
+        setup.execute("INSERT INTO events VALUES (1, ?, ?)", (hashlib.sha256(raw).hexdigest(), raw))
+    original = database.read_bytes()
+    locker = sqlite3.connect(database)
+    locker.execute("BEGIN EXCLUSIVE")
+    child = subprocess.Popen(
+        [sys.executable, "-m", "fh5", "candidate-history", "--store", str(store), "--limit", "0"],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    timed_out = False
+    try:
+        try:
+            # Observation window covers SQLite's default 5 s busy wait plus CLI
+            # startup; this is a test harness deadline, not a production quota.
+            stdout, stderr = child.communicate(timeout=15)
+        except subprocess.TimeoutExpired:
+            timed_out = True
+    finally:
+        locker.rollback()
+        locker.close()
+        if child.poll() is None:
+            try:
+                stdout, stderr = child.communicate(timeout=15)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.communicate()
+                raise
+    assert not timed_out, "History backup kept retrying instead of reporting the locked source"
+    assert child.returncode == 2 and not stdout
+    assert json.loads(stderr)["status"] == "error"
+    assert "busy" in stderr.lower() or "locked" in stderr.lower()
     assert database.read_bytes() == original

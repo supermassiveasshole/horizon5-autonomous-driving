@@ -96,6 +96,13 @@ def _events(db: sqlite3.Connection) -> Iterator[dict[str, Any]]:
         raise ValueError("Candidate store requires committed events")
 
 
+def _backup_progress(status: int, _remaining: int, _total: int) -> None:
+    if status in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED):
+        raise ValueError(
+            "Candidate history source is busy or locked; retry after the writer releases it"
+        )
+
+
 def _read_events(
     root: Path, *, digest_file: Callable[[Path], str] = sha256_file
 ) -> Iterator[dict[str, Any]]:
@@ -108,7 +115,7 @@ def _read_events(
                 with _database(root) as source:
                     # SQLite's smallest copy unit permits writes between backup steps.
                     # Release the source before attachment I/O or caller traversal.
-                    source.backup(snapshot, pages=1)
+                    source.backup(snapshot, pages=1, progress=_backup_progress)
                 for event in _events(snapshot):
                     for name, digest in event["evidence"].items():
                         if digest_file(asset(root, name)) != digest:

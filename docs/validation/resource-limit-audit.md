@@ -37,8 +37,10 @@
 
 ## 当前集成状态
 
-固定提交 `ea387db` 的全量回归已在独立检出启动：`runs/resource-integrated-full-20261002-results.xml`。
-开发检出与全量测试源码分离。结果未返回前，不宣称全量通过或完成合并；全仓审计仍按上表继续。
+固定提交 `ea387db` 的独立检出全量回归已结束：**1205 passed / 4918.15 秒**，
+结果 `runs/resource-integrated-full-20261002-results.xml`。该检出在测试期间保持冻结；
+结果不包含其后的检查点/归档/候选历史迁移，不替代这些片段的专项验证或宣称已合并。
+全仓审计仍按上表继续。
 
 尚未完成全仓清理。已封存模型/经验不得仅因附属报告失败被报为不存在；缺失原件或契约不符仍应明确隔离。
 
@@ -139,3 +141,11 @@ SQLite 源库读锁，慢速附件校验可能使并发候选事务失败。公�
 且读者保持原快照修订。结果 `runs/resource-history-review-final-20261002-results.xml`。
 Ruff、343 文件格式及 131 源文件 strict mypy 通过。私有快照需要实际临时磁盘空间，
 不能视为零成本；备份期间持续写入可能触发重做，不对完成时限作保证。
+
+固定 `3804fad...c28ff6e` 复审：Standards 0 项；Spec 指出 1 项 P2——备份接口在
+`SQLITE_BUSY` / `SQLITE_LOCKED` 状态会内部持续重试。真实 SQLite 独占锁和子进程 CLI
+反例先 **1 failed / 17.14 秒**；现根据接口状态返回可重试错误，释放临时文件，保留原库。
+没有添加生产超时或重试次数上限；测试的 15 秒仅为覆盖默认 SQLite 等待及进程启动的观察窗口。
+该反例 **1 passed / 8.82 秒**，最终资源专项 **10 passed / 48.87 秒**，
+结果 `runs/resource-history-busy-green-20261002-results.xml`、
+`runs/resource-history-busy-final-20261002-results.xml`。Ruff、343 文件格式及 131 源文件 mypy 通过。
