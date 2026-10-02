@@ -11,6 +11,7 @@ from tempfile import TemporaryDirectory
 from typing import Any
 
 from fh5.replay_document import ReplayArray
+from fh5.sac_provenance_index import replay_identity_key
 
 
 class ExperienceUnion:
@@ -37,7 +38,7 @@ class ExperienceUnion:
         # Re-reviewing or reformatting metadata does not create another interaction.
         added = self.database.execute(
             "INSERT OR IGNORE INTO origins VALUES (?, ?, ?)",
-            (entry["replay_sha256"], json.dumps(entry["source_hashes"]["packets"]), addition),
+            (entry["replay_sha256"], replay_identity_key(entry["source_hashes"]["packets"]), addition),
         ).rowcount
         if not added:
             raise ValueError("Duplicate SAC experience cannot earn new update credit")

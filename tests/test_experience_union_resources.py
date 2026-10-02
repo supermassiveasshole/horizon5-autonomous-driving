@@ -78,14 +78,14 @@ def test_experience_can_grow_past_ten_thousand_transitions_and_keep_training(tmp
             assert hashlib.file_digest(stream, "sha256").hexdigest() == entry["replay_sha256"]
 
 
-@pytest.mark.parametrize("origin", ["e" * 64, None])
-def test_reformatted_origin_cannot_earn_duplicate_credit_in_a_union(tmp_path, origin):
+@pytest.mark.parametrize("origins", [("e" * 64, "e" * 64), (None, None), (1, 1.0), (1, True)])
+def test_reformatted_origin_cannot_earn_duplicate_credit_in_a_union(tmp_path, origins):
     parent, replay = small_parent(tmp_path)
     template = json.loads(replay.read_bytes())
     additions = []
     for i in range(2):
         document = deepcopy(template)
-        document["source_hashes"]["packets"] = origin
+        document["source_hashes"]["packets"] = origins[i]
         document["notes"] = [f"review-{i}"]
         path = replay.with_name(f"review-{i}.json")
         path.write_text(json.dumps(document), encoding="utf-8")

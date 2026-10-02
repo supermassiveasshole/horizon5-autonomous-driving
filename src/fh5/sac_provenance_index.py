@@ -70,7 +70,7 @@ class ReplayRoles:
     def check_identity(self, identity: Any) -> None:
         with _index_errors():
             added = self.database.execute(
-                "INSERT OR IGNORE INTO identities VALUES (?)", (_identity(identity),)
+                "INSERT OR IGNORE INTO identities VALUES (?)", (replay_identity_key(identity),)
             ).rowcount
         if not added:
             raise ValueError("Duplicate SAC transition")
@@ -79,11 +79,11 @@ class ReplayRoles:
         with _index_errors():
             self.database.execute(
                 "INSERT OR REPLACE INTO originals VALUES (?, ?, ?, ?, 0)",
-                (source, _identity(row["id"]), json.dumps(row), role),
+                (source, replay_identity_key(row["id"]), json.dumps(row), role),
             )
 
     def take_original(self, source: Any, identity: Any) -> tuple[dict[str, Any], str]:
-        key = source, _identity(identity)
+        key = source, replay_identity_key(identity)
         with _index_errors():
             row = self.database.execute(
                 "SELECT data, role, used FROM originals WHERE source = ? AND identity = ?", key
@@ -96,8 +96,8 @@ class ReplayRoles:
         return json.loads(row[0]), str(row[1])
 
 
-def _identity(value: Any) -> str:
-    # Preserve the legacy dictionary's equality for JSON scalar identities,
+def replay_identity_key(value: Any) -> str:
+    # Preserve legacy dictionary/set equality for JSON scalar identities,
     # including 1 == 1.0 == True, without retaining an in-memory set.
     if isinstance(value, (int, float)):
         if isinstance(value, int):
@@ -105,7 +105,7 @@ def _identity(value: Any) -> str:
         elif value.is_integer():
             value = int(value)
     elif not isinstance(value, (str, type(None))):
-        raise ValueError("SAC transition identity must be a JSON scalar")
+        raise ValueError("SAC replay identity must be a JSON scalar")
     return json.dumps(value)
 
 
