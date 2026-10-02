@@ -348,7 +348,7 @@ Ruff、350 文件格式及 133 源文件 strict mypy 通过。另有父更新恢
 Ruff、353 文件格式及 134 源文件 mypy 通过。
 固定 `8c90f60...5da4784` 独立只读审阅：**Standards 0 项、Spec 0 项**。
 
-## 审阅报告目录按需保留（验证中）
+## 审阅报告目录按需保留
 
 不再因保留了十个派生审阅目录而停止父循环。报告各自独立保存，父状态只存最近计划目录/序号；
 已有目录、部分文件及链接不覆盖，旧路径数组留原值而不再追加。没有新建驾驶尝试或重置学习计数。
@@ -360,4 +360,6 @@ Ruff、353 文件格式及 134 源文件 mypy 通过。
 
 固定 `e1f2f24...cf86523` 审阅：Standards 0 项，Spec 1 项 P2。
 Windows 悬空目录联接不满足 `exists()` 或 `is_symlink()`，被反复选作下一报告目录。
-以真实 junction 复现 **1 failed / 39.76 秒**；已补查 `is_junction()`，扩展组合验证进行中。
+以真实 junction 复现 **1 failed / 39.76 秒**；补查 `is_junction()` 后扩展组合
+**8 passed / 146.84 秒**，结果 `runs/resource-review-growth-final-20261002-results.xml`。
+Ruff、354 文件格式及 134 源文件 mypy 通过；固定 `e1f2f24...3be41df` 最终审阅两轴各 0 项。
