@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sqlite3
 from collections.abc import Iterator, Sequence
 from contextlib import closing, contextmanager
@@ -13,6 +14,8 @@ from tempfile import TemporaryDirectory
 from typing import Any, TextIO, overload
 
 from fh5.artifact_io import VerifiedFile
+
+_NON_WHITESPACE = re.compile(r"[^ \t\r\n]")
 
 
 @contextmanager
@@ -75,20 +78,19 @@ class _JSONInput:
         self.eof = False
         self.decoder = json.JSONDecoder()
 
-    def more(self) -> None:
-        # Standard I/O quantum. One nested record can span any number of blocks.
-        block = self.stream.read(io.DEFAULT_BUFFER_SIZE)
+    def more(self, characters: int = io.DEFAULT_BUFFER_SIZE) -> None:
+        block = self.stream.read(characters)
         self.buffer = self.buffer[self.position :] + block
         self.position = 0
         self.eof = not block
 
     def peek(self) -> str:
         while True:
-            remaining = self.buffer[self.position :]
-            stripped = remaining.lstrip(" \t\r\n")
-            self.position += len(remaining) - len(stripped)
-            if stripped:
-                return stripped[0]
+            found = _NON_WHITESPACE.search(self.buffer, self.position)
+            if found is not None:
+                self.position = found.start()
+                return found.group()
+            self.position = len(self.buffer)
             if self.eof:
                 return ""
             self.more()
@@ -117,7 +119,9 @@ class _JSONInput:
                         raise ValueError("Malformed replay JSON value suffix")
                     self.position = end
                     return value
-            self.more()
+            # Retry a growing nested record geometrically, so failed decodes
+            # revisit only linear text. This is not an admission size limit.
+            self.more(max(io.DEFAULT_BUFFER_SIZE, len(self.buffer) - self.position))
 
     def document(self, index: sqlite3.Connection) -> dict[str, Any]:
         self.take("{")
