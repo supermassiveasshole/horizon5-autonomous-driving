@@ -1223,3 +1223,6 @@ JUnit 为 `.scratch/streaming-experience/runs/resource-loss-full-20261003-result
 Standards 提出一项 P3 维护建议：两个配置测试重复实现文件读取故障包装。
 已提取共享外部文件故障夹具，相关配置检查 **25 passed / 2 deselected / 1.27 秒**，
 `runs/resource-config-review-fixture.xml`。同时删除了已过时的旧回归待定文字。
+
+固定最终差异 `4ae68a7...3a789fb` 独立复审：**Standards 0 项、Spec 0 项**。
+审阅和本批提交均不包含未接入、未验证通过的 BC 中途恢复原型。
