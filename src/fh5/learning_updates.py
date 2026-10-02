@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fh5.artifact_io import VerifiedFile
+from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.learning_recovery import checkpoint_learning_evidence, completed_sampling
 from fh5.replay_document import read_document_fields
 from fh5.sac_cycle import SACCycle, SACRealtimeCycle, sampling_update_budget
@@ -19,10 +18,14 @@ class UpdateProgress:
     learner: dict[str, Any]
     earned: int
     completed: int
+    segments: int
 
 
 def retained_update_progress(
-    request: SACCycle | SACRealtimeCycle, parent: dict[str, Any], segments: Iterable[dict[str, Any]]
+    request: SACCycle | SACRealtimeCycle,
+    parent: dict[str, Any],
+    acknowledged_sha256: str,
+    acknowledged_updates: int,
 ) -> UpdateProgress:
     summary, learner = completed_sampling(request, parent, allow_stopped_updates=True)
     attempt = summary["attempts"][0]
@@ -31,20 +34,22 @@ def retained_update_progress(
         request.max_updates_per_attempt if isinstance(request, SACRealtimeCycle) else None,
     )
     completed = attempt["learner_updates"]
-    for number, segment in enumerate(segments):
-        path = request.output_dir.parent / f"updates-{number:03d}"
-        if Path(segment["directory"]) != path or completed >= earned:
+    acknowledged = learner["sha256"] == acknowledged_sha256 and completed == acknowledged_updates
+    segments = 0
+    while (path := request.output_dir.parent / f"updates-{segments:03d}").exists():
+        if completed >= earned:
             raise ValueError("Update continuation differs from its remaining credit")
         previous = read_document_fields(
             VerifiedFile(Path(learner["directory"]) / "policy.json", learner["sha256"]),
             {"configuration", "replay_sha256"},
         )
+        digest = sha256_file(path / "policy.json")
         current = {
             "directory": str(path),
-            "sha256": segment["sha256"],
-            **validate_sac_candidate(path, segment["sha256"]),
+            "sha256": digest,
+            **validate_sac_candidate(path, digest),
         }
-        manifest, report = checkpoint_learning_evidence(path, segment["sha256"])
+        manifest, report = checkpoint_learning_evidence(path, digest)
         updates = report["steps_completed"]
         configuration = dict(previous["configuration"], steps=earned - completed)
         configuration.setdefault("raw_cache_bytes", 512 * 1024**2)
@@ -73,4 +78,8 @@ def retained_update_progress(
             raise ValueError("Update continuation changed its credit, replay or ancestry")
         completed += updates
         learner = current
-    return UpdateProgress(learner, earned, completed)
+        segments += 1
+        acknowledged |= digest == acknowledged_sha256 and completed == acknowledged_updates
+    if not acknowledged:
+        raise ValueError("Stopped updates lost their acknowledged checkpoint or progress")
+    return UpdateProgress(learner, earned, completed, segments)

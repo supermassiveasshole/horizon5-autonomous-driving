@@ -16,7 +16,7 @@ from fh5.learning_loop import LearningContinue
 from fh5.sac_learning import SACResume
 
 
-def test_update_bindings_are_external_and_legacy_bindings_remain_readable(tmp_path, seeded_loop):
+def test_legacy_update_bindings_are_removed_without_changing_old_files(tmp_path, seeded_loop):
     request, first = stopped_sampling(tmp_path, seeded_loop)
     root = request.output_dir
     stop = root / "stop.request"
@@ -28,38 +28,35 @@ def test_update_bindings_are_external_and_legacy_bindings_remain_readable(tmp_pa
         ).summary["learning_loop"]
     assert stopped["stop_reason"] == "stop_requested"
     assert stopped["learner_updates"] == 0 and stopped["eligible_transitions"] == 3
-    index = stopped["rounds"][0]["update_segments"]
-    assert isinstance(index, dict), "Parent state must not accumulate update bindings"
-    assert index["format"] == "learning-update-history-v1" and index["count"] == 1
+    assert "update_segments" not in stopped["rounds"][0]
+    checkpoint = root / "round-000/updates-000/policy.json"
+    sealed = sha(checkpoint)
+    entry = {"directory": str(checkpoint.parent), "sha256": sealed}
+    # Old metadata is redundant with the genuine checkpoint and its continuation ancestry.
     node_path = root / "round-000/update-history/000000.json"
-    assert sha(node_path) == index["head_sha256"]
-    node = json.loads(node_path.read_bytes())
-    assert node["previous_sha256"] is None
-    assert node["entry"] == {
-        "directory": str(root / "round-000/updates-000"),
-        "sha256": stopped["latest_learner"]["sha256"],
-    }
-    # Reconstruct the old public state representation without changing learner data.
+    node_path.parent.mkdir()
+    node_path.write_text(
+        json.dumps({"format": "learning-update-node-v1", "previous_sha256": None, "entry": entry})
+    )
+    original = node_path.read_bytes()
     state = json.loads((root / "state.json").read_bytes())
-    state["rounds"][0]["update_segments"] = [node["entry"]]
+    state["rounds"][0]["update_segments"] = [entry]
     (root / "state.json").write_text(json.dumps(state))
+    stop.unlink()
     backend = SharedBackend(seeded_loop[0])
     continued = run_experiment(
         LearningContinue(root, sha(root / "state.json")), learning_environment=backend
     ).summary["learning_loop"]
-    assert continued["stop_reason"] == "stop_requested" and not backend.leases
-    assert continued["latest_learner"] == stopped["latest_learner"]
+    assert continued["stop_reason"] == "budget_completed", continued.get("error")
+    assert continued["learner_updates"] == 3 and continued["rounds_completed"] == 1
+    assert continued["latest_learner"]["total_steps"] == 33
     assert continued["eligible_transitions"] == first["eligible_transitions"]
-    original = node_path.read_bytes()
-    stop.unlink()
-    with stop_on_creation(root / "round-000/updates-001", stop):
-        migrated = run_experiment(
-            LearningContinue(root, sha(root / "state.json")),
-            learning_environment=SharedBackend(seeded_loop[0]),
-        ).summary["learning_loop"]
-    assert migrated["stop_reason"] == "stop_requested"
-    assert migrated["rounds"][0]["update_segments"]["count"] == 2
-    assert len(update_bindings(root, migrated["rounds"][0])) == 2
+    assert "update_segments" not in continued["rounds"][0]
+    assert "update_segments" not in json.loads((root / "state.json").read_bytes())["rounds"][0]
+    assert len(update_bindings(root, continued["rounds"][0])) == 2
+    assert len(backend.leases) == 1 and not hasattr(backend.leases[0], "commands")
+    assert backend.closed and continued["resources_released"]
+    assert sha(checkpoint) == sealed
     assert node_path.read_bytes() == original
 
 
@@ -75,6 +72,7 @@ def test_more_than_ten_stopped_continuations_keep_the_original_credit(tmp_path, 
             ).summary["learning_loop"]
         assert result["stop_reason"] == "stop_requested", result.get("error")
         assert result["learner_updates"] == 0 and result["eligible_transitions"] == 3
+        assert "update_segments" not in result["rounds"][0]
         assert len(update_bindings(root, result["rounds"][0])) == attempt + 1
         assert not backend.leases and result["resources_released"]
     stop.unlink()
@@ -97,7 +95,7 @@ def test_more_than_ten_stopped_continuations_keep_the_original_credit(tmp_path, 
 
 
 @pytest.mark.parametrize("damage", ["delete", "change"])
-def test_required_update_index_damage_cannot_advance_parent_or_open_environment(
+def test_acknowledged_checkpoint_damage_cannot_advance_parent_or_open_environment(
     tmp_path, seeded_loop, damage
 ):
     request, _ = stopped_sampling(tmp_path, seeded_loop)
@@ -110,11 +108,12 @@ def test_required_update_index_damage_cannot_advance_parent_or_open_environment(
         )
     state = root / "state.json"
     prior = state.read_bytes()
-    node = root / "round-000/update-history/000000.json"
+    checkpoint = root / "round-000/updates-000/policy.json"
     if damage == "delete":
-        node.unlink()
+        checkpoint.unlink()
     else:
-        node.write_bytes(node.read_bytes() + b" ")
+        checkpoint.write_bytes(checkpoint.read_bytes() + b" ")
+    stop.unlink()
     backend = SharedBackend(seeded_loop[0])
     with pytest.raises((OSError, ValueError)):
         run_experiment(LearningContinue(root, sha(state)), learning_environment=backend)
@@ -123,41 +122,45 @@ def test_required_update_index_damage_cannot_advance_parent_or_open_environment(
     assert not (root / "round-000/updates-001").exists()
 
 
-def test_failed_index_publication_keeps_sealed_updates_for_later_acknowledgment(
+def test_continuation_completes_original_budget_without_update_history_writes(
     tmp_path, seeded_loop, monkeypatch
 ):
     request, first = stopped_sampling(tmp_path, seeded_loop)
     root, stop = request.output_dir, request.output_dir / "stop.request"
     stop.unlink()
     original_replace = Path.replace
-    failed = []
+    sidecar_writes = []
 
     def unavailable_index(path, target):
         if Path(target).parent.name == "update-history":
-            failed.append(Path(target))
+            sidecar_writes.append(Path(target))
             raise OSError("update index publication unavailable")
         return original_replace(path, target)
 
+    backend = SharedBackend(seeded_loop[0])
     with monkeypatch.context() as fault:
         fault.setattr(Path, "replace", unavailable_index)
-        interrupted = run_experiment(
-            LearningContinue(root, sha(root / "state.json")),
-            learning_environment=SharedBackend(seeded_loop[0]),
+        completed = run_experiment(
+            LearningContinue(root, sha(root / "state.json")), learning_environment=backend
         ).summary["learning_loop"]
-    assert failed and interrupted["stop_reason"] == "interface_error"
-    assert "update index publication unavailable" in interrupted["error"]
-    assert interrupted["latest_learner"] == first["latest_learner"]
-    assert interrupted["learner_updates"] == 0
+    assert completed["stop_reason"] == "budget_completed", completed.get("error")
+    assert not sidecar_writes and not (root / "round-000/update-history").exists()
+    assert "update_segments" not in completed["rounds"][0]
+    assert completed["latest_learner"]["total_steps"] == first["latest_learner"]["total_steps"] + 3
+    assert completed["learner_updates"] == completed["eligible_transitions"] == 3
+    assert completed["rounds_completed"] == 1
+    assert len(backend.leases) == 1 and not hasattr(backend.leases[0], "commands")
+    assert backend.closed and completed["resources_released"]
     checkpoint = root / "round-000/updates-000/policy.json"
     sealed = sha(checkpoint)
-    stop.write_text("keep the recovered learner without opening evaluation")
-    backend = SharedBackend(seeded_loop[0])
-    recovered = run_experiment(
-        LearningContinue(root, sha(root / "state.json")), learning_environment=backend
+    repeated_backend = SharedBackend(seeded_loop[0])
+    repeated = run_experiment(
+        LearningContinue(root, sha(root / "state.json")), learning_environment=repeated_backend
     ).summary["learning_loop"]
-    assert recovered["stop_reason"] == "stop_requested", recovered.get("error")
-    assert recovered["learner_updates"] == recovered["eligible_transitions"] == 3
-    assert recovered["latest_learner"]["sha256"] == sealed == sha(checkpoint)
-    assert recovered["latest_learner"]["total_steps"] == 33
-    assert len(update_bindings(root, recovered["rounds"][0])) == 1
-    assert not backend.leases and backend.closed
+    assert repeated["stop_reason"] == "budget_completed", repeated.get("error")
+    assert repeated["learner_updates"] == repeated["eligible_transitions"] == 3
+    assert repeated["latest_learner"]["sha256"] == sealed == sha(checkpoint)
+    assert repeated["latest_learner"]["total_steps"] == 33
+    assert len(update_bindings(root, repeated["rounds"][0])) == 1
+    assert not (root / "round-000/updates-001").exists()
+    assert not repeated_backend.leases and repeated_backend.closed
