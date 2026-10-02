@@ -38,6 +38,7 @@ from fh5.learning_recovery import (
     sampling_bindings,
     verify_archived_sampling,
 )
+from fh5.learning_stages import StageHistory
 from fh5.learning_updates import UpdateProgress, retained_update_progress
 from fh5.numeric_images import PixelContract
 from fh5.presentation import optional_report
@@ -202,6 +203,7 @@ class _Loop:
         self.stop_lock = Lock()
         self.store = Path(config["store"]["directory"])
         self.registry = Path(config["registry"])
+        self.stages = StageHistory(root)
         self.state: dict[str, Any] = {
             "version": 1,
             "scope": "synthetic_development_only",
@@ -220,16 +222,10 @@ class _Loop:
             "child_resources_released": True,
         }
 
-    def save(self, phase: str) -> None:
-        if len(self.state["stages"]) >= 1000:
-            raise ValueError("Learning session exceeds 1000 state transitions")
+    def save(self, phase: str, *, final: bool = False) -> None:
         self.state["phase"] = phase
-        self.state["stages"].append(
-            {
-                "phase": phase,
-                "at_ns": time.perf_counter_ns(),
-                "round": len(self.state["rounds"]) - 1,
-            }
+        self.state["stages"] = self.stages.record(
+            phase, time.perf_counter_ns(), len(self.state["rounds"]) - 1, final=final
         )
         atomic_json(self.root / "state.json", self.state)
 
@@ -378,7 +374,7 @@ class _Loop:
         path = self.root / "state.json"
         if _sha(path) != expected:
             raise ValueError("Learning continuation state changed")
-        state = json.loads(read_bounded(path, 4 * 1024**2))
+        state = read_json(path, expected_sha256=expected)
         if (
             state["version"] != 1
             or state["scope"] != "synthetic_development_only"
@@ -386,6 +382,7 @@ class _Loop:
         ):
             raise ValueError("Learning continuation configuration changed")
         self.state = state
+        self.stages = StageHistory(self.root, state["stages"])
         if state["child_resources_released"] is not True:
             raise ValueError("Learning continuation refuses unreleased child resources")
         if any(not row["resources_released"] for row in state.get("storage_monitors", [])):
@@ -459,8 +456,8 @@ class _Loop:
                 {
                     "stop_reason": state["stop_reason"] if clean_stop else "unclean_exit",
                     "error": state.get("error") if clean_stop else None,
-                    "phase": state["stages"][-2]["phase"]
-                    if clean_stop and len(state["stages"]) > 1
+                    "phase": self.stages.before_stop(state["phase"])
+                    if clean_stop
                     else state["phase"],
                 }
             )
@@ -754,8 +751,8 @@ class _Loop:
         if not output.exists():
             return
         phase = self.state["phase"]
-        if phase == "stopped" and len(self.state["stages"]) >= 2:
-            phase = self.state["stages"][-2]["phase"]
+        if phase == "stopped":
+            phase = self.stages.before_stop(phase)
         if (
             phase != "resuming_updates"
             or self.state["rounds_completed"] != number
@@ -1243,9 +1240,12 @@ def run_learning_loop(
         lease.close()
         if not loop.state["resources_released"]:
             loop.state["stop_reason"] = "release_fault"
-        if publish:
-            loop.state["elapsed_seconds"] = time.monotonic() - began
-            loop.save("stopped")
+        try:
+            if publish:
+                loop.state["elapsed_seconds"] = time.monotonic() - began
+                loop.save("stopped", final=True)
+        finally:
+            loop.stages.close()
     atomic_json(root / "summary.json", loop.state)
     report = optional_report(
         root / "report.html",

@@ -5,6 +5,7 @@ import shutil
 from dataclasses import replace
 
 import pytest
+from learning_files import stage_records
 from test_candidate_store import candidates as candidates
 from test_candidate_store import record_config
 from test_evaluation import sha
@@ -160,7 +161,7 @@ def test_stop_during_sampling_closes_the_lease_without_updating_or_evaluating(
     assert len(backend.leases) == 1
     assert len(backend.leases[0].commands) == 1
     assert backend.leases[0].closed and result["resources_released"]
-    assert "driving" in [item["phase"] for item in result["stages"]]
+    assert "driving" in [item["phase"] for item in stage_records(request.output_dir, result)]
 
 
 def test_resume_evaluates_the_saved_learner_without_sampling_or_updating_it_twice(

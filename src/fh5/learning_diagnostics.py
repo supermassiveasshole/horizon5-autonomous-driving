@@ -68,14 +68,16 @@ class RecordJournal:
         except (OSError, MemoryError) as error:
             self.unavailable(error)
 
-    def finish(self) -> dict[str, Any]:
+    def checkpoint(self, *, close: bool = False) -> dict[str, Any]:
+        """Bind a durable prefix while allowing later records in this segment."""
         if self.stream is not None:
             try:
                 self.stream.flush()
                 os.fsync(self.stream.fileno())
             except (OSError, MemoryError) as error:
                 self.unavailable(error)
-        self.close()
+        if close:
+            self.close()
         return {
             "format": self.format,
             "path": self.path,
@@ -85,6 +87,9 @@ class RecordJournal:
             "error": self.error,
             "role": "optional_local_diagnostic; not required for checkpoint recovery",
         }
+
+    def finish(self) -> dict[str, Any]:
+        return self.checkpoint(close=True)
 
 
 class PredictionRecorder:
