@@ -178,10 +178,10 @@ def _run(
             or request.steps < 0
             or phase_budget < 1
             or type(request.batch_size) is not int
-            or not 1 <= request.batch_size <= 256
+            or request.batch_size < 1
             or not 0 < request.learning_rate <= 0.01
         ):
-            raise ValueError("Critic warm-up needs bounded steps, batch and learning rate")
+            raise ValueError("Critic warm-up needs valid steps, batch and learning rate")
         sources = [request.model_dir, request.replay_file.parent]
         if isinstance(operation, SACCriticResume):
             sources.append(operation.checkpoint_dir)

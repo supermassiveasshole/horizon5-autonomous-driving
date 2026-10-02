@@ -133,9 +133,9 @@ def _validate_configuration(request: SACTrain) -> None:
         type(request.steps) is not int
         or request.steps < 0
         or type(request.batch_size) is not int
-        or not 1 <= request.batch_size <= 256
+        or request.batch_size < 1
         or type(request.actor_interval) is not int
-        or not 1 <= request.actor_interval <= 10
+        or request.actor_interval < 1
         or any(
             not 0 < v <= 0.01
             for v in (request.critic_lr, request.actor_lr, request.encoder_lr, request.alpha_lr)
@@ -145,7 +145,7 @@ def _validate_configuration(request: SACTrain) -> None:
         or not -10 <= request.normalized_target_entropy <= 0
         or not 0 < request.tau <= 1
     ):
-        raise ValueError("Invalid bounded SAC learning configuration")
+        raise ValueError("Invalid SAC learning configuration")
 
 
 def _make_learner(
