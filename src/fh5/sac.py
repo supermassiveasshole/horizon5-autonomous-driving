@@ -375,17 +375,18 @@ def _run(
                     destination.lerp_(source, 0.005)
             updates += 1
             try:
-                journal.append(
-                    {
-                        "step": step + 1,
-                        "transition_ids": [
-                            replay["transitions"][i]["id"] for i in indices.tolist()
-                        ],
-                        "loss": float(loss.item()),
-                        "targets": expected_value.tolist(),
-                    }
-                )
-            except MemoryError as error:
+                if journal.error is None:
+                    journal.append(
+                        {
+                            "step": step + 1,
+                            "transition_ids": [
+                                replay["transitions"][i]["id"] for i in indices.tolist()
+                            ],
+                            "loss": float(loss.item()),
+                            "targets": expected_value.tolist(),
+                        }
+                    )
+            except (OSError, MemoryError) as error:
                 journal.unavailable(error)
     with torch.no_grad():
         after_q = _values(torch, critic, state_tensor, command_tensor)

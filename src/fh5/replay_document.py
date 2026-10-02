@@ -15,6 +15,15 @@ from typing import Any, TextIO, overload
 from fh5.artifact_io import VerifiedFile
 
 
+@contextmanager
+def _index_errors() -> Iterator[None]:
+    # Translate at the operation, before an optional caller decides to degrade.
+    try:
+        yield
+    except sqlite3.Error as error:
+        raise OSError("Cannot access replay document index: " + str(error)) from error
+
+
 class ReplayArray(Sequence[Any]):
     """Load individual records while the owning replay document is open."""
 
@@ -37,17 +46,21 @@ class ReplayArray(Sequence[Any]):
             key += self.length
         if not 0 <= key < self.length:
             raise IndexError(key)
-        row = self.database.execute(
-            "SELECT data FROM records WHERE section = ? AND position = ?", (self.section, key)
-        ).fetchone()
+        with _index_errors():
+            row = self.database.execute(
+                "SELECT data FROM records WHERE section = ? AND position = ?", (self.section, key)
+            ).fetchone()
         return json.loads(row[0])
 
     def __iter__(self) -> Iterator[Any]:
-        with closing(
-            self.database.execute(
-                "SELECT data FROM records WHERE section = ? ORDER BY position", (self.section,)
-            )
-        ) as rows:
+        with (
+            _index_errors(),
+            closing(
+                self.database.execute(
+                    "SELECT data FROM records WHERE section = ? ORDER BY position", (self.section,)
+                )
+            ) as rows,
+        ):
             for (raw,) in rows:
                 yield json.loads(raw)
 

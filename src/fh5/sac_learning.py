@@ -554,8 +554,6 @@ def _train(
         actor_critic_change = max(actor_critic_change, _difference(torch, before_actor, policy))
         entry = {
             "step": step + 1,
-            "transition_ids": [data.rows[i]["id"] for i in indices],
-            "source_roles": [data.roles[i] for i in indices],
             "critic_loss": float(critic_loss.detach()),
             "targets": expected.tolist(),
         }
@@ -615,7 +613,13 @@ def _train(
         ) or not torch.isfinite(log_alpha):
             raise ValueError("Non-finite SAC update")
         steps_completed += 1
-        journal.append(entry)
+        try:
+            if journal.error is None:
+                entry["transition_ids"] = [data.rows[i]["id"] for i in indices]
+                entry["source_roles"] = [data.roles[i] for i in indices]
+                journal.append(entry)
+        except (OSError, MemoryError) as error:
+            journal.unavailable(error)
     update_duration_s = time.monotonic() - started
     predictions_journal = RecordJournal(
         output, "diagnostics/predictions.jsonl", "sac-prediction-jsonl-v1"
