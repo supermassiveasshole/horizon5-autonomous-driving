@@ -27,6 +27,7 @@ from fh5.numeric_images import (
 )
 from fh5.numeric_previews import NumericPreviews
 from fh5.numeric_report import write_numeric_report
+from fh5.report_json import write_json
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -211,7 +212,9 @@ def _result(
     if path.exists() or path.with_suffix(".json").exists():
         raise FileExistsError(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.with_suffix(".json").write_bytes(_encode(summary))
+    with path.with_suffix(".json").open("w", encoding="utf-8", newline="\n") as stream:
+        write_json(stream, summary)
+        stream.write("\n")
     try:
         write_numeric_report(path, summary, root or path.parent)
     except (OSError, MemoryError) as error:

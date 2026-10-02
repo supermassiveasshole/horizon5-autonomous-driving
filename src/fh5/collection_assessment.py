@@ -12,12 +12,13 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fh5.artifact_io import VerifiedFile, sha256_file
-from fh5.bc_learning import VIEWS, _error
 from fh5.collection_store import read_bounded, write_file
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_recording import _result
 from fh5.numeric_report import preview_png
+from fh5.prediction_metrics import assessment_metrics
+from fh5.prediction_records import prediction_spool
 from fh5.replay_document import read_document_fields
 from fh5.temporal_data import temporal_snapshot
 from fh5.temporal_features import describe_time
@@ -92,49 +93,6 @@ def _overlap(model: dict[str, Any], heldout: list[dict[str, Any]]) -> bool:
     return False
 
 
-def _metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
-    result = {}
-    for view in VIEWS:
-        eligible = [r for r in records if r["view"] == view and r["scored"]]
-        groups = {r["group"] for r in eligible}
-        strata: dict[str, list[dict[str, Any]]] = {
-            name: [] for name in ("startup", "left", "right", "release_rt", "coast", "brake")
-        }
-        for row in eligible:
-            steer, pedal = row["target"]
-            prior = row["previous_action"]
-            for name, present in (
-                ("startup", row["actor"]["ego"]["speed_mps"] * 3.6 < 15 and pedal > 0.05),
-                ("left", steer < -0.2),
-                ("right", steer > 0.2),
-                ("release_rt", prior is not None and prior[1] > 0 and pedal <= 0),
-                ("coast", abs(pedal) <= 0.05),
-                ("brake", pedal < -0.05),
-            ):
-                if present:
-                    strata[name].append(row)
-
-        def scores(rows: list[dict[str, Any]]) -> dict[str, Any]:
-            return {
-                name: _error([dict(r, prediction=r[field]) for r in rows if r[field] is not None])
-                for name, field in (
-                    ("candidate", "prediction"),
-                    ("baseline", "baseline_prediction"),
-                    ("copy_recent_action", "previous_action"),
-                )
-            }
-
-        result[view] = {
-            **scores(eligible),
-            "independent_groups": len(groups),
-            "strata": {
-                name: {**scores(rows), "independent_groups": len({r["group"] for r in rows})}
-                for name, rows in strata.items()
-            },
-        }
-    return result
-
-
 def assess_collection_bc(request: CollectionBCAssess) -> RunResult:
     if request.output_dir.exists():
         raise FileExistsError(request.output_dir)
@@ -206,7 +164,7 @@ def assess_collection_bc(request: CollectionBCAssess) -> RunResult:
     if any(request.output_dir.resolve().is_relative_to(p.resolve()) for p in roots):
         raise ValueError("Assessment output must be separate from frozen inputs")
     torch = importlib.import_module("torch")
-    with preserve_torch_state(torch), ExitStack() as resources:
+    with preserve_torch_state(torch), ExitStack() as resources, prediction_spool() as records:
         torch.set_num_threads(2)
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.use_deterministic_algorithms(True)
@@ -226,8 +184,6 @@ def assess_collection_bc(request: CollectionBCAssess) -> RunResult:
             challenger = None
         request.output_dir.mkdir(parents=True)
         (request.output_dir / "previews").mkdir()
-        previews = {}
-        records = []
         for row in rows:
             decision = row["decision"]
             prediction = actor.predict(decision.actor, decision.frames)
@@ -235,13 +191,11 @@ def assess_collection_bc(request: CollectionBCAssess) -> RunResult:
             images = []
             for frame in decision.frames:
                 pixel_hash = hashlib.sha256(frame.pixels).hexdigest()
-                if pixel_hash not in previews:
-                    path = "previews/" + pixel_hash + ".png"
-                    write_file(
-                        request.output_dir / path, preview_png(bytes(frame.pixels), frame.size)
-                    )
-                    previews[pixel_hash] = path
-                images.append(previews[pixel_hash])
+                path = "previews/" + pixel_hash + ".png"
+                target = request.output_dir / path
+                if not target.exists():
+                    write_file(target, preview_png(bytes(frame.pixels), frame.size))
+                images.append(path)
             actor.clear_input_cache()
             if challenger:
                 challenger.clear_input_cache()
@@ -275,6 +229,7 @@ def assess_collection_bc(request: CollectionBCAssess) -> RunResult:
                     "previews": images,
                 }
             )
+        records.freeze()
         actor.clear_input_cache()
         if challenger:
             challenger.clear_input_cache()
@@ -306,6 +261,14 @@ def assess_collection_bc(request: CollectionBCAssess) -> RunResult:
         _model(config["candidate"], base)
         if config["baseline"] is not None:
             _model(config["baseline"], base)
+        try:
+            metrics = assessment_metrics(records)
+        except (OSError, MemoryError) as error:
+            metrics = {
+                "status": "unavailable",
+                "error": f"{type(error).__name__}: {error}",
+                "remaining": "deferred; rebuild with collection-bc-assess",
+            }
         summary = {
             "version": 1,
             "mode": config["mode"],
@@ -321,7 +284,7 @@ def assess_collection_bc(request: CollectionBCAssess) -> RunResult:
             "closed_loop_validated": False,
             "decisions": records,
             "groups": heldout,
-            "metrics": _metrics(records),
+            "metrics": metrics,
             "verification": verification,
             "scope": "offline action errors; not driving ability, task reward or promotion",
         }

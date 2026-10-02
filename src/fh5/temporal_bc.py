@@ -13,8 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fh5.artifact_io import sha256_file
-from fh5.bc_learning import VIEWS, _checked_config, _error, _write
+from fh5.artifact_io import VerifiedFile, sha256_file
+from fh5.bc_learning import VIEWS, _checked_config, _write
 from fh5.bc_network import make_actor
 from fh5.collection_store import read_bounded
 from fh5.learning_runtime import TrainingBudget, move_learning_state, preserve_torch_state
@@ -25,6 +25,9 @@ from fh5.numeric_images import (
 )
 from fh5.numeric_recording import _result
 from fh5.numeric_report import preview_png
+from fh5.prediction_metrics import temporal_metrics
+from fh5.prediction_records import PredictionRecords, prediction_spool
+from fh5.replay_document import replay_document
 from fh5.temporal_data import temporal_snapshot
 from fh5.temporal_features import (
     TEMPORAL_ARCHITECTURE,
@@ -94,18 +97,19 @@ def run_temporal_bc(
     cpu_threads: int = 2,
 ) -> RunResult:
     torch = importlib.import_module("torch")
-    with preserve_torch_state(torch), ExitStack() as resources:
+    with preserve_torch_state(torch), ExitStack() as resources, prediction_spool() as records:
         torch.set_num_threads(cpu_threads)
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.benchmark = False
-        return _run(request, torch, resources, budget)
+        return _run(request, torch, resources, records, budget)
 
 
 def _run(
     request: TemporalBCTrain | TemporalBCReplay,
     torch: Any,
     resources: ExitStack,
+    records: PredictionRecords,
     budget: TrainingBudget | None = None,
 ) -> RunResult:
     from fh5.numeric_actor import FrozenNumericActor
@@ -257,14 +261,13 @@ def _run(
             },
             output / "actor.pt",
         )
-        manifest["weights_sha256"] = hashlib.sha256((output / "actor.pt").read_bytes()).hexdigest()
+        manifest["weights_sha256"] = sha256_file(output / "actor.pt")
         _write(output / "model.json", manifest)
     actor = FrozenNumericActor(output, pixels, device)
     models.append(actor.model)
     if actor.original_contract != contract:
         raise ValueError("Snapshot model contract mismatch")
-    records, max_error = [], 0.0
-    preview_paths: dict[str, str] = {}
+    max_error = 0.0
     preview_export: dict[str, Any] = {"status": "complete"}
     for row in rows:
         checkpoint("prediction", config["steps"] if training else 0)
@@ -279,12 +282,11 @@ def _run(
         without_history = actor.predict(masked_actions, decision.frames)
         previews: list[str | None] = []
         for frame in decision.frames:
-            pixel_digest = ""
+            relative: str | None = None
             temporary: Path | None = None
             try:
                 if preview_export["status"] == "complete":
                     pixel_digest = hashlib.sha256(frame.pixels).hexdigest()
-                if pixel_digest and pixel_digest not in preview_paths:
                     relative = f"previews/{pixel_digest}.png"
                     target = output / relative
                     target.parent.mkdir(exist_ok=True)
@@ -294,8 +296,8 @@ def _run(
                         temporary = target.with_name(".pending-" + target.name)
                         temporary.write_bytes(preview_png(bytes(frame.pixels), frame.size))
                         temporary.replace(target)
-                    preview_paths[pixel_digest] = relative
             except (OSError, MemoryError) as error:
+                relative = None
                 preview_export = {
                     "status": "unavailable",
                     "error": f"{type(error).__name__}: {error}",
@@ -308,7 +310,7 @@ def _run(
                         preview_export["cleanup_error"] = (
                             f"{type(cleanup_error).__name__}: {cleanup_error}"
                         )
-            previews.append(preview_paths.get(pixel_digest))
+            previews.append(relative)
         if training:
             with torch.inference_mode():
                 model.eval()
@@ -359,6 +361,7 @@ def _run(
             }
         )
     actor.clear_input_cache()
+    records.freeze()
     if training:
         if max_error > 1e-6:
             raise ValueError("Temporal frozen reload prediction drift exceeds tolerance")
@@ -374,8 +377,13 @@ def _run(
         evidence = manifest.get("verification")
         if not evidence or evidence["tolerance"] != 1e-6:
             raise ValueError("Temporal model lacks frozen prediction verification evidence")
-        prior_report, prior_digest = _read(asset(output, evidence["path"]))
-        if prior_digest != evidence["sha256"] or len(prior_report["decisions"]) != len(records):
+        prior_path = asset(output, evidence["path"])
+        if sha256_file(prior_path) != evidence["sha256"]:
+            raise ValueError("Frozen temporal prediction evidence changed")
+        prior_report = resources.enter_context(
+            replay_document(VerifiedFile(prior_path, evidence["sha256"]))
+        )
+        if len(prior_report["decisions"]) != len(records):
             raise ValueError("Frozen temporal prediction evidence changed")
         replay_error = 0.0
         for previous, current in zip(prior_report["decisions"], records):
@@ -402,7 +410,14 @@ def _run(
             "max_abs_error": replay_error,
             "tolerance": evidence["tolerance"],
         }
-    metrics = _metrics(records)
+    try:
+        metrics = temporal_metrics(records)
+    except (OSError, MemoryError) as error:
+        metrics = {
+            "status": "unavailable",
+            "error": f"{type(error).__name__}: {error}",
+            "remaining": "deferred; rebuild with temporal-bc-replay",
+        }
     summary = {
         "version": 1,
         "contract": pixels.metadata(),
@@ -421,58 +436,8 @@ def _run(
     if training:
         manifest["verification"] = {
             "path": "report.json",
-            "sha256": hashlib.sha256(report.with_suffix(".json").read_bytes()).hexdigest(),
+            "sha256": sha256_file(report.with_suffix(".json")),
             "tolerance": 1e-6,
         }
         _write(output / "model.json", manifest)
     return result
-
-
-def _metrics(records: list[dict[str, Any]]) -> dict[str, Any]:
-    metrics: dict[str, Any] = {}
-    for split in ("train", "development", "evaluation"):
-        metrics[split] = {}
-        for view in VIEWS:
-            selected = [
-                r for r in records if r["split"] == split and r["view"] == view and r["scored"]
-            ]
-            variants: dict[str, Any] = {}
-            for name, rows in (
-                ("nominal", [r for r in selected if r["variant"] == 0]),
-                ("reselected", [r for r in selected if r["variant"] != 0]),
-            ):
-                strata: dict[str, list[dict[str, Any]]] = {}
-                for row in rows:
-                    speed = row["actor"]["ego"]["speed_mps"] * 3.6
-                    steer, longitudinal = row["target"]
-                    for kind, applies in (
-                        ("stationary", speed < 1),
-                        ("startup", speed < 15 and longitudinal > 0.05),
-                        ("left", steer < -0.2),
-                        ("right", steer > 0.2),
-                        ("throttle", longitudinal > 0.05),
-                        ("brake", longitudinal < -0.05),
-                        ("coast", abs(longitudinal) <= 0.05),
-                    ):
-                        if applies:
-                            strata.setdefault(kind, []).append(row)
-                variants[name] = {
-                    **_error(rows),
-                    "attempt_groups": len({r["group"] for r in rows}),
-                    "strata": {
-                        kind: {**_error(group), "attempt_groups": len({r["group"] for r in group})}
-                        for kind, group in strata.items()
-                    },
-                    "copy_recent_action": _error(
-                        [
-                            dict(r, prediction=r["previous_action"])
-                            for r in rows
-                            if r["previous_action"] is not None
-                        ]
-                    ),
-                    "without_action_history": _error(
-                        [dict(r, prediction=r["without_action_history_prediction"]) for r in rows]
-                    ),
-                }
-            metrics[split][view] = variants
-    return metrics

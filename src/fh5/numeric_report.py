@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import struct
 import zlib
 from pathlib import Path
@@ -10,6 +9,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fh5.numeric_images import asset
+from fh5.report_json import JsonArray, write_json
 
 
 def preview_png(pixels: bytes, size: tuple[int, int]) -> bytes:
@@ -37,14 +37,17 @@ def write_numeric_report(path: Path, summary: dict[str, Any], root: Path) -> Non
             return quote(target.relative_to(path.parent.resolve()).as_posix())
         return target.as_uri()
 
-    display = json.loads(json.dumps(summary))
-    for sample in (display.get("raw_samples") or {}).get("records", []):
+    def display_sample(original: dict[str, Any]) -> dict[str, Any]:
+        sample = dict(original)
         for key in ("preview", "model_preview"):
             try:
                 sample[key + "_url"] = preview_url(sample[key])
             except ValueError:
                 sample[key + "_url"] = None
-    for row in display["decisions"]:
+        return sample
+
+    def display_decision(original: dict[str, Any]) -> dict[str, Any]:
+        row = dict(original)
         references = (row.get("archive") or {}).get("previews", row.get("previews", []))
         urls: list[str | None] = []
         for relative in references:
@@ -56,6 +59,17 @@ def write_numeric_report(path: Path, summary: dict[str, Any], root: Path) -> Non
             except ValueError:
                 urls.append(None)
         row["preview_urls"] = urls
-    data = json.dumps(display, ensure_ascii=False, allow_nan=False).replace("<", "\\u003c")
+        return row
+
+    display = dict(summary, decisions=JsonArray(map(display_decision, summary["decisions"])))
+    if summary.get("raw_samples"):
+        samples = summary["raw_samples"]
+        display["raw_samples"] = dict(
+            samples, records=JsonArray(map(display_sample, samples.get("records", [])))
+        )
     template = Path(__file__).with_name("numeric-report.html").read_text(encoding="utf-8")
-    path.write_text(template.replace("/*NUMERIC_DATA*/null", data), encoding="utf-8")
+    before, after = template.split("/*NUMERIC_DATA*/null")
+    with path.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(before)
+        write_json(stream, display, script_safe=True)
+        stream.write(after)

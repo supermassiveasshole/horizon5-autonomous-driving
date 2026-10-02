@@ -184,13 +184,21 @@ def test_optional_cleanup_failure_preserves_the_original_error(
 def test_partial_html_releases_space_for_model_verification(tmp_path, monkeypatch):
     config, snapshot = temporal_fixture(tmp_path)
     model = tmp_path / "model"
-    original_text, original_open = Path.write_text, Path.open
+    original_open = Path.open
 
-    def partial_html(path, data, *args, **kwargs):
-        if path.suffix == ".html":
-            original_text(path, data[:16], *args, **kwargs)
+    class PartialHTML:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            self.stream.close()
+
+        def write(self, data):
+            self.stream.write(data[:16])
             raise OSError("ENOSPC while writing optional HTML")
-        return original_text(path, data, *args, **kwargs)
 
     def requires_reclaimed_space(path, mode="r", *args, **kwargs):
         if (
@@ -199,10 +207,12 @@ def test_partial_html_releases_space_for_model_verification(tmp_path, monkeypatc
             and (model / "report.html").exists()
         ):
             raise OSError("ENOSPC: partial HTML still occupies space")
-        return original_open(path, mode, *args, **kwargs)
+        stream = original_open(path, mode, *args, **kwargs)
+        if path.suffix == ".html" and any(flag in mode for flag in "wx"):
+            return PartialHTML(stream)
+        return stream
 
     with monkeypatch.context() as fault:
-        fault.setattr(Path, "write_text", partial_html)
         fault.setattr(Path, "open", requires_reclaimed_space)
         result = run_experiment(TemporalBCTrain(config, model))
     assert result.summary["temporal_bc"]["presentation"]["status"] == "unavailable"
