@@ -1312,4 +1312,9 @@ Torch `RuntimeError` / `OutOfMemoryError` 在像素和资源探测端口的反�
 公开反例 **1 failed / 3.11 秒**（`ownership-red.xml`）。改用真实网络的 meta 张量模式
 核对参数名称、顺序、形状和类型；模式构造不分配参数载荷或抽取 CPU RNG。
 全部恢复用例与调度/时序 BC 组合 **63 passed / 79.67 秒**（`reviewed.xml`），包括
-连续与中断接续的必要状态精确一致。后续固定提交复审与完整测试仍待完成。
+连续与中断接续的必要状态精确一致。
+
+固定 `9745dfd...6213ff8` 独立复审：Standards 0 项、Spec 0 项，两项原发现均已解决。
+Ruff、407 文件格式检查、148 源文件 strict mypy 通过。完整 CPU 回归已在独立冻结
+`6213ff8` 工作区启动，尚未取得结果：`runs/resource-bc-resume-full-20261003-results.xml`。
+该运行屏蔽 CUDA，不能据此声称 GPU 或实机验收。整体资源限制清理仍在进行。
