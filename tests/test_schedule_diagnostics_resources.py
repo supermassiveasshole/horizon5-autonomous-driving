@@ -17,7 +17,7 @@ from fh5.experiment import run_experiment
 from fh5.learning_schedule import ScheduledBCTrain
 
 
-class AlternatingResources:
+class BackloggedResources:
     source_kind = "synthetic"
 
     def __init__(self, output, samples=1103):
@@ -43,7 +43,7 @@ class AlternatingResources:
                 "heartbeat_ns": self.time,
                 "last_poll_ns": self.time,
                 "latest_image_source_ns": self.time,
-                "pending_bytes": 100 * 1024**2 if self.reads % 2 else 0,
+                "pending_bytes": 100 * 1024**2,
                 "dropped_rows": 0,
                 "seen_rows": self.reads,
             },
@@ -70,12 +70,12 @@ def request_for(tmp_path):
 
 def test_schedule_retains_all_samples_beyond_the_old_event_history_limit(tmp_path):
     request = request_for(tmp_path)
-    resources = AlternatingResources(request.output_dir)
+    resources = BackloggedResources(request.output_dir)
     result = run_experiment(request, learning_resources=resources)
     summary = result.summary["learning_schedule"]
     assert summary["state"] == "stopped" and summary["stop_reason"] == "requested_stop"
     assert summary["sample_count"] == 1103
-    assert summary["pressure_counts"] == {"collection_backlog": 552}
+    assert summary["pressure_counts"] == {"collection_backlog": 1103}
     assert summary["steps_completed"] == 0 and summary["candidate"] is None
     assert resources.closed
     history = summary["event_history"]
@@ -88,7 +88,7 @@ def test_schedule_retains_all_samples_beyond_the_old_event_history_limit(tmp_pat
     assert events[0]["sample"]["collector"]["seen_rows"] == 1
     assert events[-1]["sample"]["collector"]["seen_rows"] == 1103
     assert events[0]["reasons"] == events[-1]["reasons"] == ["collection_backlog"]
-    assert events[1]["reasons"] == []
+    assert events[1]["reasons"] == ["collection_backlog"]
     assert summary["events_omitted"] == 0
     assert summary["events_unverified"] == 0
     assert "events" not in summary
@@ -102,7 +102,7 @@ def test_schedule_retains_all_samples_beyond_the_old_event_history_limit(tmp_pat
 def test_optional_resource_details_do_not_control_admission_or_inflate_each_event(tmp_path, extra):
     request = request_for(tmp_path)
 
-    class ExtraDetails(AlternatingResources):
+    class ExtraDetails(BackloggedResources):
         def sample(self):
             sample = super().sample()
             sample["debug"] = extra
@@ -114,7 +114,7 @@ def test_optional_resource_details_do_not_control_admission_or_inflate_each_even
     ).summary["learning_schedule"]
     assert summary["stop_reason"] == "requested_stop"
     assert summary["sample_count"] == 3
-    assert summary["pressure_counts"] == {"collection_backlog": 2}
+    assert summary["pressure_counts"] == {"collection_backlog": 3}
     history = summary["event_history"]
     assert history["status"] == "complete" and history["records"] == 3
     with (request.output_dir / history["path"]).open(encoding="utf-8") as stream:
@@ -122,7 +122,7 @@ def test_optional_resource_details_do_not_control_admission_or_inflate_each_even
     assert len(events) == 3
     assert "debug" not in events[0]["sample"]
     assert "debug" not in events[0]["sample"]["collector"]
-    assert events[1]["reasons"] == []
+    assert events[1]["reasons"] == ["collection_backlog"]
 
 
 @pytest.mark.parametrize("operation", ["open", "write", "flush"])
@@ -163,13 +163,13 @@ def test_optional_schedule_journal_failure_preserves_resource_checks_and_stop(
         return opening(path, mode, *args, **kwargs)
 
     monkeypatch.setattr(Path, "open", unavailable)
-    resources = AlternatingResources(request.output_dir, samples=3)
+    resources = BackloggedResources(request.output_dir, samples=3)
     result = run_experiment(request, learning_resources=resources)
     summary = result.summary["learning_schedule"]
     assert failures == [operation]
     assert summary["stop_reason"] == "requested_stop"
     assert summary["sample_count"] == 3
-    assert summary["pressure_counts"] == {"collection_backlog": 2}
+    assert summary["pressure_counts"] == {"collection_backlog": 3}
     assert summary["event_history"]["status"] == "unavailable"
     assert "optional event storage unavailable" in summary["event_history"]["error"]
     assert summary["event_history"]["sha256"] is None
@@ -199,7 +199,7 @@ def test_invalid_required_resource_fields_remain_fail_closed_and_recordable(
 ):
     request = request_for(tmp_path)
 
-    class InvalidMetrics(AlternatingResources):
+    class InvalidMetrics(BackloggedResources):
         def sample(self):
             sample = super().sample()
             target = sample if section is None else sample[section]
@@ -218,7 +218,7 @@ def test_invalid_required_resource_fields_remain_fail_closed_and_recordable(
 def test_large_integer_resource_measurement_does_not_require_float_conversion(tmp_path):
     request = request_for(tmp_path)
 
-    class LargeIntegerMetric(AlternatingResources):
+    class LargeIntegerMetric(BackloggedResources):
         def sample(self):
             sample = super().sample()
             sample["free_disk_bytes"] = 10**400
@@ -229,7 +229,7 @@ def test_large_integer_resource_measurement_does_not_require_float_conversion(tm
     ).summary["learning_schedule"]
     assert summary["stop_reason"] == "requested_stop"
     assert summary["sample_count"] == 3
-    assert summary["pressure_counts"] == {"collection_backlog": 2}
+    assert summary["pressure_counts"] == {"collection_backlog": 3}
     history = summary["event_history"]
     with (request.output_dir / history["path"]).open(encoding="utf-8") as stream:
         first = json.loads(next(stream))
@@ -242,7 +242,7 @@ def test_optional_counter_encoding_failure_does_not_stop_resource_checks(tmp_pat
     if not digit_limit:
         pytest.skip("Interpreter has no decimal integer encoding limit")
 
-    class HugeOptionalCounter(AlternatingResources):
+    class HugeOptionalCounter(BackloggedResources):
         def sample(self):
             sample = super().sample()
             # Valid Python integer exceeds this interpreter's JSON digit interface.
@@ -254,7 +254,7 @@ def test_optional_counter_encoding_failure_does_not_stop_resource_checks(tmp_pat
     summary = run_experiment(request, learning_resources=resources).summary["learning_schedule"]
     assert summary["stop_reason"] == "requested_stop"
     assert summary["sample_count"] == 3 and resources.closed
-    assert summary["pressure_counts"] == {"collection_backlog": 2}
+    assert summary["pressure_counts"] == {"collection_backlog": 3}
     assert summary["steps_completed"] == 0
     assert summary["event_history"]["status"] == "unavailable"
     assert "ValueError" in summary["event_history"]["error"]
@@ -264,7 +264,7 @@ def test_optional_counter_encoding_failure_does_not_stop_resource_checks(tmp_pat
 def test_resource_limit_sample_is_retained_with_its_terminal_stop_reason(tmp_path):
     request = request_for(tmp_path)
 
-    class MemoryExhausted(AlternatingResources):
+    class MemoryExhausted(BackloggedResources):
         def sample(self):
             sample = super().sample()
             sample["process_private_bytes"] = 5 * 1024**3

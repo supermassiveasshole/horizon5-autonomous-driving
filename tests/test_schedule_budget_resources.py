@@ -223,7 +223,10 @@ def test_explicit_schedule_budget_can_complete_actual_cpu_updates(
     assert all(entry["step"].item() == 3 for entry in saved["optimizer"]["state"].values())
     assert saved["metadata"]["resume_contract"]["cpu_threads"] == 3
     report = json.loads((output / "candidate/report.json").read_bytes())
-    assert report["decisions"] and report["verification"]["status"] == "verified"
+    assert report["decisions"]
+    assert report["verification"]["status"] == "training_reload"
+    assert report["verification"]["compared_decisions"] == len(report["decisions"])
+    assert report["verification"]["max_abs_error"] == 0.0
     if journal_error is None:
         assert failures == [] and summary["event_history"]["status"] == "complete"
         assert summary["events_omitted"] == 0

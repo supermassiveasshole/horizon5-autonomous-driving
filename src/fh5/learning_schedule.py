@@ -244,7 +244,6 @@ class LearningSchedule:
         self.completed = completed
         self._check_limits(self.source.now_ns(), self.unit_started)
         waiting_since: int | None = None
-        healthy = 0
         while True:
             now = self.source.now_ns()
             self._check_limits(now)
@@ -275,15 +274,11 @@ class LearningSchedule:
             if stopped is not None:
                 raise stopped
             if not reasons:
-                healthy += 1
-                if waiting_since is None or healthy >= 2:
-                    self.unit_started = self.source.now_ns()
-                    if waiting_since is not None and resume:
-                        resume()
-                    self._check_limits(self.source.now_ns(), self.unit_started)
-                    return
-            else:
-                healthy = 0
+                self.unit_started = self.source.now_ns()
+                if waiting_since is not None and resume:
+                    resume()
+                self._check_limits(self.source.now_ns(), self.unit_started)
+                return
             if waiting_since is None:
                 waiting_since = now
                 self.pauses += 1

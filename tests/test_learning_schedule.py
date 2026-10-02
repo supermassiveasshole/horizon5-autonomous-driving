@@ -130,10 +130,20 @@ def configuration(tmp_path, **budget_changes):
 def test_pressure_pauses_actual_training_without_changing_the_frozen_candidate(tmp_path):
     from fh5.learning_schedule import ScheduledBCTrain
 
+    class WaitOnlyForPressure(Resources):
+        def sample(self):
+            sample = super().sample()
+            self.pressure = sample["collector"]["pending_bytes"] > 0
+            return sample
+
+        def wait(self, seconds):
+            assert self.pressure, "Resource budget is already satisfied; no extra wait is justified"
+            super().wait(seconds)
+
     config, training, dataset = configuration(tmp_path)
     frozen = dataset.read_bytes()
     plain = run_experiment(TemporalBCTrain(training, tmp_path / "plain")).summary["temporal_bc"]
-    resources = Resources(pressures=(5, 6))
+    resources = WaitOnlyForPressure(pressures=(5, 6))
     result = run_experiment(
         ScheduledBCTrain(config, tmp_path / "scheduled"), learning_resources=resources
     ).summary["learning_schedule"]
@@ -404,7 +414,18 @@ def test_device_transfer_cannot_dispatch_training_after_budget_or_stop(
 
     from fh5.learning_schedule import ScheduledBCTrain
 
-    resources = Resources(pressures=(3,))
+    class ClearingPressure(Resources):
+        saw_pressure = False
+        pressure_cleared = False
+
+        def sample(self):
+            sample = super().sample()
+            pressured = sample["collector"]["pending_bytes"] > 0
+            self.pressure_cleared = self.saw_pressure and not pressured
+            self.saw_pressure |= pressured
+            return sample
+
+    resources = ClearingPressure(pressures=(3,))
     config, _, _ = configuration(
         tmp_path,
         max_total_s=5 if fault == "total" else 120,
@@ -418,7 +439,7 @@ def test_device_transfer_cannot_dispatch_training_after_budget_or_stop(
         result = original_to(model, *args, **kwargs)
         # Model a slow external Torch device transfer after pressure clears.
         # Training, scheduling and optimizer logic remain real.
-        if resources.reads >= 5 and not delayed:
+        if resources.pressure_cleared and not delayed:
             delayed = True
             resources.time += 10
             if fault == "stop":
