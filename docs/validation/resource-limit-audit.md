@@ -311,3 +311,18 @@ Ruff、350 文件格式及 133 源文件 strict mypy 通过。另有父更新恢
 结果 `runs/resource-frame-change-green-20261002-results.xml`。Ruff、350 文件格式及 133 源文件 strict mypy 通过。
 固定 `3910558...3aa3181` 独立只读审阅：**Standards 0 项、Spec 0 项**。
 包含父阶段日志及像素读取修复的 `3aa3181` 已启动新全量回归，结果尚未返回，不记为通过。
+
+## learner 摘要分块
+
+状态摘要原先把完整张量字节展开为 Python 整数列表，增加保存/重载的临时内存。
+现在按标准库 I/O 缓冲粒度分块更新 SHA-256；没有张量允许大小门槛，保持 `canonical-cpu-tensors-v1` 原编码。
+模型、优化器及非连续张量整理的内存仍需另计。
+
+公开入口注入“不能整块展开 Python 字节列表”的外部 Torch 分配故障：修改前 **1 failed / 3.03 秒**，
+修改后 **1 passed / 2.76 秒**。真实三步后接续两步与连续五步的完整学习状态及预测相同。
+另外直接恢复修改前 `161b44d` 生成的五步检查点，摘要保持
+`75a49ddcb2420c7ab7276a446e3dbda16206587d2639f2585ea4b55bb9bd44f6`；
+证据 `runs/resource-fingerprint-legacy-compatibility.json`，不是以新算法生成的快照冒充旧格式验证。
+
+与 SAC/critic 续训及诊断故障组合 **53 passed / 27.94 秒**，
+结果 `runs/resource-fingerprint-integrated-20261002-results.xml`。Ruff、351 文件格式及 133 源文件 mypy 通过。

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 from collections.abc import Iterator
@@ -175,9 +176,12 @@ def state_digest(torch: Any, state: dict[str, Any]) -> str:
         if torch.is_tensor(value):
             tensor = value.detach().cpu().contiguous()
             add(["tensor", str(tensor.dtype), list(tensor.shape)])
-            raw = bytes(tensor.reshape(-1).view(torch.uint8).tolist())
-            digest.update(len(raw).to_bytes(8, "little"))
-            digest.update(raw)
+            octets = tensor.reshape(-1).view(torch.uint8)
+            digest.update(octets.numel().to_bytes(8, "little"))
+            # I/O transfer quantum, not an admission limit on tensor/model size.
+            # Keep canonical v1 bytes without a model-sized Python byte list.
+            for start in range(0, octets.numel(), io.DEFAULT_BUFFER_SIZE):
+                digest.update(bytes(octets[start : start + io.DEFAULT_BUFFER_SIZE].tolist()))
         elif isinstance(value, dict):
             digest.update(b"dict")
             for key in sorted(value, key=lambda k: (type(k).__name__, str(k))):
