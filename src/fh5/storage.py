@@ -287,7 +287,7 @@ class _Inventory:
 
 def measure_learning_storage(namespace: Path, run_dir: Path, state_sha256: str) -> dict[str, int]:
     """Account at a quiescent learning boundary without writing an external report."""
-    with storage_inventory() as index:
+    with storage_inventory(namespace) as index:
         inventory = _Inventory(namespace.resolve(), None, index)
         inventory.session(run_dir, state_sha256)
         inventory.stable()
@@ -307,7 +307,7 @@ def plan_learning_storage(request: LearningStoragePlan) -> RunResult:
     if set(config["learning"]) != {"directory", "state_sha256"}:
         raise ValueError("Storage planning requires an immutable learning state reference")
     root = (request.config_file.parent / config["root"]).resolve()
-    with storage_inventory() as index:
+    with storage_inventory(root) as index:
         inventory = _Inventory(root, request.output_dir.resolve(), index)
         inventory.session(
             root / config["learning"]["directory"], config["learning"]["state_sha256"]

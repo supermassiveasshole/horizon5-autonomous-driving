@@ -1,10 +1,12 @@
 """Growing dependency inventories through public storage planning."""
 
 import json
+import tempfile
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from storage_files import storage_files
 from test_candidate_store import candidates as candidates
 from test_evaluation import sha
 from test_learning_capacity import budget_request
@@ -79,3 +81,22 @@ def test_declared_budget_is_not_rejected_by_an_unrelated_numeric_ceiling(
         assert result["storage_checks"][0]["reasons"] == ["disk_reserve"]
         assert not backend.leases and result["resources_released"]
         assert result["learner_updates"] == 0
+
+
+def test_inventory_cannot_count_itself_when_temp_is_inside_the_source(tmp_path, recorded_storage):
+    run, _ = recorded_storage
+    config = json.loads((run / "config.json").read_bytes())
+    session = session_with_task(tmp_path, recorded_storage, Path(config["task"]))
+    source_temp = session[0] / "temporary"
+    source_temp.mkdir()
+    originals = {path: sha(path) for path in session[0].rglob("*") if path.is_file()}
+    request = storage_request(tmp_path, session)
+    with pytest.MonkeyPatch.context() as filesystem:
+        filesystem.setattr(tempfile, "tempdir", str(source_temp))
+        plan = run_experiment(request).summary["storage"]
+    assert plan["status"] == "within_budget"
+    rows = list(storage_files(request.output_dir, plan))
+    assert all(Path(row["path"]).is_file() for row in rows)
+    assert not any(Path(row["path"]).is_relative_to(source_temp) for row in rows)
+    assert list(source_temp.iterdir()) == []
+    assert all(sha(path) == digest for path, digest in originals.items())

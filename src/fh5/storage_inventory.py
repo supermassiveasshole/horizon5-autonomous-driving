@@ -9,7 +9,7 @@ import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from tempfile import TemporaryDirectory
+from tempfile import TemporaryDirectory, gettempdir
 from typing import Any
 
 
@@ -113,9 +113,15 @@ class StorageInventory:
 
 
 @contextmanager
-def storage_inventory() -> Iterator[StorageInventory]:
+def storage_inventory(namespace: Path) -> Iterator[StorageInventory]:
     """Own the temporary database outside the retained source tree."""
-    with TemporaryDirectory(prefix="fh5-storage-index-") as temporary:
+    namespace = namespace.resolve()
+    temporary_root = Path(gettempdir()).resolve()
+    if temporary_root.is_relative_to(namespace):
+        temporary_root = namespace.parent
+        if temporary_root == namespace:
+            raise ValueError("Storage temporary location must be outside the dependency namespace")
+    with TemporaryDirectory(prefix="fh5-storage-index-", dir=temporary_root) as temporary:
         connection = sqlite3.connect(Path(temporary) / "inventory.sqlite3")
         try:
             with connection:
