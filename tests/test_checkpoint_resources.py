@@ -91,3 +91,33 @@ def test_changed_history_during_copy_is_not_published_as_a_resumable_checkpoint(
         run_experiment(SACResume(first, output, steps=1))
     assert changed
     assert not (output / "policy.json").exists()
+
+
+@pytest.mark.parametrize("fault", ["missing", "changed"])
+def test_history_is_rechecked_before_publishing_completed_training(tmp_path, monkeypatch, fault):
+    replay = warm_start(tmp_path)
+    first = tmp_path / "first"
+    run_experiment(SACTrain(tmp_path / "warm", replay, first, steps=1))
+    manifest = json.loads((first / "policy.json").read_text())
+    output = tmp_path / "continued"
+    target = output / manifest["history"][0]["report"]
+    original_open = Path.open
+    fault_injected = False
+
+    def history_disappears_after_updates(path, mode="r", *args, **kwargs):
+        nonlocal fault_injected
+        if path == output / "policy.pt" and mode == "xb":
+            if fault == "missing":
+                target.unlink()
+            else:
+                with original_open(target, "wb") as stream:
+                    stream.write(b"{}")
+            fault_injected = True
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", history_disappears_after_updates)
+    with pytest.raises((ValueError, OSError)):
+        run_experiment(SACResume(first, output, steps=1))
+    assert fault_injected
+    assert not (output / "policy.json").exists()
+    assert (first / manifest["history"][0]["report"]).exists()

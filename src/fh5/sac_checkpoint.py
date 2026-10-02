@@ -150,6 +150,7 @@ def publish_checkpoint(
     manifest = {**metadata, "weights_sha256": sha256_file(weights)}
     raw = encode(manifest)
     write_file(root / "training-report.json", report)
+    checkpoint_history(root, metadata)
     write_file(root / (name + ".json"), raw)
 
 
