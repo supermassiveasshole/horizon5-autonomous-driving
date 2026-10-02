@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import json
 import math
 from collections import Counter, deque
@@ -12,7 +13,9 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
 from fh5.artifact_io import VerifiedFile, sha256_file
+from fh5.bc_checkpoint import BCRecovery, read_bc_checkpoint
 from fh5.collection_store import encode, read_bounded, write_file
+from fh5.learning_runtime import TrainingStopped
 from fh5.replay_document import read_document_fields
 from fh5.temporal_bc import TemporalBCTrain, _configuration, run_temporal_bc
 
@@ -26,6 +29,13 @@ class ScheduledBCTrain:
     output_dir: Path
 
 
+@dataclass(frozen=True)
+class ScheduledBCResume:
+    run_dir: Path
+    output_dir: Path
+    expected_checkpoint_sha256: str
+
+
 class LearningResources(Protocol):
     source_kind: str
 
@@ -35,7 +45,7 @@ class LearningResources(Protocol):
     def close(self) -> None: ...
 
 
-class ScheduleStopped(Exception):
+class ScheduleStopped(TrainingStopped):
     pass
 
 
@@ -268,17 +278,58 @@ class LearningSchedule:
             self.wait_s += self.budget["poll_interval_s"]
 
 
-def run_scheduled_bc(request: ScheduledBCTrain, resources: LearningResources | None) -> RunResult:
+def run_scheduled_bc(
+    request: ScheduledBCTrain | ScheduledBCResume, resources: LearningResources | None
+) -> RunResult:
     from fh5.experiment import RunResult
 
     if request.output_dir.exists():
         raise FileExistsError(request.output_dir)
-    config = _configuration_schedule(request.config_file)
-    base = request.config_file.parent
+    config_file = (
+        request.run_dir / "schedule-config.json"
+        if isinstance(request, ScheduledBCResume)
+        else request.config_file
+    )
+    config = _configuration_schedule(config_file)
+    base = config_file.parent
     training_path = base / config["training_config"]
     training = _configuration(training_path, expected_sha256=config["training_config_sha256"])
     training_source = VerifiedFile(training_path, config["training_config_sha256"])
     dataset = (training_path.parent / training["dataset"]).resolve()
+    parent = None
+    if isinstance(request, ScheduledBCResume):
+        if request.output_dir.resolve().is_relative_to(request.run_dir.resolve()):
+            raise ValueError("BC continuation output must be outside its parent run")
+        checkpoint_root = request.run_dir / "learner"
+        if not (checkpoint_root / "learner.json").is_file():
+            # Runs stopped before a new seal can still refer to their durable
+            # ancestor. A newly sealed learner never depends on this report,
+            # which may be absent/partial after a later diagnostic I/O failure.
+            report = request.run_dir / "schedule.json"
+            previous = read_document_fields(
+                VerifiedFile(report, sha256_file(report)), {"learner_checkpoint"}
+            ).get("learner_checkpoint")
+            if (
+                not isinstance(previous, dict)
+                or previous.get("manifest_sha256") != request.expected_checkpoint_sha256
+            ):
+                raise ValueError("Scheduled BC run has no matching durable learner checkpoint")
+            checkpoint_root = Path(previous["directory"])
+        if request.output_dir.resolve().is_relative_to(checkpoint_root.resolve()):
+            raise ValueError("BC continuation output must be outside its parent checkpoint")
+        parent = read_bc_checkpoint(
+            importlib.import_module("torch"),
+            checkpoint_root,
+            expected_sha256=request.expected_checkpoint_sha256,
+            cpu_threads=config["budget"]["cpu_threads"],
+        )
+        effective = dict(training, dataset=str(dataset))
+        if parent.manifest["model_metadata"]["config"] != effective:
+            raise ValueError("Scheduled BC training configuration changed from its checkpoint")
+    recovery = (
+        BCRecovery(request.output_dir / "learner", parent) if training["device"] == "cpu" else None
+    )
+    starting_step = recovery.completed if recovery is not None else 0
     if request.output_dir.resolve().is_relative_to(dataset.parent):
         raise ValueError("Scheduled output must be separate from its frozen dataset")
     if request.output_dir.resolve().is_relative_to((base / config["collector_bundle"]).resolve()):
@@ -315,9 +366,12 @@ def run_scheduled_bc(request: ScheduledBCTrain, resources: LearningResources | N
             collector_bundle=str((base / config["collector_bundle"]).resolve()),
         )
         write_file(request.output_dir / "schedule-config.json", encode(config))
-        schedule.checkpoint("admission", 0)
+        schedule.checkpoint("admission", starting_step)
         result = run_temporal_bc(
-            TemporalBCTrain(frozen_config, partial), schedule, config["budget"]["cpu_threads"]
+            TemporalBCTrain(frozen_config, partial),
+            schedule,
+            config["budget"]["cpu_threads"],
+            recovery,
         )
         candidate_hash = hashlib.sha256(
             read_bounded(partial / "model.json", 128 * 1024**2)
@@ -348,6 +402,8 @@ def run_scheduled_bc(request: ScheduledBCTrain, resources: LearningResources | N
         except OSError as error:
             state, reason, diagnostic = "stopped", "publication_failed:" + str(error), True
             failure = failure or error
+    completed = max(schedule.completed, recovery.completed if recovery is not None else 0)
+    latest = recovery.latest if recovery is not None else None
     summary = {
         "version": 1,
         "state": state,
@@ -356,7 +412,11 @@ def run_scheduled_bc(request: ScheduledBCTrain, resources: LearningResources | N
         "diagnostic_only": diagnostic,
         "commands_sent": False,
         "closed_loop_validated": False,
-        "steps_completed": schedule.completed,
+        "steps_completed": completed,
+        "steps_this_run": completed - starting_step,
+        "durable_steps_completed": latest["steps_completed"] if latest is not None else 0,
+        "learner_checkpoint": latest,
+        "recovery_scope": "CPU cooperative complete-update boundaries; not abrupt-kill or partial-Adam recovery",
         "pauses": schedule.pauses,
         "wait_s": schedule.wait_s,
         "max_work_unit_s": schedule.max_unit_s,
@@ -373,7 +433,23 @@ def run_scheduled_bc(request: ScheduledBCTrain, resources: LearningResources | N
         "scope": "cooperative work-unit scheduling; not hard GPU preemption or game validation",
     }
     report = request.output_dir / "schedule.json"
-    write_file(report, encode(summary))
+    try:
+        write_file(report, encode(summary))
+    except (OSError, MemoryError) as error:
+        diagnostic_path = report
+        report = (
+            Path(latest["directory"]) / "learner.json"
+            if latest is not None
+            else request.output_dir / "candidate/model.json"
+            if state == "completed"
+            else frozen_config
+        )
+        summary["schedule_report"] = {
+            "status": "unavailable",
+            "path": str(diagnostic_path),
+            "error": f"{type(error).__name__}: {error}",
+            "retained_result": str(report),
+        }
     if failure:
         raise failure
     return RunResult({}, [], [], {"learning_schedule": summary}, report)

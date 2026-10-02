@@ -18,9 +18,11 @@ uv run --locked fh5 collection-bc-train --config configs/collection-learning.exa
 
 ## 结果与停止
 
-`schedule.json` 记录等待、压力原因、已完成更新数、最长工作单元、输入配置和候选哈希。`requested-training.json` 保留原训练配置字节，`requested-schedule.json` 保留原调度参数；`training.json` 固定解析后的数据路径，`schedule-config.json` 绑定这份训练配置与解析后的采集路径。保留这些产物及数据依赖后，可在新输出目录重跑冻结配置，工作区原配置的修改不影响它。完整训练和重载验证结束后，才把 `.candidate` 发布为 `candidate/`，其中仍是标准 BC 模型和联动画面报告；随报告发布的预览使用相对链接。停止时不发布候选，可能留下 `.candidate` 诊断文件；这不是可续训检查点，完整跨进程续训仍由 #13 实现。
+`schedule.json` 记录等待、压力原因、已完成及已持久化更新数、最长工作单元、输入配置和候选哈希。`requested-training.json` 保留原训练配置字节，`requested-schedule.json` 保留原调度参数；`training.json` 固定解析后的数据路径，`schedule-config.json` 绑定这份训练配置与解析后的采集路径。保留这些产物及数据依赖后，可在新输出目录重跑冻结配置，工作区原配置的修改不影响它。CPU 数值 BC 另可通过[完整 learner 检查点](bc-resume.md)继续剩余更新。完整训练和重载验证结束后，才把 `.candidate` 发布为 `candidate/`，其中仍是标准 BC 模型和联动画面报告；随报告发布的预览使用相对链接。停止时不发布候选，可能留下 `.candidate` 诊断文件；它不是 learner 检查点，也不证明可以续训。
 
-在输出目录创建 `stop.request` 或在前台按 Ctrl+C 可停止；工作单元返回后响应并保留诊断。完成返回码为 0，受预算或停止请求限制返回码为 2；输入损坏等错误保存诊断后报告异常。原始采集与输入数据不会因此删除或更改。
+CPU 恢复优先读取运行目录的 `learner/learner.json`，不要求 `schedule.json` 可读；训练和数据依赖仍须完整。只有没有发布新 learner 时，才通过调度报告定位仍有效的祖先检查点。`steps_completed` 与 `durable_steps_completed` 分别表示已计算和已封存更新，保存失败不得混同两者。调度报告写入发生 OS/内存错误时，返回摘要记录 `learning_schedule.schedule_report.status = unavailable`；已完成结果保持完成，`report_path` 指向已封存 learner。该错误状态只保证出现在返回摘要中。可选 loss 日志或累计统计缺失不阻止接续；不完整统计明确标记为 `partial`。
+
+在输出目录创建 `stop.request` 可请求边界停止并保存 CPU learner。前台 Ctrl+C 也能停止，但不能保证保存正在执行的 Adam 更新；恢复以实际封存状态为准。完成返回码为 0，受预算或停止请求限制返回码为 2；输入损坏等错误保存诊断后报告异常。原始采集与输入数据不会因此删除或更改。
 
 旧采集环境缺少 `last_poll_ns`、`latest_image_source_ns` 或 session 绑定时不能凭旧状态推断资源健康；应重新准备新的采集环境，保留旧录制。旧的 `temporal-train` 是不带采集协调的离线入口，采集期间应使用本入口。
 

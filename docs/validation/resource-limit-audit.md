@@ -25,7 +25,7 @@
 | `collection*.py`、`storage.py` 块/文件/目录/元数据上限 | 已有分块仍存在固定拒绝条件 | 容量清单改为临时磁盘索引、逐行输出与按需文档读取，跨旧阈值及恢复专项通过；采集与其他入口仍待清理 |
 | BC/采集评估配置的 1 MiB / 128 MiB 表示上限 | 相同有效配置仅因合法空白增大即被拒绝 | 评估、训练、调度和准备配置改为摘要绑定的严格流式字段读取；跨旧表示门槛的真实训练/回放、预测一致性与数据集导出检查通过 |
 | 数值图像、BC 与采集的固定轴长/字节上限 | 合法尺寸被 640/360/4096/7680 或 48/64 MiB 拒绝 | 改为正整数尺寸与实际 RGB/BGRA 字节匹配；显式来源预算、设备布局核对保留。跨旧尺寸的真实学习、大图读取与模拟 SDK 检查通过；实机容量和时效另行测量 |
-| Scheduled BC 中途只记录已完成步数 | 资源停止后没有 Adam/RNG 状态，不能据此宣称可续训 | 已确认缺口，正在设计独立 learner 检查点；已封存 actor 的回放能力不等于中途恢复 |
+| Scheduled BC 中途只记录已完成步数 | 资源停止后没有 Adam/RNG 状态，不能据此宣称可续训 | CPU learner 保存/恢复已接入，真实 6 次连续与 2＋4 次恢复精确一致；Adam 语义核验、输入/资源探测故障、保存失败及可选报告/统计有专项证据。独立审阅和完整回归未完成，强制进程终止不作逐步保证 |
 | 采集/推理队列及诊断内存 | 有界队列本身有意义，默认数字依据未齐 | 待记录实际内存/延迟测量及可配置退让策略 |
 
 ## 并发诊断的退让
@@ -1226,3 +1226,74 @@ Standards 提出一项 P3 维护建议：两个配置测试重复实现文件读
 
 固定最终差异 `4ae68a7...3a789fb` 独立复审：**Standards 0 项、Spec 0 项**。
 审阅和本批提交均不包含未接入、未验证通过的 BC 中途恢复原型。
+
+## CPU BC 协作式接续（验证进行中）
+
+此前公开反例完成 2 次更新后因积压停止，只留下步数，没有权重、Adam 或 RNG 检查点：
+**1 failed / 3.01 秒**，`runs/resource-bc-resume/red.xml`。
+新增独立 learner 封存及 `ScheduledBCResume` 后，**1 passed / 3.98 秒**，
+`runs/resource-bc-resume/green.xml`。实际 CPU 连续 6 次与中断后 2＋4 次更新的
+完整模型、优化器、随机数、规范状态摘要、全部预测及冻结回放一致。
+恢复前删除可选 loss 日志，父检查点与父调度摘要保持不变。
+
+命令行零新增更新恢复先因入口缺失 **1 failed / 3.40 秒**；接通入口后
+**1 passed / 3.69 秒**，见 `runs/resource-bc-resume/cli-{red,green}.xml`。
+该案例以已完成 3 次更新的 learner 恢复，只补做验证和候选发布，全部父文件摘要不变。
+测试仅替换外部资源探测端口，使用实际 CPU 网络、Adam、文件保存及恢复路径。
+
+当前差异尚未完成独立审阅或完整回归，后续专项证据如下。
+原始数据依赖仍需保留；不宣称旧 BC/CUDA、强制终止或部分 Adam 更新可恢复。
+
+后续缺失 Adam 历史的完整性反例 **1 failed / 3.04 秒**：虽然文件摘要被一致绑定，
+旧恢复路径却接受了空历史，最终报告累计 6 次更新，实际 Adam 计数只有续训的 4 次。
+补充参数归属和历史完整性检查后，恢复组合 **2 passed / 4.28 秒**，
+`runs/resource-bc-resume/adam-{red,green}.xml`；不将这一步单独算作所有优化器语义已验证。
+
+外部目录重命名故障验证：旧冻结 `d5f38d1` **1 failed / 3.05 秒**，
+当前恢复路径 **1 passed / 3.40 秒**，`runs/resource-bc-resume/publication-{red,green}.xml`。
+失败发生在 3 次训练更新完成之后，恢复仅重新验证/发布，不再更新或改写父文件。
+
+像素读取故障反例 **1 failed / 2 passed / 5.29 秒**：抽样后读取错误使已完成的两次更新没有封存。
+改为在 Adam 开始前释放未完成批次、恢复 RNG 并封存后，**3 passed / 5.60 秒**，
+`runs/resource-bc-resume/io-{red,green}.xml`。恢复剩余四次更新后完整状态和所有预测与六次连续训练一致。
+该组合同时注入 learner 权重写入及清单替换故障：已计算 6 次、只持久化 2 次如实分开报告，
+不发布不完整子检查点，父文件保持原样；通过失败运行的摘要重试仍从正确的两次更新继续。
+
+Adam 更新规则的后续反例分别覆盖学习率/动量选项、矩张量形状/类型和落后于已封存进度的
+单参数计数，即使重新绑定权重与清单摘要也须在资源准入前拒绝。
+`options-{red,green}.xml` 为 **2 failed / 4.21 秒 → 4 passed / 6.85 秒**；
+`moments-{red,green}.xml` 为 **2 failed / 4.42 秒 → 6 passed / 8.92 秒**；
+`counter-{red,green}.xml` 为 **1 failed / 3.09 秒 → 7 passed / 9.84 秒**。
+绿灯组合含此前已通过案例，不能相加视为独立测试数。Adam 计数按固定 Torch 运行时的
+形状、类型与递增表示核验，累计完成次数仍由 Python 整数保存，不新增实验步数门槛。
+`adam-counter-probe.json` 记录本机 float32 计数在 16,777,216 处的实际单位递增饱和；
+该小型运行时探测不冒充执行了相同数量的完整 BC 更新。
+
+资源探测 OS/内存错误的旧恢复路径 **2 failed / 4.29 秒**，
+`probe-red.xml`；像素读取和资源探测各注入 `OSError` / `MemoryError` 后，
+**4 passed / 9.07 秒**，`probe-green.xml`。故障发生于两次更新后的完整边界，
+像素失败时还须恢复抽样前 RNG。接续四次后规范学习状态摘要、全部预测与连续六次一致。
+错误本身仍报告给调用者；封存状态并不将未完成运行报成完成。
+
+恢复入口现优先读取运行目录的 `learner/learner.json`，不依赖展示报告来发现已经发布的 learner。
+缺失/截断 `schedule.json` 的反例 **2 failed / 4.58 秒**，
+`report-red.xml`；含候选发布、检查点保存与 CLI 的组合 **6 passed / 13.67 秒**，
+`report-green.xml`。随后将报告写入故障本身改为可选诊断：旧行为
+**2 failed / 4.54 秒**，`optional-report-red.xml`；修复后的组合
+**5 passed / 11.43 秒**，`optional-report-green.xml`。该组合通过公开文件打开端口注入
+`OSError`，验证已完成 learner 与 candidate 保留、返回状态仍为 completed，
+`learning_schedule.schedule_report.status` 为 unavailable，`report_path` 指向 learner 清单；
+之后删除或截断报告仍可零新增更新恢复，父文件摘要不变。代码同样处理报告写入的
+`MemoryError`，本组实测错误为 `OSError`。失败运行没有新 learner 时仍需完整报告定位祖先，
+或直接从原父运行恢复；摘要可直接对 `learner/learner.json` 使用 `Get-FileHash` 取得。
+
+可选累计统计缺失/无效的公开反例 **2 failed / 4.76 秒**，`statistics-red.xml`。
+必要网络、Adam、RNG 和进度保持严格核验，统计独立退让后，
+**2 passed / 5.56 秒**，`statistics-green-2.xml`。删除统计或将耗时/梯度统计替换为无效值，
+再通过实际入口续训四次，必要学习状态摘要仍与六次连续训练一致；learner 的
+`statistics.status` 和最终候选的 `training.statistics_status` 均为 partial。
+首个 `statistics-green.xml` 因测试临时目录设置错误未进入产品路径，不计为修复通过。
+
+以上相对文件名均位于 `runs/resource-bc-resume/`。这些是实际 CPU 网络、Adam、文件与
+公开恢复入口的软件验证，替换范围是外部资源探测或文件故障端口。
+本片段独立审阅、完整回归及实机 4K 并行验收仍未完成，也不代表全仓资源审计结束。

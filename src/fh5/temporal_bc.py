@@ -13,10 +13,16 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fh5.artifact_io import VerifiedFile, sha256_file
+from fh5.bc_checkpoint import BC_RESUME_METADATA_KEYS, BCRecovery, publish_bc_checkpoint
 from fh5.bc_learning import VIEWS, _checked_config, _write
 from fh5.bc_losses import BCLossHistory, read_bc_manifest
 from fh5.bc_network import make_actor
-from fh5.learning_runtime import TrainingBudget, move_learning_state, preserve_torch_state
+from fh5.learning_runtime import (
+    TrainingBudget,
+    TrainingStopped,
+    move_learning_state,
+    preserve_torch_state,
+)
 from fh5.numeric_images import (
     NumericDecision,
     NumericFrame,
@@ -88,6 +94,7 @@ def run_temporal_bc(
     request: TemporalBCTrain | TemporalBCReplay,
     budget: TrainingBudget | None = None,
     cpu_threads: int = 2,
+    recovery: BCRecovery | None = None,
 ) -> RunResult:
     torch = importlib.import_module("torch")
     with preserve_torch_state(torch), ExitStack() as resources, prediction_spool() as records:
@@ -95,7 +102,7 @@ def run_temporal_bc(
         os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
         torch.use_deterministic_algorithms(True)
         torch.backends.cudnn.benchmark = False
-        return _run(request, torch, resources, records, budget)
+        return _run(request, torch, resources, records, budget, recovery)
 
 
 def _run(
@@ -104,6 +111,7 @@ def _run(
     resources: ExitStack,
     records: PredictionRecords,
     budget: TrainingBudget | None = None,
+    recovery: BCRecovery | None = None,
 ) -> RunResult:
     from fh5.numeric_actor import FrozenNumericActor
 
@@ -131,8 +139,9 @@ def _run(
     if digest != config["dataset_sha256"]:
         raise ValueError("Frozen numerical dataset hash mismatch")
     data, pixels, rows = resources.enter_context(temporal_snapshot(dataset, expected_sha256=digest))
+    starting_step = recovery.completed if recovery is not None else 0
     if budget:
-        budget.checkpoint("snapshot_validated", 0)
+        budget.checkpoint("snapshot_validated", starting_step)
     if device not in ("cpu", "cuda") or (device == "cuda" and not torch.cuda.is_available()):
         raise ValueError("Requested temporal BC device unavailable")
     timing = time_contract(config["time_mode"], pixels)
@@ -154,12 +163,40 @@ def _run(
 
     def checkpoint(phase: str, completed: int) -> None:
         if budget:
-            budget.checkpoint(
-                phase,
-                completed,
-                lambda: move_learning_state(torch, models, optimizer, "cpu"),
-                lambda: move_learning_state(torch, models, optimizer, device),
-            )
+            try:
+                budget.checkpoint(
+                    phase,
+                    completed,
+                    lambda: move_learning_state(torch, models, optimizer, "cpu"),
+                    lambda: move_learning_state(torch, models, optimizer, device),
+                )
+            except (TrainingStopped, OSError, MemoryError):
+                # Both a controlled stop and a failed resource probe occur
+                # between updates, while Adam/RNG describe a complete boundary.
+                seal(completed)
+                raise
+
+    def seal(completed: int) -> None:
+        if recovery is None or (
+            recovery.latest is not None and recovery.latest["steps_completed"] == completed
+        ):
+            return
+        recovery.published = publish_bc_checkpoint(
+            torch,
+            recovery.directory,
+            model_metadata=manifest,
+            actor=model,
+            optimizer=optimizer,
+            completed=completed,
+            dataset=VerifiedFile(dataset, digest),
+            cpu_threads=torch.get_num_threads(),
+            statistics={
+                "status": statistics_status,
+                "duration_s": elapsed_before + time.monotonic() - started,
+                "time_gradient_l1": gradient,
+            },
+            parent_checkpoint_sha256=recovery.parent.file.sha256 if recovery.parent else None,
+        )
 
     if training:
         torch.manual_seed(config["seed"])
@@ -182,53 +219,6 @@ def _run(
             )
 
         optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
-        losses = BCLossHistory()
-        resources.callback(losses.close)
-        started, completed, gradient = time.monotonic(), 0, 0.0
-        for step in range(config["steps"]):
-            checkpoint("update", step)
-            indices = torch.randperm(len(training_rows) // 2)[: config["batch_size"] // 2].tolist()
-            batch = [training_rows[i * 2 + v] for i in indices for v in (0, 1)]
-            rgb = (
-                torch.stack([torch.stack([tensor(f) for f in r["decision"].frames]) for r in batch])
-                .to(device)
-                .float()
-                / 255
-            )
-            features = torch.tensor(
-                [
-                    temporal_features(r["decision"].actor, r["decision"].frames, timing)
-                    for r in batch
-                ],
-                dtype=torch.float32,
-                device=device,
-                requires_grad=True,
-            )
-            target = torch.tensor(
-                [r["entry"]["supervision"]["action"] for r in batch],
-                dtype=torch.float32,
-                device=device,
-            )
-            optimizer.zero_grad()
-            loss = torch.nn.functional.mse_loss(model(rgb, features), target)
-            if not torch.isfinite(loss):
-                raise ValueError("Non-finite temporal BC loss")
-            loss.backward()
-            gradient += float(
-                features.grad[:, -2 * (len(first.frames) - 1) :: 2].abs().sum().item()
-            )
-            optimizer.step()
-            completed = step + 1
-            losses.record(completed, loss)
-            del rgb, features, target, loss
-        checkpoint("freeze", completed)
-        stats = {
-            "steps_completed": completed,
-            "duration_s": time.monotonic() - started,
-            "time_gradient_l1": gradient,
-            "selection": "fixed final update; no held-out model selection",
-            "train_by_view": {view: len(training_rows) // 2 for view in VIEWS},
-        }
         manifest = {
             "version": 2,
             "architecture": TEMPORAL_ARCHITECTURE,
@@ -242,13 +232,100 @@ def _run(
             },
             "future_supervision": {"enabled": False, "weight": 0},
             "dataset_sha256": digest,
-            "training": stats,
             "provenance": data["provenance"],
             "groups": data["groups"],
             "torch_version": str(torch.__version__),
             "closed_loop_validated": False,
             "critic_trained": False,
         }
+        elapsed_before, gradient = 0.0, 0.0
+        statistics_status = "complete"
+        if recovery is not None and recovery.parent is not None:
+            parent = recovery.parent
+            if parent.manifest["model_metadata"] != {
+                key: manifest[key] for key in BC_RESUME_METADATA_KEYS
+            } or parent.dataset != VerifiedFile(dataset.resolve(), digest):
+                raise ValueError("BC continuation differs from its frozen training inputs")
+            model.load_state_dict(parent.state["actor"], strict=True)
+            optimizer.load_state_dict(parent.state["optimizer"])
+            prior_stats = parent.statistics
+            statistics_status = prior_stats["status"]
+            gradient = prior_stats.get("time_gradient_l1", 0.0)
+            elapsed_before = prior_stats.get("duration_s", 0.0)
+            # Construction consumes RNG. Restore only after every trainable
+            # component is initialized and loaded, before the next randperm.
+            torch.set_rng_state(parent.state["rng"])
+        losses = BCLossHistory()
+        resources.callback(losses.close)
+        started, completed = time.monotonic(), starting_step
+        for step in range(starting_step, config["steps"]):
+            checkpoint("update", step)
+            sampling_rng = torch.get_rng_state() if recovery is not None else None
+            batch = rgb = features = target = loss = None
+            try:
+                indices = torch.randperm(len(training_rows) // 2)[
+                    : config["batch_size"] // 2
+                ].tolist()
+                batch = [training_rows[i * 2 + v] for i in indices for v in (0, 1)]
+                rgb = (
+                    torch.stack(
+                        [torch.stack([tensor(f) for f in r["decision"].frames]) for r in batch]
+                    )
+                    .to(device)
+                    .float()
+                    / 255
+                )
+                features = torch.tensor(
+                    [
+                        temporal_features(r["decision"].actor, r["decision"].frames, timing)
+                        for r in batch
+                    ],
+                    dtype=torch.float32,
+                    device=device,
+                    requires_grad=True,
+                )
+                target = torch.tensor(
+                    [r["entry"]["supervision"]["action"] for r in batch],
+                    dtype=torch.float32,
+                    device=device,
+                )
+                optimizer.zero_grad()
+                loss = torch.nn.functional.mse_loss(model(rgb, features), target)
+                if not torch.isfinite(loss):
+                    raise ValueError("Non-finite temporal BC loss")
+                loss.backward()
+                gradient_delta = float(
+                    features.grad[:, -2 * (len(first.frames) - 1) :: 2].abs().sum().item()
+                )
+            except (OSError, MemoryError):
+                # No parameter update has started. Release the unfinished batch
+                # and retry the same random draw after input/resources recover.
+                batch = rgb = features = target = loss = None
+                optimizer.zero_grad(set_to_none=True)
+                if sampling_rng is not None:
+                    torch.set_rng_state(sampling_rng)
+                    seal(completed)
+                raise
+            # Adam itself may mutate parameters before raising. Do not treat a
+            # failure inside step() as a complete boundary or seal that state.
+            optimizer.step()
+            completed = step + 1
+            gradient += gradient_delta
+            if recovery is not None:
+                recovery.completed = completed
+            losses.record(completed, loss)
+            del rgb, features, target, loss
+        seal(completed)
+        checkpoint("freeze", completed)
+        stats = {
+            "steps_completed": completed,
+            "statistics_status": statistics_status,
+            "duration_s": elapsed_before + time.monotonic() - started,
+            "time_gradient_l1": gradient,
+            "selection": "fixed final update; no held-out model selection",
+            "train_by_view": {view: len(training_rows) // 2 for view in VIEWS},
+        }
+        manifest["training"] = stats
         output.mkdir(parents=True)
         torch.save(
             {

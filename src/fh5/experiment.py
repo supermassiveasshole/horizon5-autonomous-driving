@@ -68,7 +68,12 @@ from fh5.evaluation_run import EvaluationEnvironment, EvaluationRun, run_evaluat
 from fh5.events import EventEnvironment, EventRun, read_event, run_event
 from fh5.evidence_usage import RecordUsage, record_usage
 from fh5.learning_loop import LearningContinue, LearningEnvironment, LearningLoop, run_learning_loop
-from fh5.learning_schedule import LearningResources, ScheduledBCTrain, run_scheduled_bc
+from fh5.learning_schedule import (
+    LearningResources,
+    ScheduledBCResume,
+    ScheduledBCTrain,
+    run_scheduled_bc,
+)
 from fh5.numeric_images import (
     ContextualNumericActor,
     DecisionActor,
@@ -286,6 +291,7 @@ def run_experiment(
     | CollectionBCPrepare
     | CollectionBCAssess
     | ScheduledBCTrain
+    | ScheduledBCResume
     | TemporalBCPrepare
     | TemporalBCTrain
     | TemporalBCReplay
@@ -421,7 +427,7 @@ def run_experiment(
         return prepare_collection_bc(request)
     if isinstance(request, CollectionBCAssess):
         return assess_collection_bc(request)
-    if isinstance(request, ScheduledBCTrain):
+    if isinstance(request, (ScheduledBCTrain, ScheduledBCResume)):
         return run_scheduled_bc(request, learning_resources)
     if isinstance(request, (CollectionDataset, CollectionDatasetReview)):
         return run_collection_dataset(request)
