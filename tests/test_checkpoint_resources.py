@@ -6,6 +6,7 @@ import tracemalloc
 from pathlib import Path
 
 import pytest
+from checkpoint_files import history_entries
 from test_sac_learning import warm_start
 
 from fh5.candidate_archive import CandidateArchive, CandidateRestore
@@ -68,7 +69,7 @@ def test_resume_streams_large_training_evidence_and_preserves_learning_state(tmp
     assert result["learner_state_sha256"] == whole["learner_state_sha256"]
     assert result["predictions"] == whole["predictions"]
     checkpoint = json.loads((continued / "policy.json").read_text())
-    retained = continued / checkpoint["history"][-1]["report"]
+    retained = continued / history_entries(continued, checkpoint)[-1]["report"]
     assert retained.stat().st_size > 128 * 1024**2
     with retained.open("rb") as stream:
         assert hashlib.file_digest(stream, "sha256").hexdigest() == report_sha
@@ -88,7 +89,7 @@ def test_changed_history_during_copy_is_not_published_as_a_resumable_checkpoint(
     first = tmp_path / "first"
     run_experiment(SACTrain(tmp_path / "warm", replay, first, steps=1))
     manifest = json.loads((first / "policy.json").read_text())
-    name = manifest["history"][0]["report"]
+    name = history_entries(first, manifest)[0]["report"]
     output = tmp_path / "continued"
     original_open = Path.open
     changed = False
@@ -115,7 +116,8 @@ def test_history_is_rechecked_before_publishing_completed_training(tmp_path, mon
     run_experiment(SACTrain(tmp_path / "warm", replay, first, steps=1))
     manifest = json.loads((first / "policy.json").read_text())
     output = tmp_path / "continued"
-    target = output / manifest["history"][0]["report"]
+    name = history_entries(first, manifest)[0]["report"]
+    target = output / name
     original_open = Path.open
     fault_injected = False
 
@@ -135,4 +137,4 @@ def test_history_is_rechecked_before_publishing_completed_training(tmp_path, mon
         run_experiment(SACResume(first, output, steps=1))
     assert fault_injected
     assert not (output / "policy.json").exists()
-    assert (first / manifest["history"][0]["report"]).exists()
+    assert (first / name).exists()

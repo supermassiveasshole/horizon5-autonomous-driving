@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fh5.artifact_io import VerifiedFile, copy_evidence
+from fh5.checkpoint_history import HistorySource, empty_history
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
@@ -126,8 +126,7 @@ def _run(
     request: SACCriticWarmup | SACCriticReplay
     saved = None
     start_step = 0
-    history: list[dict[str, Any]] = []
-    history_blobs: dict[str, bytes | VerifiedFile] = {}
+    history_source: HistorySource | None = None
     continuation = None
     if isinstance(operation, SACCriticResume):
         manifest, saved, parent_bytes = read_critic_checkpoint(torch, operation.checkpoint_dir)
@@ -138,9 +137,7 @@ def _run(
             raise ValueError("Critic continuation differs from its expected parent checkpoint")
         if manifest["version"] != 2:
             raise ValueError("Critic continuation requires a sealed version 2 checkpoint")
-        history, history_blobs = continuation_history(
-            operation.checkpoint_dir, manifest, parent_bytes
-        )
+        history_source = continuation_history(operation.checkpoint_dir, manifest, parent_bytes)
         configuration = manifest["configuration"]
         start_step, phase_budget = saved["step"], configuration["steps"]
         remaining = phase_budget - start_step
@@ -313,11 +310,11 @@ def _run(
     if isinstance(request, SACCriticWarmup):
         output = request.output_dir
         output.mkdir(parents=True)
+        history = history_source.retain(output) if history_source is not None else empty_history()
         experience = seal_experience(raw, request.replay_file, output / "experience")
         (output / "actor").mkdir()
         for name, value in model_payload.items():
             write_file(output / "actor" / name, value)
-        copy_evidence(output, history_blobs)
         optimizer = torch.optim.Adam(critic.parameters(), lr=request.learning_rate)
         if saved is not None:
             optimizer.load_state_dict(saved["optimizer"])

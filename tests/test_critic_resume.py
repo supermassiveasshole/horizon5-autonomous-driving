@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from checkpoint_files import history_entries
 from test_sac import experience
 from test_temporal_bc import temporal_fixture
 
@@ -55,7 +56,7 @@ def test_stopped_preheating_resumes_remaining_budget_with_same_q_state_and_froze
     manifest = json.loads((tmp_path / "second/critic.json").read_bytes())
     assert manifest["version"] == 2
     assert manifest["configuration"]["steps"] == 8
-    assert len(manifest["history"]) == 1
+    assert len(history_entries(tmp_path / "second", manifest)) == 1
 
 
 def test_sac_handoff_requires_the_finite_warmup_to_finish_and_accepts_resumed_q(tmp_path):
@@ -134,8 +135,9 @@ def test_warmup_history_survives_handoff_and_subsequent_sac_continuation(tmp_pat
         )
     )
     manifest = json.loads((tmp_path / "sac/policy.json").read_bytes())
-    assert len(manifest["history"]) == 3
-    for entry, source in zip(manifest["history"], ("first", "second", "third")):
+    entries = history_entries(tmp_path / "sac", manifest)
+    assert len(entries) == 3
+    for entry, source in zip(entries, ("first", "second", "third")):
         assert (tmp_path / "sac" / entry["checkpoint"]).read_bytes() == (
             tmp_path / source / "critic.json"
         ).read_bytes()
@@ -144,8 +146,9 @@ def test_warmup_history_survives_handoff_and_subsequent_sac_continuation(tmp_pat
         ).read_bytes()
     run_experiment(SACResume(tmp_path / "sac", tmp_path / "continued", steps=1))
     continued = json.loads((tmp_path / "continued/policy.json").read_bytes())
-    assert len(continued["history"]) == 4
-    (tmp_path / "continued" / continued["history"][0]["report"]).write_text("{}")
+    entries = history_entries(tmp_path / "continued", continued)
+    assert len(entries) == 4
+    (tmp_path / "continued" / entries[0]["report"]).write_text("{}")
     with pytest.raises(ValueError, match="continuation history changed"):
         run_experiment(SACResume(tmp_path / "continued", tmp_path / "invalid", steps=1))
 
@@ -169,7 +172,7 @@ def test_preheating_resume_rejects_corrupted_dependencies_before_publishing(tmp_
         "report": source / "training-report.json",
         "bc": source / "actor/model.json",
         "weights": source / "critic.pt",
-        "history": source / manifest["history"][0]["report"],
+        "history": source / history_entries(source, manifest)[0]["report"],
     }[fault]
     target.write_bytes(b"corrupted")
     with pytest.raises(ValueError):

@@ -131,7 +131,12 @@ class _Inventory:
             self.document(
                 self.asset(root / "experience", original["path"]), role, original["replay_sha256"]
             )
-        names = checkpoint_asset_names(manifest, replay)
+        names = checkpoint_asset_names(
+            root,
+            manifest,
+            replay,
+            read_history_node=lambda path, sha: self.document(path, role, sha),
+        )
         for name in names:
             self.file(self.asset(root, name), role)
 

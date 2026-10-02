@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
+from checkpoint_files import history_entries
 from test_sac_learning import warm_start
 
 from fh5.candidate_archive import CandidateArchive
@@ -190,7 +191,7 @@ def test_dependency_lost_during_publication_does_not_leave_a_complete_archive(
         artifact = tmp_path / "restored"
         request = CandidateRestore(archive, artifact, archived["archive_sha256"], "Restore")
     manifest = json.loads((checkpoint / "policy.json").read_text())
-    name = manifest["history"][0]["report"]
+    name = history_entries(checkpoint, manifest)[0]["report"]
     original_open = Path.open
     fault_injected = False
 
@@ -241,7 +242,7 @@ def test_archive_keeps_training_phase_history_and_excludes_unrelated_files(tmp_p
     assert result["total_steps"] == 5
     assert not (archive / "checkpoint/unrelated.txt").exists()
     assert (archive / "checkpoint/policy.json").read_bytes() == raw
-    for prior in manifest["history"]:
+    for prior in history_entries(current, manifest):
         for field in ("checkpoint", "report"):
             assert (archive / "checkpoint" / prior[field]).read_bytes() == (
                 current / prior[field]
@@ -281,7 +282,7 @@ def test_changed_dependencies_cannot_be_published(tmp_path, candidate, operation
     names = {
         "pixel": "experience/" + replay["transitions"][0]["current"]["frames"][0]["path"],
         "teacher": "bc/actor.pt",
-        "history": manifest["history"][0]["report"],
+        "history": history_entries(current, manifest)[0]["report"],
         "weights": "policy.pt",
     }
     (source / names[corrupt]).write_bytes(b"changed dependency")

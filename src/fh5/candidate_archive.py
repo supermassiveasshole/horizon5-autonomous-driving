@@ -10,6 +10,7 @@ from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
 from fh5.artifact_io import VerifiedFile, read_json, sha256_file
+from fh5.checkpoint_history import NodeReader, history_assets
 from fh5.collection_store import encode, write_file
 from fh5.numeric_images import asset
 
@@ -39,11 +40,17 @@ def _paths(source: Path, expected: str) -> tuple[dict[str, Any], set[str]]:
         raise ValueError("Candidate differs from its expected checkpoint identity")
     manifest = json.loads(raw)
     replay = read_json(source / "experience/replay.json")
-    return manifest, checkpoint_asset_names(manifest, replay)
+    return manifest, checkpoint_asset_names(source, manifest, replay)
 
 
-def checkpoint_asset_names(manifest: dict[str, Any], replay: dict[str, Any]) -> set[str]:
-    """Enumerate continuation assets from already-read manifests, without more I/O."""
+def checkpoint_asset_names(
+    root: Path,
+    manifest: dict[str, Any],
+    replay: dict[str, Any],
+    *,
+    read_history_node: NodeReader | None = None,
+) -> set[str]:
+    """Enumerate continuation assets, including independently indexed ancestry."""
     if manifest.get("version") not in (2, 3, 4) or manifest.get("stage") != "sac_updates":
         raise ValueError("Archive requires a complete SAC continuation checkpoint")
     names = {
@@ -54,8 +61,12 @@ def checkpoint_asset_names(manifest: dict[str, Any], replay: dict[str, Any]) -> 
         "bc/actor.pt",
         "experience/replay.json",
     }
-    for entry in manifest["history"]:
-        names.update((entry["checkpoint"], entry["report"]))
+    history = (
+        history_assets(root, manifest["history"])
+        if read_history_node is None
+        else history_assets(root, manifest["history"], read_node=read_history_node)
+    )
+    names.update(name for name, _ in history)
     for entry in manifest.get("imitation", {}).get("transitions", []):
         names.add(entry["review"])
     names.update("experience/" + entry["path"] for entry in replay.get("source_inventory", []))

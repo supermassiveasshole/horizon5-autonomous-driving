@@ -66,6 +66,11 @@ def test_plan_protects_shared_learners_and_the_original_evaluation_without_mutat
     entry = next(row for row in plan["files"] if row["path"] == str(weight.resolve()))
     assert {"latest_learner", "explorer"} <= set(entry["roles"])
     assert entry["bytes"] == weight.stat().st_size
+    manifest = json.loads((weight.parent / "policy.json").read_bytes())
+    history_node = (weight.parent / manifest["history"]["head"]["path"]).resolve()
+    node_entry = next(row for row in plan["files"] if row["path"] == str(history_node))
+    assert {"latest_learner", "metadata"} <= set(node_entry["roles"])
+    assert node_entry["bytes"] == history_node.stat().st_size
     for original in (
         run / "state.json",
         run / "round-000/evaluation/attempt-0000/recording/packets.jsonl",

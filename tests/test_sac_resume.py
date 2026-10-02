@@ -3,6 +3,7 @@
 import json
 
 import pytest
+from checkpoint_files import history_entries
 from test_sac_learning import warm_start
 
 from fh5.experiment import run_experiment
@@ -108,12 +109,13 @@ def test_resume_preserves_prior_training_history_and_rejects_changed_reports(tmp
     run_experiment(SACTrain(tmp_path / "warm", replay, tmp_path / "first", steps=3))
     run_experiment(SACResume(tmp_path / "first", tmp_path / "second", steps=2))
     manifest = json.loads((tmp_path / "second/policy.json").read_bytes())
-    assert len(manifest["history"]) == 2  # Q warm-up and the first SAC update segment.
-    warmup = manifest["history"][0]
+    history = history_entries(tmp_path / "second", manifest)
+    assert len(history) == 2  # Q warm-up and the first SAC update segment.
+    warmup = history[0]
     assert (tmp_path / "second" / warmup["report"]).read_bytes() == (
         tmp_path / "warm/training-report.json"
     ).read_bytes()
-    entry = manifest["history"][1]
+    entry = history[1]
     assert (tmp_path / "second" / entry["report"]).read_bytes() == (
         tmp_path / "first/training-report.json"
     ).read_bytes()

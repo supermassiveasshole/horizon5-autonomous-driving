@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from fh5.artifact_io import VerifiedFile, sha256_file
+from fh5.checkpoint_history import HistorySource, verify_history
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.numeric_images import NumericFrame, asset
 from fh5.numeric_recording import read_numeric_frame
@@ -154,37 +155,16 @@ def publish_checkpoint(
     write_file(root / (name + ".json"), raw)
 
 
-def checkpoint_history(
-    root: Path, manifest: dict[str, Any]
-) -> tuple[list[dict[str, Any]], dict[str, bytes | VerifiedFile], VerifiedFile]:
+def checkpoint_history(root: Path, manifest: dict[str, Any]) -> None:
     """Validate retained history and the current stage without adding a successor."""
-    history = list(manifest["history"])
-    report = VerifiedFile(root / "training-report.json", manifest["training_report_sha256"])
-    if sha256_file(report.path) != report.sha256:
+    if sha256_file(root / "training-report.json") != manifest["training_report_sha256"]:
         raise ValueError("SAC training report changed")
-    artifacts: dict[str, bytes | VerifiedFile] = {}
-    for prior in history:
-        for kind in ("checkpoint", "report"):
-            artifact = VerifiedFile(asset(root, prior[kind]), prior[kind + "_sha256"])
-            artifact.verify()
-            artifacts[prior[kind]] = artifact
-    return history, artifacts, report
+    verify_history(root, manifest["history"])
 
 
-def continuation_history(
-    root: Path, manifest: dict[str, Any], raw: bytes
-) -> tuple[list[dict[str, Any]], dict[str, bytes | VerifiedFile]]:
-    history, blobs, report = checkpoint_history(root, manifest)
-    parent_sha = hashlib.sha256(raw).hexdigest()
-    entry = {
-        "checkpoint": f"history/{parent_sha}-checkpoint.json",
-        "checkpoint_sha256": parent_sha,
-        "report": f"history/{parent_sha}-report.json",
-        "report_sha256": manifest["training_report_sha256"],
-    }
-    blobs.update({entry["checkpoint"]: raw, entry["report"]: report})
-    history.append(entry)
-    return history, blobs
+def continuation_history(root: Path, manifest: dict[str, Any], raw: bytes) -> HistorySource:
+    checkpoint_history(root, manifest)
+    return HistorySource(root, manifest["history"], raw, manifest["training_report_sha256"])
 
 
 def state_digest(torch: Any, state: dict[str, Any]) -> str:

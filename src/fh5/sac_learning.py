@@ -16,6 +16,7 @@ from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any, NamedTuple
 
 from fh5.artifact_io import VerifiedFile, copy_evidence
+from fh5.checkpoint_history import HistorySource, empty_history
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
@@ -308,7 +309,7 @@ def _train(
 
     continuation = None
     restored = None
-    history: list[dict[str, Any]] = []
+    history_source: HistorySource | None = None
     history_blobs: dict[str, bytes | VerifiedFile] = {}
     if isinstance(operation, SACResume):
         manifest, restored, parent_bytes = read_checkpoint(torch, operation.checkpoint_dir)
@@ -319,9 +320,7 @@ def _train(
             raise ValueError("SAC continuation differs from its expected parent checkpoint")
         if manifest["version"] not in (2, 3, 4):
             raise ValueError("SAC continuation requires a sealed version 2, 3 or 4 checkpoint")
-        history, history_blobs = continuation_history(
-            operation.checkpoint_dir, manifest, parent_bytes
-        )
+        history_source = continuation_history(operation.checkpoint_dir, manifest, parent_bytes)
         configuration = dict(manifest["configuration"], steps=operation.steps)
         if operation.demonstration_fraction is not None:
             configuration["demonstration_fraction"] = operation.demonstration_fraction
@@ -355,7 +354,7 @@ def _train(
         if warm["version"] == 2 and initial_critic["step"] != warm["configuration"]["steps"]:
             raise ValueError("Finish finite critic warm-up before starting SAC updates")
         if warm["version"] == 2:
-            history, history_blobs = continuation_history(request.warmup_dir, warm, warm_bytes)
+            history_source = continuation_history(request.warmup_dir, warm, warm_bytes)
         warm_sha = hashlib.sha256(warm_bytes).hexdigest()
         bc_dir = request.warmup_dir / "actor"
     else:
@@ -495,6 +494,7 @@ def _train(
         raise ValueError("SAC handoff changes deterministic BC commands")
     output = request.output_dir
     output.mkdir(parents=True)
+    history = history_source.retain(output) if history_source is not None else empty_history()
     experience = seal_experience(data.raw, request.replay_file, output / "experience")
     copy_evidence(output, history_blobs)
     (output / "bc").mkdir()
