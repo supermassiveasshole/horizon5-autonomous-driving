@@ -1106,3 +1106,6 @@ batch=258 与更大的显式预算 260 在同一完整样本池中得到相同 a
 `runs/resource-assessment-model-integrated-results.xml`。
 本片段仍保留必要的组信息数组，评估配置读取和 Torch 元数据另行审计；
 不将局部投影视为全仓资源清理完成。
+
+固定 `082a86e...bc16b83` 独立双轴复审：**Standards 0 项、Spec 0 项**。
+本次只审阅已提交的评估读取及证据，未覆盖并行进行中的训练 loss 日志迁移。
