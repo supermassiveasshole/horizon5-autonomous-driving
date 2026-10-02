@@ -4,8 +4,10 @@ import hashlib
 import json
 import struct
 from dataclasses import replace
+from pathlib import Path
 
 import pytest
+from checkpoint_files import prediction_records
 from test_sac import experience
 from test_sac_learning import warm_start
 
@@ -313,9 +315,84 @@ def test_cycle_sampling_matches_public_frozen_replay_with_the_recorded_explorati
             tmp_path / "noise-check.html",
             noise=tuple(first["noise"]),
         )
-    ).summary["sac_policy"]["predictions"][0]
+    ).summary["sac_policy"]
+    checked = prediction_records(tmp_path, checked)[0]
     assert first["command"] == pytest.approx(checked["command"], abs=1e-7)
     assert first["log_probability"] == checked["log_probability"]
+
+
+def test_cycle_checks_reloaded_predictions_when_optional_prediction_storage_fails(
+    tmp_path, monkeypatch
+):
+    checkpoint = initial(tmp_path)
+    original_open = Path.open
+
+    def unavailable_prediction(path, mode="r", *args, **kwargs):
+        if path.name.endswith("predictions.jsonl") and mode == "xb":
+            raise OSError("optional prediction storage unavailable")
+        return original_open(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", unavailable_prediction)
+    result = run_experiment(
+        cycle_request(tmp_path, checkpoint), sac_environment=ResponsiveEnvironment(tmp_path)
+    ).summary["sac_cycle"]
+    assert result["stop_reason"] == "budget_completed", result.get("error")
+    assert len(result["attempts"]) == 2
+    for attempt in result["attempts"]:
+        assert attempt["inference_reload_max_error"] == 0
+        report = json.loads(
+            (tmp_path / "cycle" / attempt["candidate"] / "training-report.json").read_bytes()
+        )
+        assert report["predictions"]["status"] == "complete"
+        assert report["predictions"]["diagnostic"]["status"] == "unavailable"
+
+
+def test_cycle_keeps_completed_candidate_but_does_not_accept_an_incomplete_prediction_check(
+    tmp_path, monkeypatch
+):
+    checkpoint = initial(tmp_path)
+    cached = tmp_path / "cached"
+    run_experiment(SACResume(checkpoint, cached, steps=0, raw_cache_bytes=64 * 36 * 3))
+
+    class ChangingFrames(ResponsiveEnvironment):
+        def sample(self):
+            sample = super().sample()
+            frames = tuple(
+                replace(frame, pixels=memoryview(bytes([100 + self.index, 20, 30] * 64 * 36)))
+                for frame in sample.decision.frames
+            )
+            return replace(sample, decision=replace(sample.decision, frames=frames))
+
+    original_open = Path.open
+    candidate = tmp_path / "cycle/candidate-000"
+    post_update, failed = [], []
+
+    def fail_once(path, mode="r", *args, **kwargs):
+        if path == candidate / "diagnostics/predictions.jsonl" and mode == "xb":
+            post_update.append(True)
+        if post_update and not failed and path.suffix == ".rgb" and mode == "rb":
+            failed.append(True)
+            raise MemoryError("post-update prediction allocation unavailable")
+        return original_open(path, mode, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(Path, "open", fail_once)
+        result = run_experiment(
+            cycle_request(tmp_path, cached), sac_environment=ChangingFrames(tmp_path)
+        ).summary["sac_cycle"]
+    assert failed
+    assert result["stop_reason"] == "interface_error"
+    assert "prediction check unavailable" in result["error"]
+    assert len(result["attempts"]) == 1
+    assert "latest_candidate" not in result
+    saved = json.loads((candidate / "training-report.json").read_bytes())
+    assert saved["steps_completed"] == 3
+    assert saved["predictions"]["status"] == "unavailable"
+    recovered = run_experiment(SACResume(candidate, tmp_path / "recovered", steps=0)).summary[
+        "sac_learning"
+    ]
+    assert recovered["learner_state_sha256"] == saved["learner_state_sha256"]
+    assert recovered["predictions"]["status"] == "complete"
 
 
 def test_failure_feedback_remains_a_terminal_training_transition(tmp_path):

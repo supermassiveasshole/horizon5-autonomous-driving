@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from checkpoint_files import update_records
+from checkpoint_files import prediction_records, update_records
 from test_sac import experience
 from test_temporal_bc import temporal_fixture
 
@@ -72,9 +72,11 @@ def test_learned_policy_reloads_with_same_commands_and_continuous_density(tmp_pa
     restored = run_experiment(
         SACPolicyReplay(tmp_path / "candidate", replay, tmp_path / "replayed.html")
     ).summary["sac_policy"]
-    assert restored["predictions"] == trained["predictions"]
+    assert prediction_records(tmp_path, restored) == prediction_records(
+        tmp_path / "candidate", trained
+    )
     assert restored["commands_sent"] is False
-    for row in restored["predictions"]:
+    for row in prediction_records(tmp_path, restored):
         # Density at the Gaussian mean = 1/(sigma*sqrt(2*pi)), divided
         # by each transform derivative scale*(1-unit^2).
         density = 1.0
@@ -118,12 +120,16 @@ def test_saturated_bc_handoff_and_stochastic_commands_share_quantized_bounds(tmp
         SACTrain(tmp_path / "warm", replay, tmp_path / "candidate", steps=0)
     ).summary["sac_learning"]
     assert trained["bc_transfer_command_error"] == 0
-    assert trained["predictions"][0]["deterministic"][0] * 32767 == pytest.approx(328, abs=2e-5)
+    assert prediction_records(tmp_path / "candidate", trained)[0]["deterministic"][
+        0
+    ] * 32767 == pytest.approx(328, abs=2e-5)
     sampled = run_experiment(
         SACPolicyReplay(tmp_path / "candidate", replay, tmp_path / "sampled.html", noise=(-2, 2))
     ).summary["sac_policy"]
-    assert sampled["predictions"] != trained["predictions"]
-    for row in sampled["predictions"]:
+    assert prediction_records(tmp_path, sampled) != prediction_records(
+        tmp_path / "candidate", trained
+    )
+    for row in prediction_records(tmp_path, sampled):
         for i, scale in enumerate((32767, 255)):
             value = row["command"][i]
             assert row["context"][3 + i] - 1e-7 <= value <= row["context"][5 + i] + 1e-7
@@ -158,7 +164,9 @@ def test_cli_trains_and_replays_the_updated_sac_policy(tmp_path, capsys):
         == 0
     )
     restored = json.loads(capsys.readouterr().out)
-    assert restored["predictions"] == trained["predictions"]
+    assert prediction_records(tmp_path, restored) == prediction_records(
+        tmp_path / "candidate", trained
+    )
 
 
 def test_policy_replay_cannot_overwrite_candidate_experience_or_existing_reports(tmp_path):

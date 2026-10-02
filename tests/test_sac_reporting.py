@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from checkpoint_files import prediction_records
 from test_sac_learning import warm_start
 
 from fh5.experiment import run_experiment
@@ -33,9 +34,8 @@ def test_html_write_failure_preserves_training_and_continuation(tmp_path, monkey
         SACPolicyReplay(resumed, resumed / "experience/replay.json", tmp_path / "rebuilt.html")
     )
     assert restored.report_path.is_file()
-    assert (
-        restored.summary["sac_policy"]["predictions"]
-        == continued.summary["sac_learning"]["predictions"]
+    assert prediction_records(tmp_path, restored.summary["sac_policy"]) == prediction_records(
+        resumed, continued.summary["sac_learning"]
     )
 
 

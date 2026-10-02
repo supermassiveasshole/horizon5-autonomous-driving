@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 from fh5.collection_store import encode, read_bounded, write_file
+from fh5.learning_diagnostics import prediction_identity
 from fh5.learning_runtime import preserve_torch_state
 from fh5.presentation import optional_report
 from fh5.realtime import RealtimeConfig, RealtimeRun
@@ -314,7 +315,9 @@ def run_sac_cycle(
                     result["reload_presentation"] = checked["presentation"]
                 if "diagnostic_export" in checked:
                     result["reload_diagnostic_export"] = checked["diagnostic_export"]
-                if checked["predictions"] != learned["predictions"]:
+                if prediction_identity(checked["predictions"]) != prediction_identity(
+                    learned["predictions"]
+                ):
                     raise ValueError("Candidate reload differs from the complete learner snapshot")
                 result["inference_reload_max_error"] = 0
                 checkpoint = candidate

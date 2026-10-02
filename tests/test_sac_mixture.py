@@ -5,7 +5,7 @@ import json
 from dataclasses import replace
 
 import pytest
-from checkpoint_files import update_records
+from checkpoint_files import prediction_records, update_records
 from test_sac import experience
 
 from fh5.experiment import run_experiment
@@ -93,7 +93,7 @@ def test_mixture_continuation_matches_uninterrupted_learning_and_zero_quota_exit
             tmp_path / "reloaded.html",
         )
     ).summary["sac_policy"]
-    assert reloaded["predictions"] == second["predictions"]
+    assert prediction_records(tmp_path, reloaded) == prediction_records(tmp_path / "second", second)
     exited = run_experiment(
         SACResume(tmp_path / "second", tmp_path / "exit", steps=2, demonstration_fraction=0)
     ).summary["sac_learning"]

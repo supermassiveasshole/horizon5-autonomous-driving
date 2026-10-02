@@ -8,7 +8,7 @@ import pytest
 from test_sac_learning import warm_start
 
 from fh5.experiment import run_experiment
-from fh5.sac_learning import SACResume, SACTrain
+from fh5.sac_learning import SACPolicyReplay, SACResume, SACTrain
 
 
 def test_updates_are_incremental_records_with_compact_training_summary(tmp_path):
@@ -29,6 +29,66 @@ def test_updates_are_incremental_records_with_compact_training_summary(tmp_path)
     report = json.loads((output / "training-report.json").read_bytes())
     assert report["updates"] == descriptor
     assert report["steps_completed"] == 4
+
+
+def test_predictions_are_streamed_and_reloaded_identity_ignores_display_location(tmp_path):
+    replay = warm_start(tmp_path)
+    output = tmp_path / "candidate"
+    trained = run_experiment(SACTrain(tmp_path / "warm", replay, output, steps=2)).summary[
+        "sac_learning"
+    ]
+    prediction = trained["predictions"]
+    assert isinstance(prediction, dict), "Predictions must not accumulate in training summaries"
+    assert prediction["format"] == "sac-predictions-v1"
+    assert prediction["records"] == 2
+    raw = (output / prediction["diagnostic"]["path"]).read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == prediction["sha256"]
+    records = [json.loads(line) for line in raw.splitlines()]
+    assert [record["id"] for record in records] == ["transition-0", "transition-1"]
+    reloaded = run_experiment(SACPolicyReplay(output, replay, tmp_path / "reloaded.html")).summary[
+        "sac_policy"
+    ]["predictions"]
+    assert reloaded["records"] == 2
+    assert reloaded["sha256"] == prediction["sha256"]
+    assert reloaded["diagnostic"]["path"] != prediction["diagnostic"]["path"]
+    assert trained["before_predictions"]["records"] == 2
+
+
+@pytest.mark.parametrize("failure", [OSError, MemoryError])
+def test_unavailable_prediction_files_preserve_numerical_check_and_learning(
+    tmp_path, monkeypatch, failure
+):
+    replay = warm_start(tmp_path)
+    output = tmp_path / "candidate"
+    original_open = Path.open
+
+    def unavailable_prediction(path, mode="r", *args, **kwargs):
+        if path.name.endswith("predictions.jsonl") and mode == "xb":
+            raise failure("prediction diagnostic storage unavailable")
+        return original_open(path, mode, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(Path, "open", unavailable_prediction)
+        trained = run_experiment(SACTrain(tmp_path / "warm", replay, output, steps=3)).summary[
+            "sac_learning"
+        ]
+        reloaded = run_experiment(
+            SACPolicyReplay(output, replay, tmp_path / "reloaded.html")
+        ).summary["sac_policy"]
+    assert trained["steps_completed"] == 3
+    assert trained["bc_transfer_command_error"] == 0
+    for value in (trained["before_predictions"], trained["predictions"], reloaded["predictions"]):
+        assert value["records"] == 2 and value["sha256"]
+        assert value["diagnostic"]["status"] == "unavailable"
+        assert value["diagnostic"]["sha256"] is None
+    assert trained["predictions"]["sha256"] == reloaded["predictions"]["sha256"]
+    continued = run_experiment(SACResume(output, tmp_path / "continued", steps=2)).summary[
+        "sac_learning"
+    ]
+    whole = run_experiment(
+        SACTrain(tmp_path / "warm", replay, tmp_path / "whole", steps=5)
+    ).summary["sac_learning"]
+    assert continued["learner_state_sha256"] == whole["learner_state_sha256"]
 
 
 def test_update_log_is_written_before_training_finishes(tmp_path):

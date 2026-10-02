@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
+from checkpoint_files import prediction_records
 from test_candidate_store import candidates as candidates
 from test_sac_frame_cache import FRAME_BYTES, varied_candidate
 from test_sac_frame_cache import saved_candidate as saved_candidate
@@ -31,7 +32,7 @@ def test_expansion_copies_one_frame_at_a_time_and_replays_after_moving(tmp_path,
     restored = run_experiment(
         SACPolicyReplay(moved, moved / "experience/replay.json", tmp_path / "restored.html")
     ).summary["sac_policy"]
-    assert restored["predictions"] == report["predictions"]
+    assert prediction_records(tmp_path, restored) == prediction_records(moved, report)
     assert restored["commands_sent"] is False
 
 
@@ -146,7 +147,7 @@ def test_frozen_replay_pixel_reads_do_not_allocate_the_cache_capacity(tmp_path, 
             SACPolicyReplay(checkpoint, replay, tmp_path / "replay.html")
         ).summary["sac_policy"]
     (tmp_path / "read-memory-observation.json").write_text(json.dumps({"peak_bytes": peaks}))
-    assert result["predictions"] and result["commands_sent"] is False
+    assert prediction_records(tmp_path, result) and result["commands_sent"] is False
     assert peaks and max(peaks) < 64 * 1024
 
 

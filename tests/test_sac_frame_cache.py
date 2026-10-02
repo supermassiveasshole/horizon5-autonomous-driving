@@ -8,7 +8,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
-from checkpoint_files import update_records
+from checkpoint_files import prediction_records, update_records
 from test_candidate_store import candidates as candidates
 from test_sac import experience
 
@@ -32,7 +32,7 @@ def test_frozen_replay_shares_raw_frames_within_an_explicit_byte_budget(tmp_path
     bounded = run_experiment(
         SACPolicyReplay(checkpoint, replay, tmp_path / "bounded.html", raw_cache_bytes=FRAME_BYTES)
     ).summary["sac_policy"]
-    assert bounded["predictions"] == baseline["predictions"]
+    assert prediction_records(tmp_path, bounded) == prediction_records(tmp_path, baseline)
     cache = bounded["raw_frame_cache"]
     assert cache["budget_bytes"] == cache["peak_bytes"] == FRAME_BYTES
     assert cache["retained_bytes"] <= FRAME_BYTES
@@ -84,7 +84,7 @@ def test_evicted_frames_reload_without_changing_frozen_predictions_or_deleting_s
     bounded = run_experiment(
         SACPolicyReplay(checkpoint, replay, tmp_path / "bounded.html", raw_cache_bytes=FRAME_BYTES)
     ).summary["sac_policy"]
-    assert bounded["predictions"] == baseline["predictions"]
+    assert prediction_records(tmp_path, bounded) == prediction_records(tmp_path, baseline)
     cache = bounded["raw_frame_cache"]
     assert cache["unique_frames"] == 5 and cache["evictions"] > 0
     assert cache["peak_bytes"] == cache["retained_bytes"] == FRAME_BYTES
@@ -111,7 +111,7 @@ def test_resume_keeps_complete_learning_state_when_only_the_frame_budget_changes
     replayed = run_experiment(
         SACPolicyReplay(continued, continued / "experience/replay.json", tmp_path / "restored.html")
     ).summary["sac_policy"]
-    assert replayed["predictions"] == bounded["predictions"]
+    assert prediction_records(tmp_path, replayed) == prediction_records(continued, bounded)
     assert replayed["raw_frame_cache"]["budget_bytes"] == FRAME_BYTES
 
 
@@ -211,4 +211,38 @@ def test_actual_updates_and_complete_resume_are_independent_of_frame_eviction(
     restored = run_experiment(
         SACPolicyReplay(output, output / "experience/replay.json", tmp_path / "restored.html")
     ).summary["sac_policy"]
-    assert restored["predictions"] == bounded["predictions"]
+    assert prediction_records(tmp_path, restored) == prediction_records(output, bounded)
+
+
+@pytest.mark.parametrize("failure", [OSError, MemoryError])
+def test_post_update_prediction_resource_failure_retains_completed_learning(
+    tmp_path, saved_candidate, monkeypatch, failure
+):
+    checkpoint, _ = varied_candidate(tmp_path, saved_candidate)
+    output = tmp_path / "candidate"
+    original_open = Path.open
+    post_update = []
+
+    def unavailable_cold_input(path, mode="r", *args, **kwargs):
+        if path == output / "diagnostics/predictions.jsonl" and mode == "xb":
+            post_update.append(True)
+        if post_update and path.suffix == ".rgb" and mode == "rb":
+            raise failure("cold input unavailable during post-update prediction")
+        return original_open(path, mode, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(Path, "open", unavailable_cold_input)
+        trained = run_experiment(
+            SACResume(checkpoint, output, steps=1, raw_cache_bytes=FRAME_BYTES)
+        ).summary["sac_learning"]
+    assert trained["steps_completed"] == 1
+    assert trained["predictions"]["status"] == "unavailable"
+    assert trained["predictions"]["sha256"] is None
+    assert "cold input unavailable" in trained["predictions"]["error"]
+    continued = run_experiment(SACResume(output, tmp_path / "continued", steps=2)).summary[
+        "sac_learning"
+    ]
+    whole = run_experiment(
+        SACResume(checkpoint, tmp_path / "whole", steps=3, raw_cache_bytes=FRAME_BYTES)
+    ).summary["sac_learning"]
+    assert continued["learner_state_sha256"] == whole["learner_state_sha256"]

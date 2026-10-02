@@ -6,6 +6,7 @@ import time
 from dataclasses import replace
 
 import pytest
+from checkpoint_files import prediction_records
 from test_evaluation import prepare, sha
 from test_evaluation_execution import PacketGame
 from test_evaluation_run import Batch, request
@@ -171,7 +172,7 @@ def test_frozen_sac_batch_keeps_its_complete_policy_when_the_batch_moves(tmp_pat
         )
     ).summary["sac_policy"]
     original = json.loads((sac_policy / "training-report.json").read_bytes())
-    assert replayed["predictions"] == original["predictions"]
+    assert prediction_records(tmp_path, replayed) == prediction_records(sac_policy, original)
     assert manifest["model_diagnostic_only"] is True
 
 

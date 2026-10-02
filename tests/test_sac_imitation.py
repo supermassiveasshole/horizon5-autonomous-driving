@@ -3,7 +3,7 @@
 import json
 
 import pytest
-from checkpoint_files import update_records
+from checkpoint_files import prediction_records, update_records
 from test_sac_learning import warm_start
 
 from fh5.experiment import run_experiment
@@ -193,4 +193,6 @@ def test_imitation_schedule_and_updates_survive_an_odd_stop_and_reload(tmp_path)
             tmp_path / "reloaded.html",
         )
     ).summary["sac_policy"]
-    assert reloaded["predictions"] == resumed["predictions"]
+    assert prediction_records(tmp_path, reloaded) == prediction_records(
+        tmp_path / "resumed", resumed
+    )

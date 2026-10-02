@@ -19,9 +19,7 @@ def history_entries(root, manifest=None):
     return list(reversed(entries))
 
 
-def update_records(root):
-    """Read and authenticate update records from either public report format."""
-    descriptor = json.loads((root / "training-report.json").read_bytes())["updates"]
+def _records(root, descriptor):
     if isinstance(descriptor, list):
         return descriptor
     assert descriptor["status"] == "complete"
@@ -29,4 +27,21 @@ def update_records(root):
     assert hashlib.sha256(raw).hexdigest() == descriptor["sha256"]
     records = [json.loads(line) for line in raw.splitlines()]
     assert len(records) == descriptor["records"]
+    return records
+
+
+def update_records(root):
+    """Read and authenticate update records from either public report format."""
+    descriptor = json.loads((root / "training-report.json").read_bytes())["updates"]
+    return _records(root, descriptor)
+
+
+def prediction_records(root, summary):
+    value = summary["predictions"]
+    if isinstance(value, list):
+        return value
+    assert value["status"] == "complete"
+    records = _records(root, value["diagnostic"])
+    assert value["sha256"] == value["diagnostic"]["sha256"]
+    assert len(records) == value["records"]
     return records

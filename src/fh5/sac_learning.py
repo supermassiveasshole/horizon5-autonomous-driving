@@ -7,7 +7,7 @@ import importlib
 import json
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from contextlib import ExitStack
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
@@ -18,7 +18,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 from fh5.artifact_io import VerifiedFile, copy_evidence
 from fh5.checkpoint_history import HistorySource, empty_history
 from fh5.collection_store import encode, read_bounded, write_file
-from fh5.learning_diagnostics import UpdateJournal
+from fh5.learning_diagnostics import PredictionRecorder, RecordJournal
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import PixelContract
@@ -244,11 +244,11 @@ def validate_sac_candidate(root: Path, expected_sha256: str) -> dict[str, Any]:
         ReplaySampling(data.roles, request.batch_size, request.demonstration_fraction)
         learner = _make_learner(torch, bc, saved, request, resume=True)
         # Exercise the actual numerical observation contract and reject non-finite output.
-        encode(
-            policy_predictions(
-                torch, learner.encoder, learner.policy, data, request.normalized_target_entropy
-            )
-        )
+        predictions = PredictionRecorder()
+        for row in policy_predictions(
+            torch, learner.encoder, learner.policy, data, request.normalized_target_entropy
+        ):
+            predictions.add(row)
         digest = state_digest(torch, learner.state(torch, learner.start_step))
         if digest != manifest["learner_state_sha256"]:
             raise ValueError("Restoring candidate changed its learner state")
@@ -270,24 +270,21 @@ def policy_predictions(
     data: LearningReplay,
     normalized_entropy: float,
     noise: tuple[float, float] = (0.0, 0.0),
-) -> list[dict[str, Any]]:
+) -> Iterator[dict[str, Any]]:
     if len(noise) != 2 or any(not math.isfinite(v) or abs(v) > 10 for v in noise):
         raise ValueError("SAC replay noise must be a finite two-axis standard-normal diagnostic")
-    result = []
-    with torch.no_grad():
-        for i, row in enumerate(data.rows):
+    for i, row in enumerate(data.rows):
+        with torch.no_grad():
             features = encode_history(torch, encoder, *data.inputs([i]))
             context = data.context[i : i + 1]
             output = policy(features, context, features.new_tensor([noise]))
-            result.append(
-                {
-                    "id": row["id"],
-                    "context": context[0].tolist(),
-                    **{k: v[0].tolist() for k, v in output.items()},
-                    "target_entropy": normalized_entropy + float(output["log_scale"][0]),
-                }
-            )
-    return result
+            prediction = {
+                "id": row["id"],
+                "context": context[0].tolist(),
+                **{k: v[0].tolist() for k, v in output.items()},
+                "target_entropy": normalized_entropy + float(output["log_scale"][0]),
+            }
+        yield prediction
 
 
 def run_sac_training(
@@ -474,13 +471,24 @@ def _train(
     initial_encoder, initial_policy, initial_critic = map(_snapshot, (encoder, policy, critic))
     initial_target = _snapshot(target_encoder)
 
-    before = policy_predictions(torch, encoder, policy, data, request.normalized_target_entropy)
+    output = request.output_dir
+    output.mkdir(parents=True)
+    before_journal = RecordJournal(
+        output, "diagnostics/before-predictions.jsonl", "sac-prediction-jsonl-v1"
+    )
+    resources.callback(before_journal.close)
+    before = PredictionRecorder(before_journal)
     transfer_error: float | None = None
     if restored is None:
         transfer_error = 0.0
-    with torch.no_grad():
-        for i, row in enumerate(data.rows if restored is None else []):
-            teacher = bc.model(*data.inputs([i]))[0].tolist()
+    for i, prediction in enumerate(
+        policy_predictions(torch, encoder, policy, data, request.normalized_target_entropy)
+    ):
+        before.add(prediction)
+        if restored is None:
+            row = data.rows[i]
+            with torch.no_grad():
+                teacher = bc.model(*data.inputs([i]))[0].tolist()
             expected = bounds.deterministic(
                 teacher, row["previous_action"], row["action_elapsed_s"]
             )
@@ -488,13 +496,12 @@ def _train(
                 transfer_error or 0.0,
                 max(
                     abs(round(a * scale) - round(b * scale))
-                    for a, b, scale in zip(expected, before[i]["deterministic"], (32767, 255))
+                    for a, b, scale in zip(expected, prediction["deterministic"], (32767, 255))
                 ),
             )
     if transfer_error:
         raise ValueError("SAC handoff changes deterministic BC commands")
-    output = request.output_dir
-    output.mkdir(parents=True)
+    before_summary = before.finish()
     history = history_source.retain(output) if history_source is not None else empty_history()
     experience = seal_experience(data.raw, request.replay_file, output / "experience")
     copy_evidence(output, history_blobs)
@@ -503,7 +510,7 @@ def _train(
         write_file(output / "bc" / name, value)
     updates, encoder_actor_change, actor_critic_change = 0, 0.0, 0.0
     started = time.monotonic()
-    journal = UpdateJournal(output)
+    journal = RecordJournal(output, "diagnostics/updates.jsonl", "sac-update-jsonl-v1")
     resources.callback(journal.close)
     steps_completed = 0
     stop_reason = "budget_completed"
@@ -603,11 +610,24 @@ def _train(
             raise ValueError("Non-finite SAC update")
         steps_completed += 1
         journal.append(entry)
+    update_duration_s = time.monotonic() - started
+    predictions_journal = RecordJournal(
+        output, "diagnostics/predictions.jsonl", "sac-prediction-jsonl-v1"
+    )
+    resources.callback(predictions_journal.close)
+    predictions = PredictionRecorder(predictions_journal)
+    try:
+        for row in policy_predictions(
+            torch, encoder, policy, data, request.normalized_target_entropy
+        ):
+            predictions.add(row)
+    except (OSError, MemoryError) as error:
+        predictions.unavailable(error)
     summary = {
         "stage": "sac_updates",
         "source_kind": "synthetic",
         "device": "cpu",
-        "update_duration_s": time.monotonic() - started,
+        "update_duration_s": update_duration_s,
         "steps_requested": request.steps,
         "experience_added_transitions": added,
         "experience_expansion": expansion,
@@ -626,10 +646,8 @@ def _train(
         "encoder_change_during_actor_max": encoder_actor_change,
         "actor_change_during_critic_max": actor_critic_change,
         "bc_transfer_command_error": transfer_error,
-        "before_predictions": before,
-        "predictions": policy_predictions(
-            torch, encoder, policy, data, request.normalized_target_entropy
-        ),
+        "before_predictions": before_summary,
+        "predictions": predictions.finish(),
         "updates": journal.finish(),
         "sampling": sampling.report(),
         "raw_frame_bytes": data.source_bytes,
@@ -705,7 +723,7 @@ def run_sac_policy_replay(request: SACPolicyReplay) -> RunResult:
     if request.report_path.suffix.lower() != ".html":
         raise ValueError("SAC policy replay requires a new HTML report")
     torch = importlib.import_module("torch")
-    with preserve_torch_state(torch):
+    with preserve_torch_state(torch), ExitStack() as resources:
         torch.set_num_threads(2)
         frozen = FrozenSAC(torch, request.checkpoint_dir, allow_legacy=True)
         manifest = frozen.manifest
@@ -719,15 +737,24 @@ def run_sac_policy_replay(request: SACPolicyReplay) -> RunResult:
             if request.raw_cache_bytes is not None
             else manifest["configuration"].get("raw_cache_bytes", 512 * 1024**2),
         )
+        journal = RecordJournal(
+            request.report_path.parent,
+            request.report_path.with_suffix(".predictions.jsonl").name,
+            "sac-prediction-jsonl-v1",
+        )
+        resources.callback(journal.close)
+        predictions = PredictionRecorder(journal)
+        for row in policy_predictions(
+            torch,
+            frozen.encoder,
+            frozen.policy,
+            data,
+            manifest["configuration"]["normalized_target_entropy"],
+            request.noise,
+        ):
+            predictions.add(row)
         summary = {
-            "predictions": policy_predictions(
-                torch,
-                frozen.encoder,
-                frozen.policy,
-                data,
-                manifest["configuration"]["normalized_target_entropy"],
-                request.noise,
-            ),
+            "predictions": predictions.finish(),
             "commands_sent": False,
             "real_driving_validated": False,
             "density_coordinates": manifest["density_coordinates"],
