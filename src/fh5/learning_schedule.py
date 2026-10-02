@@ -234,6 +234,13 @@ class LearningSchedule:
         if now < self.started or now - self.started >= self.budget["max_total_s"] * 1_000_000_000:
             raise ScheduleStopped("total_time_limit")
 
+    def _check_wait_limit(self, now: int, waiting_since: int | None) -> None:
+        if (
+            waiting_since is not None
+            and now - waiting_since >= self.budget["max_wait_s"] * 1_000_000_000
+        ):
+            raise ScheduleStopped("resource_wait_timeout")
+
     def _checkpoint(
         self,
         phase: str,
@@ -247,17 +254,14 @@ class LearningSchedule:
         while True:
             now = self.source.now_ns()
             self._check_limits(now)
-            if (
-                waiting_since is not None
-                and now - waiting_since >= self.budget["max_wait_s"] * 1_000_000_000
-            ):
-                raise ScheduleStopped("resource_wait_timeout")
+            self._check_wait_limit(now, waiting_since)
             sample = resource_observation(self.source.sample(), include_gpu=self.device == "cuda")
             self.samples += 1
             now = self.source.now_ns()
             stopped: ScheduleStopped | None = None
             try:
                 self._check_limits(now)
+                self._check_wait_limit(now, waiting_since)
                 reasons = self._reasons(sample, now)
             except ScheduleStopped as error:
                 stopped, reasons = error, [str(error)]
