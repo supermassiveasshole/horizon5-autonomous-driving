@@ -65,6 +65,9 @@ def test_prepare_freezes_copied_source_config_and_isolated_dependencies_without_
     config.write_text("changed developer configuration")
     frozen = json.loads((bundle / "frozen.json").read_bytes())
     assert frozen["source"] == "synthetic" and frozen["files"]
+    assert frozen["version"] == 2
+    assert set(frozen["inputs"]) == {"capture.json", "input-profile.json"}
+    assert all(name.startswith(frozen["collector_package"] + "/") for name in frozen["files"])
     assert json.loads((bundle / "project" / "capture.json").read_bytes())["version"] == 1
     python = (
         bundle / "project" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -77,6 +80,9 @@ def test_prepare_freezes_copied_source_config_and_isolated_dependencies_without_
 
 def test_detached_collector_survives_launcher_and_can_be_queried_stopped_and_replayed(tmp_path):
     bundle, config, _ = prepare(tmp_path, seconds=15)
+    cache = bundle / "project/.venv/installer-cache"
+    cache.mkdir()
+    (cache / "last-check.txt").write_text("Unrelated installer cache is not collection input")
     (tmp_path / "developer/src/fh5/collection_worker.py").write_text(
         "raise RuntimeError('developer edits must not run')"
     )
@@ -118,16 +124,35 @@ def test_detached_collector_survives_launcher_and_can_be_queried_stopped_and_rep
     assert state["software_snapshot_verified"]
 
 
-@pytest.mark.parametrize("changed", ["capture.json", "src/fh5/collection_worker.py", "uv.lock"])
+@pytest.mark.parametrize("changed", ["capture.json", "input-profile.json", "installed-collector"])
 def test_modified_frozen_asset_is_rejected_before_a_worker_starts(tmp_path, changed):
     from fh5.collection_process import CollectionStart
 
-    bundle, _, _ = prepare(tmp_path)
-    with (bundle / "project" / changed).open("a") as stream:
+    bundle, _, result = prepare(tmp_path)
+    path = (
+        Path(result.summary["collection"]["runtime"]["package"])
+        if changed == "installed-collector"
+        else bundle / "project" / changed
+    )
+    with path.open("a") as stream:
         stream.write("changed")
     with pytest.raises(ValueError, match="snapshot changed"):
         run_experiment(CollectionStart(bundle))
     assert not (bundle / "process.json").exists() and not (bundle / "recording").exists()
+
+
+def test_old_prepared_bundle_requests_reprepare_without_rewriting_it(tmp_path):
+    from fh5.collection_process import CollectionStart
+
+    bundle = tmp_path / "old-bundle"
+    bundle.mkdir()
+    path = bundle / "frozen.json"
+    original = json.dumps({"version": 1, "kind": "frozen-passive-collection-v1"})
+    path.write_text(original)
+    with pytest.raises(ValueError, match="collection-prepare in a new directory"):
+        run_experiment(CollectionStart(bundle))
+    assert path.read_text() == original
+    assert not (bundle / "start.claim").exists()
 
 
 def test_native_bundle_requires_explicit_live_start_and_locked_installer(tmp_path):

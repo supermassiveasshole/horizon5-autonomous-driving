@@ -14,8 +14,8 @@ from typing import Any
 from fh5.capture_config import parse_capture_config
 from fh5.collection import CollectionConfig, CollectionInput, CollectionRun
 from fh5.collection_host import process_identity
-from fh5.collection_process import verify_bundle
-from fh5.collection_store import atomic_control_json, read_bounded
+from fh5.collection_process import read_bundle
+from fh5.collection_store import atomic_control_json
 from fh5.numeric_images import NumericFrame, PixelContract
 
 
@@ -107,13 +107,13 @@ def main() -> int:
     }
     code = 4
     try:
-        manifest, digest = verify_bundle(root)
+        manifest, digest = read_bundle(root)
         if digest != expected or (root / "start.claim").read_text(encoding="utf-8") != token:
             raise ValueError("Collector launch identity or snapshot changed")
         state.update(state="recording", software_snapshot_verified=True, manifest_sha256=digest)
         atomic_control_json(root / "worker-state.json", state)
         project = root / "project"
-        document = json.loads(read_bounded(project / "capture.json", 1024**2))
+        document = json.loads((project / "capture.json").read_bytes())
         capture, target = parse_capture_config(document)
         options = dict(manifest["collection"])
         options["pixels"] = PixelContract.from_metadata(options["pixels"])
