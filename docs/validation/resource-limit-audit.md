@@ -292,3 +292,12 @@ C 盘恢复约 11.7 GB 可用空间。重新验证将显式使用 G 盘工作区
 保存的 learner 可重新加载且不重复更新。与父循环及 critic/SAC 诊断组合
 **39 passed / 198.51 秒**，结果 `runs/resource-parent-stages-focused-20261002-results.xml`。
 Ruff、350 文件格式及 133 源文件 strict mypy 通过。另有父更新恢复/容量路径集成验证待完成。
+
+父更新停止/强杀恢复及容量初始化组合 **18 passed / 202.14 秒**，
+结果 `runs/resource-parent-stages-recovery-20261002-results.xml`。
+固定 `d09e088...d52b702` 独立只读审阅：**Standards 0 项、Spec 0 项**。
+
+冻结 `d09e088`、G 盘临时空间的全量回归已结束：**1070 passed / 1 failed / 1489.41 秒**，
+结果在隔离检出 `runs/resource-policy-full-20261002-results.xml`。失败用例为读取中像素文件增长，
+代码仍拒绝该文件，但返回 `exceeds source byte budget`，旧断言要求 `changed size while reading`。
+这次不是全量通过，需核实读取错误归因并重新验证；该冻结运行不含父阶段历史迁移。
