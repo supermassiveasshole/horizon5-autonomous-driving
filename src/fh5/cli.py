@@ -225,7 +225,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     sac_resume.add_argument("--output", type=Path, required=True)
     sac_resume.add_argument("--steps", type=int, default=100)
     sac_resume.add_argument(
-        "--raw-cache-bytes", type=int, help="Raw uint8 frame cache budget; omitted inherits"
+        "--raw-cache-bytes",
+        type=int,
+        help="Raw uint8 retention budget; 0 disables, omitted inherits",
     )
     sac_resume.add_argument("--checkpoint-sha256", help="Require this exact parent manifest digest")
     sac_resume.add_argument(
@@ -255,7 +257,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     for name in ("checkpoint", "replay", "report"):
         sac_policy.add_argument("--" + name, type=Path, required=True)
     sac_policy.add_argument(
-        "--raw-cache-bytes", type=int, help="Raw uint8 frame cache budget; omitted inherits"
+        "--raw-cache-bytes",
+        type=int,
+        help="Raw uint8 retention budget; 0 disables, omitted inherits",
     )
     sac_prepare = commands.add_parser(
         "sac-prepare", help="Prepare synthetic numerical learning transitions; no devices"

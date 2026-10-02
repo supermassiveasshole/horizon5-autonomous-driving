@@ -179,15 +179,126 @@ def test_cold_frame_changed_after_initial_predictions_is_rejected_on_reload(
         original.write_bytes(original_bytes)
 
 
-@pytest.mark.parametrize("budget", [0, True, FRAME_BYTES - 1])
-def test_invalid_or_too_small_cache_does_not_publish_a_policy_report(
-    tmp_path, saved_candidate, budget
-):
+@pytest.mark.parametrize("budget", [-1, True, 0.5])
+def test_invalid_cache_budget_does_not_publish_a_policy_report(tmp_path, saved_candidate, budget):
     checkpoint, replay = saved_candidate
     report = tmp_path / "invalid.html"
     with pytest.raises(ValueError, match="cache.*budget"):
         run_experiment(SACPolicyReplay(checkpoint, replay, report, raw_cache_bytes=budget))
     assert not report.exists()
+
+
+@pytest.mark.parametrize("budget", [0, FRAME_BYTES - 1, 512 * 1024**2 + 1])
+def test_cache_capacity_controls_retention_instead_of_admitting_frames(
+    tmp_path, saved_candidate, budget
+):
+    checkpoint, replay = saved_candidate
+    baseline = run_experiment(
+        SACPolicyReplay(checkpoint, replay, tmp_path / "baseline.html", raw_cache_bytes=FRAME_BYTES)
+    ).summary["sac_policy"]
+    uncached = run_experiment(
+        SACPolicyReplay(checkpoint, replay, tmp_path / "uncached.html", raw_cache_bytes=budget)
+    ).summary["sac_policy"]
+    assert prediction_records(tmp_path, uncached) == prediction_records(tmp_path, baseline)
+    cache = uncached["raw_frame_cache"]
+    assert cache["budget_bytes"] == budget
+    assert cache["peak_bytes"] <= budget
+    if budget < FRAME_BYTES:
+        assert cache["peak_bytes"] == cache["retained_bytes"] == cache["retained_frames"] == 0
+        assert cache["bypassed_frames"] > 0
+    else:
+        # This is permission to retain bytes, not a preallocation or required size.
+        assert cache["peak_bytes"] == FRAME_BYTES
+    assert cache["files_deleted"] == 0
+
+
+def test_new_training_does_not_invent_a_cache_budget_and_keeps_exact_updates(tmp_path):
+    from test_sac_learning import warm_start
+
+    from fh5.sac_learning import SACTrain
+
+    replay = warm_start(tmp_path)
+    output = tmp_path / "uncached"
+    first = run_experiment(SACTrain(tmp_path / "warm", replay, output, steps=3)).summary[
+        "sac_learning"
+    ]
+    cache = first["raw_frame_cache"]
+    assert cache["budget_bytes"] == cache["retained_bytes"] == cache["peak_bytes"] == 0
+    assert cache["bypassed_frames"] > 0
+    second = run_experiment(SACResume(output, tmp_path / "continued", steps=2)).summary[
+        "sac_learning"
+    ]
+    assert second["raw_frame_cache"]["budget_bytes"] == 0
+    whole = run_experiment(
+        SACTrain(
+            tmp_path / "warm", replay, tmp_path / "cached", steps=5, raw_cache_bytes=FRAME_BYTES
+        )
+    ).summary["sac_learning"]
+    assert second["learner_state_sha256"] == whole["learner_state_sha256"]
+    assert second["predictions"] == whole["predictions"]
+    assert update_records(output) + update_records(tmp_path / "continued") == update_records(
+        tmp_path / "cached"
+    )
+    reloaded = run_experiment(
+        SACPolicyReplay(tmp_path / "continued", replay, tmp_path / "reloaded.html")
+    ).summary["sac_policy"]
+    assert reloaded["raw_frame_cache"]["budget_bytes"] == 0
+    assert reloaded["predictions"]["sha256"] == second["predictions"]["sha256"]
+
+
+def test_legacy_cache_default_is_preserved_and_can_be_explicitly_disabled(tmp_path):
+    from test_sac_learning import warm_start
+
+    from fh5.sac_learning import SACTrain
+
+    torch = pytest.importorskip("torch")
+    replay = warm_start(tmp_path)
+    checkpoint = tmp_path / "legacy"
+    run_experiment(
+        SACTrain(tmp_path / "warm", replay, checkpoint, steps=1, raw_cache_bytes=512 * 1024**2)
+    )
+    # Older public checkpoints omitted the field and inherited 512 MiB.
+    saved = torch.load(checkpoint / "policy.pt", map_location="cpu", weights_only=True)
+    saved["metadata"]["configuration"].pop("raw_cache_bytes")
+    torch.save(saved, checkpoint / "policy.pt")
+    manifest = {
+        **saved["metadata"],
+        "weights_sha256": hashlib.sha256((checkpoint / "policy.pt").read_bytes()).hexdigest(),
+    }
+    (checkpoint / "policy.json").write_text(json.dumps(manifest))
+    inherited = run_experiment(SACResume(checkpoint, tmp_path / "inherited", steps=2)).summary[
+        "sac_learning"
+    ]
+    disabled = run_experiment(
+        SACResume(checkpoint, tmp_path / "disabled", steps=2, raw_cache_bytes=0)
+    ).summary["sac_learning"]
+    assert inherited["raw_frame_cache"]["budget_bytes"] == 512 * 1024**2
+    assert disabled["raw_frame_cache"]["retained_bytes"] == 0
+    assert disabled["learner_state_sha256"] == inherited["learner_state_sha256"]
+    assert disabled["predictions"] == inherited["predictions"]
+
+
+@pytest.mark.parametrize("budget", [0, FRAME_BYTES - 1])
+def test_training_and_resume_bypass_retention_without_changing_real_updates(
+    tmp_path, saved_candidate, budget
+):
+    checkpoint, _ = varied_candidate(tmp_path, saved_candidate)
+    first = run_experiment(
+        SACResume(checkpoint, tmp_path / "first", steps=1, raw_cache_bytes=budget)
+    ).summary["sac_learning"]
+    second = run_experiment(SACResume(tmp_path / "first", tmp_path / "second", steps=1)).summary[
+        "sac_learning"
+    ]
+    whole = run_experiment(
+        SACResume(checkpoint, tmp_path / "whole", steps=2, raw_cache_bytes=FRAME_BYTES)
+    ).summary["sac_learning"]
+    assert first["raw_frame_cache"]["bypassed_frames"] > 0
+    assert second["raw_frame_cache"]["budget_bytes"] == budget
+    assert second["learner_state_sha256"] == whole["learner_state_sha256"]
+    assert second["predictions"] == whole["predictions"]
+    assert update_records(tmp_path / "first") + update_records(tmp_path / "second") == (
+        update_records(tmp_path / "whole")
+    )
 
 
 def test_actual_updates_and_complete_resume_are_independent_of_frame_eviction(

@@ -19,8 +19,8 @@ from fh5.sac_timing import next_action_elapsed
 
 
 def validate_cache_budget(value: int) -> None:
-    if type(value) is not int or not 1 <= value <= 512 * 1024**2:
-        raise ValueError("SAC raw frame cache budget must be 1..512 MiB in bytes")
+    if type(value) is not int or value < 0:
+        raise ValueError("SAC raw frame cache budget must be nonnegative integer bytes")
 
 
 class LearningReplay:
@@ -32,11 +32,12 @@ class LearningReplay:
         actor: FrozenNumericActor,
         bounds: ActionBounds,
         *,
-        cache_bytes: int = 512 * 1024**2,
+        cache_bytes: int = 0,
     ) -> None:
         validate_cache_budget(cache_bytes)
         self.cache_bytes, self.cache_hits = cache_bytes, 0
         self.cache_misses = self.cache_evictions = self.peak_bytes = 0
+        self.cache_bypasses = 0
         self.root = path.parent
         self.torch, self.actor, self.bounds = torch, actor, bounds
         self.raw = read_bounded(path, 128 * 1024**2)
@@ -60,7 +61,8 @@ class LearningReplay:
             identity = json.dumps(row, sort_keys=True)
             if identity in self.observations:
                 return identity
-            frames = tuple(read_numeric_frame(path.parent, f) for f in row["frames"])
+            frame_bytes = actor.contract.size[0] * actor.contract.size[1] * 3
+            frames = tuple(read_numeric_frame(path.parent, f, frame_bytes) for f in row["frames"])
             decision = NumericDecision(
                 row["decision_id"], row["epoch"], row["decision_ns"], frames, row["actor"]
             )
@@ -70,8 +72,6 @@ class LearningReplay:
             numeric = actor.input_features(row["actor"], frames)
             references = []
             for frame, entry in zip(frames, row["frames"]):
-                if frame.pixels.nbytes > self.cache_bytes:
-                    raise ValueError("SAC raw frame exceeds its cache byte budget")
                 digest = entry["sha256"]
                 if digest not in self.sources:
                     self.source_bytes += frame.pixels.nbytes
@@ -126,6 +126,7 @@ class LearningReplay:
             "hits": self.cache_hits,
             "misses": self.cache_misses,
             "evictions": self.cache_evictions,
+            "bypassed_frames": self.cache_bypasses,
             "storage_dtype": "uint8",
             "files_deleted": 0,
         }
@@ -136,19 +137,23 @@ class LearningReplay:
             self.images.move_to_end(digest)
             return self.images[digest]
         self.cache_misses += 1
-        frame = read_numeric_frame(self.root, self.sources[digest], self.cache_bytes)
+        frame_bytes = self.actor.contract.size[0] * self.actor.contract.size[1] * 3
+        frame = read_numeric_frame(self.root, self.sources[digest], frame_bytes)
         size = frame.pixels.nbytes
-        while self.raw_bytes + size > self.cache_bytes:
-            _, old = self.images.popitem(last=False)
-            self.raw_bytes -= old.numel() * old.element_size()
-            self.cache_evictions += 1
-            del old
         width, height = frame.size
         value = (
             self.torch.frombuffer(bytearray(frame.pixels), dtype=self.torch.uint8)
             .reshape(height, width, 3)
             .permute(2, 0, 1)
         )
+        if size > self.cache_bytes:
+            self.cache_bypasses += 1
+            return value
+        while self.raw_bytes + size > self.cache_bytes:
+            _, old = self.images.popitem(last=False)
+            self.raw_bytes -= old.numel() * old.element_size()
+            self.cache_evictions += 1
+            del old
         self.images[digest] = value
         self.raw_bytes += size
         self.peak_bytes = max(self.peak_bytes, self.raw_bytes)

@@ -74,7 +74,7 @@ class SACTrain:
     demonstration_fraction: float | None = None
     imitation_weights: tuple[float, ...] | None = None
     imitation_protocol_batch: Path | None = None
-    raw_cache_bytes: int = 512 * 1024**2
+    raw_cache_bytes: int = 0
 
 
 @dataclass(frozen=True)
@@ -220,6 +220,8 @@ def validate_sac_candidate(root: Path, expected_sha256: str) -> dict[str, Any]:
         checkpoint_history(root, manifest)
         replay_file = root / "experience/replay.json"
         configuration = dict(manifest["configuration"], steps=0)
+        # Missing in legacy checkpoints: preserve their historical cache configuration.
+        configuration.setdefault("raw_cache_bytes", 512 * 1024**2)
         request = SACTrain(root, replay_file, root, **configuration)
         _validate_configuration(request)
         torch.manual_seed(request.seed)
@@ -320,6 +322,7 @@ def _train(
             raise ValueError("SAC continuation requires a sealed version 2, 3 or 4 checkpoint")
         history_source = continuation_history(operation.checkpoint_dir, manifest, parent_bytes)
         configuration = dict(manifest["configuration"], steps=operation.steps)
+        configuration.setdefault("raw_cache_bytes", 512 * 1024**2)
         if operation.demonstration_fraction is not None:
             configuration["demonstration_fraction"] = operation.demonstration_fraction
         if operation.raw_cache_bytes is not None:

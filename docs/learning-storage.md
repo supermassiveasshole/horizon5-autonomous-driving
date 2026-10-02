@@ -83,18 +83,22 @@ uv run --locked fh5 learning-storage-plan --config runs/storage-request.json --o
 
 ## 学习用数值帧热缓存
 
-`SACTrain` 的 `raw_cache_bytes` 控制原始 uint8 数值帧的常驻缓存；省略时为 512 MiB。允许正整数字节数，最高 512 MiB，且至少容纳配置中的一张模型输入图像。该数值是软件预算，不是本机实测推荐值。`sac-train` JSON 可直接设置此字段；续训及冻结回放可显式覆盖：
+`SACTrain` 的 `raw_cache_bytes` 只控制原始 uint8 数值帧的常驻缓存。新训练省略时为 `0`，表示不保留热缓存；在没有实测或明确实验预算时不推定一份内存配额。允许非负整数字节数，不再限制最高 512 MiB，也不要求至少容纳一帧。正数应由实际可用容量/测量或明确的实验配置决定；它是可保留量，不会预分配相同大小的内存。`sac-train` JSON 可直接设置此字段；续训及冻结回放可显式禁用缓存，或填写有依据的字节预算：
 
 ```powershell
-uv run --locked fh5 sac-resume --checkpoint runs/candidate --output runs/continued --steps 100 --raw-cache-bytes 134217728
-uv run --locked fh5 sac-policy-replay --checkpoint runs/continued --replay runs/continued/experience/replay.json --report runs/cache-check.html --raw-cache-bytes 134217728
+uv run --locked fh5 sac-resume --checkpoint runs/candidate --output runs/continued --steps 100 --raw-cache-bytes 0
+uv run --locked fh5 sac-policy-replay --checkpoint runs/continued --replay runs/continued/experience/replay.json --report runs/cache-check.html --raw-cache-bytes 0
 ```
 
-`SACResume` 和 `SACPolicyReplay` 省略预算时沿用候选配置；旧候选没有此字段时使用原 512 MiB 默认值。预算写入候选配置，不改变回报、采样种子或优化器状态。学习循环使用候选继承的预算。
+`SACResume` 和 `SACPolicyReplay` 省略预算时沿用候选配置；旧候选没有此字段时保留其历史 512 MiB 默认语义，避免隐式改写恢复配置，可显式覆盖为 `0` 或实际预算。该兼容值不是新运行的容量推荐。预算写入候选配置，不改变回报、采样种子或优化器状态。学习循环使用候选继承的预算。
 
 缓存按像素摘要共享同一帧；历史观测与转移保留引用，不持有额外图像张量。达到上限时淘汰最近最少使用的帧，后续需要时从原始数值文件重新读入并核验摘要。只释放内存，不删除冷存储文件，不淘汰训练转移。输入特征仍根据每条观测的时间、状态和动作元数据构建；不会把一帧的时间信息复制到共享它的其他观测。训练或回放组批时逐帧复制到浮点批次，不永久保存 encoder latent。
 
-报告中的 `raw_frame_cache` 给出预算、缓存峰值/当前字节数、唯一帧及常驻帧数、命中、重载和淘汰次数。`raw_frame_bytes` 保持学习观测引用的唯一原始像素总量含义，不能把它当作缓存占用。缓存上限不含观测校验的临时图像、浮点批次、模型、优化器、元数据和经验合并的暂存；浮点批次仍有原来的 256 MiB 上限，经验封存/合并仍保留原 512 MiB 数据限制。因此这不是整个进程 RAM/显存或无限多圈 replay 的总预算保证。
+一帧放不进预算或缓存禁用时，按需读取并用于当前批次，随后释放，不因可选缓存拒绝正常数据。
+读取字节上限来自模型输入契约的 RGB `宽 × 高 × 3`，用于拒绝格式不匹配，而非资源配额。
+零缓存会增加磁盘 I/O；临时帧和浮点批次仍需要实际内存，不表示整个训练器无需内存。
+
+报告中的 `raw_frame_cache` 给出预算、缓存峰值/当前字节数、唯一帧及常驻帧数、命中、重载、淘汰和未保留加载次数 `bypassed_frames`。`raw_frame_bytes` 保持学习观测引用的唯一原始像素总量含义，不能把它当作缓存占用。缓存上限不含观测校验的临时图像、浮点批次、模型、优化器、元数据和经验合并的暂存；浮点批次仍有原来的 256 MiB 上限，经验封存/合并仍保留原 512 MiB 数据限制。这些遗留限制无容量依据，按[资源审计](validation/resource-limit-audit.md)继续清理。因此这不是整个进程 RAM/显存或无限多圈 replay 的总预算保证。
 
 低预算会增加磁盘读取；从缓存重载时发现缺失或损坏文件会拒绝处理，不用错误像素发布新候选。保留模型原型、梯度更新对照及尚待完成的长时检查见[缓存验证记录](validation/t15-frame-cache.md)。
 
