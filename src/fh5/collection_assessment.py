@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import json
 import os
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -12,7 +11,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fh5.artifact_io import VerifiedFile, sha256_file
-from fh5.collection_store import read_bounded, write_file
+from fh5.collection_store import write_file
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_recording import _result
@@ -31,11 +30,6 @@ if TYPE_CHECKING:
 class CollectionBCAssess:
     config_file: Path
     output_dir: Path
-
-
-def _json(path: Path, limit: int = 128 * 1024**2) -> tuple[dict[str, Any], str]:
-    raw = read_bounded(path, limit)
-    return json.loads(raw), hashlib.sha256(raw).hexdigest()
 
 
 def _model(entry: dict[str, Any], base: Path) -> tuple[Path, dict[str, Any]]:
@@ -101,10 +95,13 @@ def _overlap(model: dict[str, Any], heldout: list[dict[str, Any]]) -> bool:
 def assess_collection_bc(request: CollectionBCAssess) -> RunResult:
     if request.output_dir.exists():
         raise FileExistsError(request.output_dir)
-    config, config_digest = _json(request.config_file, 1024**2)
+    fields = {"version", "mode", "dataset", "dataset_sha256", "candidate", "baseline", "device"}
+    config_digest = sha256_file(request.config_file)
+    config = read_document_fields(
+        VerifiedFile(request.config_file, config_digest), fields, reject_unknown=True
+    )
     if (
-        set(config)
-        != {"version", "mode", "dataset", "dataset_sha256", "candidate", "baseline", "device"}
+        set(config) != fields
         or config["version"] != 1
         or config["mode"] not in ("development", "final")
         or config["device"] not in ("cpu", "cuda")

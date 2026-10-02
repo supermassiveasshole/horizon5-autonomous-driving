@@ -98,8 +98,6 @@ def temporal_snapshot(
         ):
             raise ValueError("Unsupported numerical training snapshot")
         pixels = PixelContract.from_metadata(data["pixel_contract"])
-        if any(not 32 <= v <= 640 for v in pixels.size):
-            raise ValueError("Temporal training image size outside bounded model range")
         # Group/provenance metadata is still part of the existing Torch model
         # contract. Do not persist SQLite objects into that frozen contract.
         data["groups"] = list(data["groups"])

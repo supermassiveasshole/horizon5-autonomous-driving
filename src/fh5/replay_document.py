@@ -184,9 +184,10 @@ class _JSONInput:
                 self.take(",")
         self.take(end)
 
-    def fields(self, wanted: set[str]) -> dict[str, Any]:
+    def fields(self, wanted: set[str], *, reject_unknown: bool = False) -> dict[str, Any]:
         self.take("{")
         result: dict[str, Any] = {}
+        unknown = False
         if self.peek() != "}":
             while True:
                 key = self.value()
@@ -196,6 +197,7 @@ class _JSONInput:
                 if key in wanted:
                     result[key] = self.value()
                 else:
+                    unknown = True
                     self.discard()
                 if self.peek() != ",":
                     break
@@ -203,6 +205,8 @@ class _JSONInput:
         self.take("}")
         if self.peek():
             raise ValueError("Trailing data after JSON document")
+        if reject_unknown and unknown:
+            raise ValueError("Unsupported configuration fields")
         return result
 
     def scalar_array(self) -> Iterator[Any]:
@@ -257,15 +261,19 @@ class _JSONInput:
         return result
 
 
-def read_document_fields(source: VerifiedFile, wanted: set[str]) -> dict[str, Any]:
+def read_document_fields(
+    source: VerifiedFile, wanted: set[str], *, reject_unknown: bool = False
+) -> dict[str, Any]:
     """Project verified metadata while validating/discarding unused histories.
 
     Selected fields and individual scalar values are decoded as usual. Growing
     unselected arrays/objects are visited incrementally, not materialized.
+    Fixed-schema configuration callers can reject unknown fields after checking
+    complete syntax, without retaining the unknown values or a list of their keys.
     """
     with source.snapshot() as frozen:
         with io.TextIOWrapper(frozen, encoding="utf-8-sig") as text:
-            return _JSONInput(text).fields(wanted)
+            return _JSONInput(text).fields(wanted, reject_unknown=reject_unknown)
 
 
 def read_document_projection(

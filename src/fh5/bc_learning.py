@@ -364,7 +364,7 @@ def _checked_config(value: Any) -> dict[str, Any]:
     if (
         not isinstance(size, list)
         or len(size) != 2
-        or any(type(v) is not int or not 32 <= v <= 640 for v in size)
+        or any(type(v) is not int or v < 1 for v in size)
     ):
         raise ValueError("Invalid image size")
     if value["device"] not in ("cpu", "cuda"):

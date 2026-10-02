@@ -23,7 +23,7 @@ class PixelContract:
     history_offsets_ms: tuple[int, ...] = (200, 100, 0)
 
     def __post_init__(self) -> None:
-        _size(self.size)
+        rgb_byte_count(self.size)
         offsets = self.history_offsets_ms
         if (
             self.version != 1
@@ -84,7 +84,7 @@ class NumericFrame:
 
     def __post_init__(self) -> None:
         # Own immutable storage before a capture producer can reuse its buffer.
-        _size(self.size)
+        expected_bytes = rgb_byte_count(self.size)
         times = (self.source_time_ns, self.capture_received_ns, self.preprocess_ready_ns)
         if (
             not self.epoch
@@ -102,7 +102,7 @@ class NumericFrame:
             raise ValueError("Invalid numerical frame identity or monotonic timestamps")
         width, height = self.size
         owned = bytes(self.pixels)
-        if len(owned) != width * height * 3:
+        if len(owned) != expected_bytes:
             raise ValueError("Numerical RGB byte length does not match dimensions")
         object.__setattr__(self, "pixels", memoryview(owned).cast("B", (height, width, 3)))
         object.__setattr__(
@@ -254,9 +254,15 @@ class NumericReplay:
             raise ValueError("Numerical replay report must have an .html suffix")
 
 
-def _size(value: tuple[int, int]) -> None:
-    if len(value) != 2 or any(type(v) is not int or not 1 <= v <= 4096 for v in value):
-        raise ValueError("Invalid bounded numerical RGB dimensions")
+def rgb_byte_count(size: tuple[int, int] | list[int]) -> int:
+    """Validate the RGB shape and derive its exact storage requirement."""
+    if (
+        not isinstance(size, (tuple, list))
+        or len(size) != 2
+        or any(type(value) is not int or value < 1 for value in size)
+    ):
+        raise ValueError("Invalid numerical RGB dimensions")
+    return size[0] * size[1] * 3
 
 
 def asset(root: Path, relative: str) -> Path:

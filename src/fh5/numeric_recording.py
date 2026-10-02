@@ -23,6 +23,7 @@ from fh5.numeric_images import (
     NumericReplay,
     PixelContract,
     asset,
+    rgb_byte_count,
     validate_decision,
 )
 from fh5.numeric_previews import NumericPreviews
@@ -38,26 +39,29 @@ def _encode(value: Any) -> bytes:
 
 
 def read_numeric_pixels(
-    directory: Path, entry: dict[str, Any], byte_limit: int = 4096 * 4096 * 3
+    directory: Path, entry: dict[str, Any], byte_limit: int | None = None
 ) -> bytes:
-    """Read and verify immutable RGB bytes without a second frame-owned copy."""
+    """Read exactly one RGB frame, respecting any caller-owned source budget."""
+    expected_bytes = rgb_byte_count(entry["size"])
     path = asset(directory, entry["path"])
     size = path.stat().st_size
-    if size > byte_limit:
+    if size != expected_bytes:
+        raise ValueError("Numerical RGB byte length does not match dimensions")
+    if byte_limit is not None and expected_bytes > byte_limit:
         raise ValueError("Numerical frame exceeds source byte budget")
     with path.open("rb") as stream:
-        pixels = stream.read(size + 1)
-    # The admitted size already fits the source contract. Any different read
-    # length is a changed file, including growth across that exact byte bound.
-    if len(pixels) != size:
-        raise ValueError("Numerical frame changed size while reading")
+        pixels = stream.read(expected_bytes)
+        # Bound the read by the declared RGB shape, then detect growth without
+        # retaining a second frame-sized buffer or admitting unrelated bytes.
+        if len(pixels) != expected_bytes or stream.read(1):
+            raise ValueError("Numerical frame changed size while reading")
     if hashlib.sha256(pixels).hexdigest() != entry["sha256"]:
         raise ValueError("Numerical pixel hash mismatch")
     return pixels
 
 
 def read_numeric_frame(
-    directory: Path, entry: dict[str, Any], byte_limit: int = 4096 * 4096 * 3
+    directory: Path, entry: dict[str, Any], byte_limit: int | None = None
 ) -> NumericFrame:
     """Verify a stored RGB frame in an offline or source-worker context."""
     pixels = read_numeric_pixels(directory, entry, byte_limit)

@@ -18,7 +18,7 @@ uv run --locked fh5 capture-dxgi --config configs/capture-dxgi.example.json --ou
 
 ## 内存、线程与时间
 
-采集线程调用 DXGI one-shot `grab(copy=True,new_frame_only=True)`，只复制 BGRA 数值；不启动 DXcam 自带采集线程或录像补帧。容量为一的待处理槽覆盖旧待处理项。独立常驻预处理线程完成正在处理的帧，再取最新项；一次 BGRX→RGB、一次 Pillow bilinear resize，形成不可变数值历史。历史最多 64 帧（默认 32），输出最多 640×360，单个原始裁剪最多 64 MiB。
+采集线程调用 DXGI one-shot `grab(copy=True,new_frame_only=True)`，只复制 BGRA 数值；不启动 DXcam 自带采集线程或录像补帧。容量为一的待处理槽覆盖旧待处理项。独立常驻预处理线程完成正在处理的帧，再取最新项；一次 BGRX→RGB、一次 Pillow bilinear resize，形成不可变数值历史。历史最多 64 帧（默认 32，此上限的依据仍待资源审计）。输出尺寸遵循配置中的数值图像契约；原始 BGRA 和输出 RGB 按各自实际尺寸核对字节数，移除未经论证的通用轴长和单帧字节上限。仍检查实际客户区、显示输出、裁剪区域、纹理格式和布局；尺寸有效不代表主机容量或原生采集时效已经验证。
 
 观察入口按最新已完成源帧为锚，选择 `[200,100,0] ms` 目标之前的最近帧，偏差上限 40 ms、最新图像年龄上限 100 ms。缺少历史、重复源帧、过旧图像或过大的采样偏差返回未就绪；不等待未来画面。参数是待实测候选，不代表已有性能保证。
 

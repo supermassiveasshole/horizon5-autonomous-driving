@@ -21,8 +21,7 @@ class DXGISettings:
         if (
             any(type(v) is not int or v < 0 for v in (self.device_idx, self.output_idx))
             or len(self.expected_client_size) != 2
-            or any(type(v) is not int or not 1 <= v <= 7680 for v in self.expected_client_size)
-            or self.expected_client_size[0] * self.expected_client_size[1] * 4 > 64 * 1024**2
+            or any(type(v) is not int or v < 1 for v in self.expected_client_size)
             or not isinstance(self.condition_id, str)
             or not self.condition_id
         ):

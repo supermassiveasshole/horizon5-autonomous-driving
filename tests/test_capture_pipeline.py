@@ -271,13 +271,72 @@ def test_capture_failure_retries_are_bounded_and_never_report_dynamic_evidence(t
     assert capture["moving_observations"] == 0
 
 
-def test_capture_rejects_unbounded_numerical_history_before_output(tmp_path):
-    with pytest.raises(ValueError, match="pixel budget"):
+def test_capture_rejects_invalid_numerical_dimensions_before_output(tmp_path):
+    with pytest.raises(ValueError, match="dimensions"):
         request = CaptureReplay(
-            tmp_path / "oversized", CaptureConfig(pixels=PixelContract(size=(4096, 4096))), (), ()
+            tmp_path / "invalid", CaptureConfig(pixels=PixelContract(size=(0, 32))), (), ()
         )
         run_experiment(request)
-    assert not (tmp_path / "oversized").exists()
+    assert not (tmp_path / "invalid").exists()
+
+
+@pytest.mark.parametrize("size", ((641, 1), (1, 361), (4097, 1)))
+def test_capture_preprocesses_declared_dimensions_without_axis_caps(tmp_path, size):
+    output = tmp_path / "resized"
+    summary = run_experiment(
+        CaptureReplay(
+            output,
+            CaptureConfig(pixels=PixelContract(size=size)),
+            tuple(frame(index) for index in range(3)),
+            (1_210_000_000,),
+        )
+    ).summary["capture"]
+    assert summary["timing_kind"] == "simulated"
+    assert summary["commands_sent"] is False
+    assert summary["contract"]["size"] == list(size)
+    (row,) = summary["decisions"]
+    assert row["status"] == "ready"
+    assert row["timing"]["adjacent_delta_s"] == [0.1, 0.1]
+    for index, saved in enumerate(row["stored_frames"]):
+        expected = bytes((10 + index, 20, 30)) * (size[0] * size[1])
+        assert saved["size"] == list(size)
+        assert saved["source_layout"]["size"] == [2, 1]
+        assert saved["sha256"] == hashlib.sha256(expected).hexdigest()
+        assert (output / saved["path"]).read_bytes() == expected
+
+
+def test_capture_transforms_actual_bgra_beyond_old_product_cap(tmp_path):
+    size = (4097, 4096)
+    bgra = bytes((30, 20, 10, 255)) * (size[0] * size[1])
+    assert len(bgra) > 64 * 1024**2
+    original = frame(0)
+    event = replace(
+        original,
+        frame=replace(
+            original.frame,
+            size=size,
+            bgra=bgra,
+            layout={"client_size": list(size), "crop": [0, 0, *size]},
+        ),
+    )
+    output = tmp_path / "large-source"
+    result = run_experiment(
+        CaptureReplay(
+            output,
+            CaptureConfig(pixels=PixelContract(size=(1, 1), history_offsets_ms=(0,))),
+            (event,),
+            (1_010_000_000,),
+        )
+    ).summary["capture"]
+    assert result["timing_kind"] == "simulated"
+    (row,) = result["decisions"]
+    assert row["status"] == "ready"
+    (saved,) = row["stored_frames"]
+    assert saved["source_layout"]["size"] == list(size)
+    assert saved["source_layout"]["stride_bytes"] == 4097 * 4
+    assert saved["size"] == [1, 1]
+    assert (output / saved["path"]).read_bytes() == bytes((10, 20, 30))
+    assert saved["sha256"] == hashlib.sha256(bytes((10, 20, 30))).hexdigest()
 
 
 def test_interrupted_capture_preserves_result_and_releases_workers(tmp_path):

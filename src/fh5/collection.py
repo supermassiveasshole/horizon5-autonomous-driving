@@ -80,14 +80,8 @@ class CollectionConfig:
             or not 0.1 <= self.seconds <= 12 * 3600
         ):
             raise ValueError("Invalid continuous collection duration")
-        if (
-            self.pixels.origin != "direct_numeric"
-            or self.pixels.size[0] > 640
-            or self.pixels.size[1] > 360
-        ):
-            raise ValueError(
-                "Continuous collection requires direct numerical pixels, at most 640x360"
-            )
+        if self.pixels.origin != "direct_numeric":
+            raise ValueError("Continuous collection requires direct numerical pixels")
         for name, lo, hi in (
             ("poll_hz", 1, 240),
             ("observation_hz", 1, 60),

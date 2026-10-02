@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import importlib
-import json
 import os
 import time
 from contextlib import ExitStack
@@ -17,7 +16,6 @@ from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.bc_learning import VIEWS, _checked_config, _write
 from fh5.bc_losses import BCLossHistory, read_bc_manifest
 from fh5.bc_network import make_actor
-from fh5.collection_store import read_bounded
 from fh5.learning_runtime import TrainingBudget, move_learning_state, preserve_torch_state
 from fh5.numeric_images import (
     NumericDecision,
@@ -28,7 +26,7 @@ from fh5.numeric_recording import _result
 from fh5.numeric_report import preview_png
 from fh5.prediction_metrics import temporal_metrics
 from fh5.prediction_records import PredictionRecords, prediction_spool
-from fh5.replay_document import replay_document
+from fh5.replay_document import read_document_fields, replay_document
 from fh5.temporal_data import temporal_snapshot
 from fh5.temporal_features import (
     TEMPORAL_ARCHITECTURE,
@@ -57,19 +55,11 @@ class TemporalBCReplay:
     device: str = "cpu"
 
 
-def _read(path: Path) -> tuple[dict[str, Any], str]:
-    raw = read_bounded(path, 128 * 1024**2)
-    value = json.loads(raw)
-    if not isinstance(value, dict):
-        raise ValueError("Expected temporal BC JSON object")
-    return value, hashlib.sha256(raw).hexdigest()
-
-
 def _configuration(path: Path, *, expected_sha256: str | None = None) -> dict[str, Any]:
-    value, digest = _read(path)
+    digest = sha256_file(path)
     if expected_sha256 is not None and digest != expected_sha256:
         raise ValueError("Frozen training configuration changed")
-    if set(value) != {
+    fields = {
         "version",
         "dataset",
         "dataset_sha256",
@@ -79,7 +69,9 @@ def _configuration(path: Path, *, expected_sha256: str | None = None) -> dict[st
         "learning_rate",
         "device",
         "time_mode",
-    }:
+    }
+    value = read_document_fields(VerifiedFile(path, digest), fields, reject_unknown=True)
+    if set(value) != fields:
         raise ValueError("Unsupported temporal training config")
     legacy = {k: v for k, v in value.items() if k not in ("time_mode", "dataset_sha256")}
     _checked_config(dict(legacy, image_size=[64, 36]))

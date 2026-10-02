@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Protocol
 
+from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.collection_store import encode, read_bounded, write_file
+from fh5.replay_document import read_document_fields
 from fh5.temporal_bc import TemporalBCTrain, _configuration, run_temporal_bc
 
 if TYPE_CHECKING:
@@ -38,19 +40,18 @@ class ScheduleStopped(Exception):
 
 
 def _configuration_schedule(path: Path) -> dict[str, Any]:
-    config: dict[str, Any] = json.loads(read_bounded(path, 1024**2))
-    if (
-        set(config)
-        != {
-            "version",
-            "training_config",
-            "training_config_sha256",
-            "collector_bundle",
-            "collector_manifest_sha256",
-            "budget",
-        }
-        or config["version"] != 1
-    ):
+    fields = {
+        "version",
+        "training_config",
+        "training_config_sha256",
+        "collector_bundle",
+        "collector_manifest_sha256",
+        "budget",
+    }
+    config = read_document_fields(
+        VerifiedFile(path, sha256_file(path)), fields, reject_unknown=True
+    )
+    if set(config) != fields or config["version"] != 1:
         raise ValueError("Unsupported learning schedule")
     limits = {
         "cpu_threads": (1, 2),
@@ -275,10 +276,8 @@ def run_scheduled_bc(request: ScheduledBCTrain, resources: LearningResources | N
     config = _configuration_schedule(request.config_file)
     base = request.config_file.parent
     training_path = base / config["training_config"]
-    training_raw = read_bounded(training_path, 1024**2)
-    if hashlib.sha256(training_raw).hexdigest() != config["training_config_sha256"]:
-        raise ValueError("Frozen training configuration changed")
     training = _configuration(training_path, expected_sha256=config["training_config_sha256"])
+    training_source = VerifiedFile(training_path, config["training_config_sha256"])
     dataset = (training_path.parent / training["dataset"]).resolve()
     if request.output_dir.resolve().is_relative_to(dataset.parent):
         raise ValueError("Scheduled output must be separate from its frozen dataset")
@@ -302,20 +301,20 @@ def run_scheduled_bc(request: ScheduledBCTrain, resources: LearningResources | N
     request.output_dir.mkdir(parents=True)
     training["dataset"] = str(dataset)
     frozen_config = request.output_dir / "training.json"
-    write_file(frozen_config, encode(training))
-    write_file(request.output_dir / "requested-training.json", training_raw)
-    write_file(request.output_dir / "requested-schedule.json", encode(config))
-    config = dict(
-        config,
-        training_config=str(frozen_config.resolve()),
-        training_config_sha256=hashlib.sha256(encode(training)).hexdigest(),
-        collector_bundle=str((base / config["collector_bundle"]).resolve()),
-    )
-    write_file(request.output_dir / "schedule-config.json", encode(config))
     state, reason, failure = "stopped", None, None
     candidate_hash = None
     partial = request.output_dir / ".candidate"
     try:
+        write_file(frozen_config, encode(training))
+        training_source.copy_to(request.output_dir / "requested-training.json")
+        write_file(request.output_dir / "requested-schedule.json", encode(config))
+        config = dict(
+            config,
+            training_config=str(frozen_config.resolve()),
+            training_config_sha256=hashlib.sha256(encode(training)).hexdigest(),
+            collector_bundle=str((base / config["collector_bundle"]).resolve()),
+        )
+        write_file(request.output_dir / "schedule-config.json", encode(config))
         schedule.checkpoint("admission", 0)
         result = run_temporal_bc(
             TemporalBCTrain(frozen_config, partial), schedule, config["budget"]["cpu_threads"]

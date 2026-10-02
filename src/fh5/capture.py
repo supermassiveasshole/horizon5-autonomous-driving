@@ -56,7 +56,6 @@ class RawCapture:
         if (
             len(self.size) != 2
             or any(type(v) is not int or v <= 0 for v in self.size)
-            or len(self.bgra) > 64 * 1024**2
             or len(self.bgra) != self.size[0] * self.size[1] * 4
         ):
             raise ValueError("BGRA byte count differs from physical crop")
@@ -95,8 +94,6 @@ class CaptureConfig:
     observation_hz: int = 20
 
     def __post_init__(self) -> None:
-        if self.pixels.size[0] > 640 or self.pixels.size[1] > 360:
-            raise ValueError("Capture numerical pixel budget is at most 640x360")
         for value, low, high in (
             (self.history_capacity, len(self.pixels.history_offsets_ms), 64),
             (self.max_age_ms, 1, 1000),
