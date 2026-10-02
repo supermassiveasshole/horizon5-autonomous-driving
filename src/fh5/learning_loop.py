@@ -955,15 +955,25 @@ class _Loop:
                 row["evaluation_completion_sha256"] = _sha(completion)
         row["evaluation_run"] = execution
         self.state["child_resources_released"] &= execution["resources_released"]
-        for attempt in range(10):
-            review_output = root / ("reviewed" if attempt == 0 else f"reviewed-{attempt:03d}")
-            if not review_output.exists():
-                break
-        else:
-            raise ValueError("Parent evaluation review exceeds 10 retained publications")
-        directories = row.setdefault("review_directories", [])
-        if str(review_output) not in directories:
-            directories.append(str(review_output))
+        publication = row.get("review_publication")
+        if publication is not None and (
+            not isinstance(publication, dict)
+            or set(publication) != {"sequence", "directory"}
+            or type(publication["sequence"]) is not int
+            or publication["sequence"] < 0
+            or not isinstance(publication["directory"], str)
+        ):
+            raise ValueError("Invalid parent review publication")
+        attempt = 0 if publication is None else publication["sequence"]
+        review_output = root / ("reviewed" if attempt == 0 else f"reviewed-{attempt:03d}")
+        if publication is not None and Path(publication["directory"]) != review_output:
+            raise ValueError("Parent review publication directory changed")
+        while review_output.exists() or review_output.is_symlink():
+            attempt += 1
+            review_output = root / f"reviewed-{attempt:03d}"
+        # Older directories remain independently readable on disk. Preserve a
+        # legacy list if present, but never grow it with later publications.
+        row["review_publication"] = {"directory": str(review_output), "sequence": attempt}
         self.save("reviewing_evaluation")
         ledger_file = self.review_ledger(root, row)
         # Never derive legality from the model or a successful execution summary.
