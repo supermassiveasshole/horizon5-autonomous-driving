@@ -42,9 +42,14 @@ def _model(entry: dict[str, Any], base: Path) -> tuple[Path, dict[str, Any]]:
     if not isinstance(entry, dict) or set(entry) != {"directory", "manifest_sha256"}:
         raise ValueError("Assessment requires a predeclared frozen model manifest")
     root = base / entry["directory"]
-    manifest, digest = _json(root / "model.json")
+    path = root / "model.json"
+    digest = sha256_file(path)
     if digest != entry["manifest_sha256"]:
         raise ValueError("Frozen assessment model manifest changed")
+    manifest = read_document_fields(
+        VerifiedFile(path, digest),
+        {"version", "numeric_contract", "provenance", "dataset_sha256", "groups"},
+    )
     return root, manifest
 
 
