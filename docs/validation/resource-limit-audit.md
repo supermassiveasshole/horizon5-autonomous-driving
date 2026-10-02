@@ -1483,3 +1483,5 @@ Standards 另有一项非阻塞维护建议：共享 JSON 解析器的对象循�
 查询后重新核验等待期限，并将超时健康观察保存为终端事件。
 新反例与预算、诊断、实际暂停恢复和搬移保护组合
 **71 passed / 11.41 秒**，`runs/resource-scheduler-wait-query-green-20261003.xml`。
+最终固定 `4467015...7830ec7` 独立复审：Standards 0 项、Spec 0 项，
+查询期间越过等待预算的问题已解决。151 源文件 strict mypy、Ruff 与 417 文件格式检查通过。
