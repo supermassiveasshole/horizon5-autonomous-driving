@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -89,6 +90,7 @@ def test_schedule_retains_all_samples_beyond_the_old_event_history_limit(tmp_pat
     assert events[0]["reasons"] == events[-1]["reasons"] == ["collection_backlog"]
     assert events[1]["reasons"] == []
     assert summary["events_omitted"] == 0
+    assert summary["events_unverified"] == 0
     assert "events" not in summary
     assert json.loads(result.report_path.read_bytes()) == summary
     assert result.report_path.stat().st_size < path.stat().st_size / 10
@@ -171,6 +173,10 @@ def test_optional_schedule_journal_failure_preserves_resource_checks_and_stop(
     assert summary["event_history"]["status"] == "unavailable"
     assert "optional event storage unavailable" in summary["event_history"]["error"]
     assert summary["event_history"]["sha256"] is None
+    written = 3 if operation == "flush" else 0
+    assert summary["event_history"]["records"] == written
+    assert summary["events_unverified"] == written
+    assert summary["events_omitted"] == 3 - written
     assert summary["steps_completed"] == 0 and summary["candidate"] is None
     assert resources.closed
     assert json.loads(result.report_path.read_bytes()) == summary
@@ -228,6 +234,31 @@ def test_large_integer_resource_measurement_does_not_require_float_conversion(tm
     with (request.output_dir / history["path"]).open(encoding="utf-8") as stream:
         first = json.loads(next(stream))
     assert first["sample"]["free_disk_bytes"] == 10**400
+
+
+def test_optional_counter_encoding_failure_does_not_stop_resource_checks(tmp_path):
+    request = request_for(tmp_path)
+    digit_limit = sys.get_int_max_str_digits()
+    if not digit_limit:
+        pytest.skip("Interpreter has no decimal integer encoding limit")
+
+    class HugeOptionalCounter(AlternatingResources):
+        def sample(self):
+            sample = super().sample()
+            # Valid Python integer exceeds this interpreter's JSON digit interface.
+            # The optional record must degrade, not change resource admission.
+            sample["collector"]["seen_rows"] = 10**digit_limit
+            return sample
+
+    resources = HugeOptionalCounter(request.output_dir, samples=3)
+    summary = run_experiment(request, learning_resources=resources).summary["learning_schedule"]
+    assert summary["stop_reason"] == "requested_stop"
+    assert summary["sample_count"] == 3 and resources.closed
+    assert summary["pressure_counts"] == {"collection_backlog": 2}
+    assert summary["steps_completed"] == 0
+    assert summary["event_history"]["status"] == "unavailable"
+    assert "ValueError" in summary["event_history"]["error"]
+    assert summary["events_omitted"] == 3 and summary["events_unverified"] == 0
 
 
 def test_resource_limit_sample_is_retained_with_its_terminal_stop_reason(tmp_path):

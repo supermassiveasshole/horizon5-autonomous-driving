@@ -454,6 +454,9 @@ def run_scheduled_bc(
         "sample_count": schedule.samples,
         "event_history": event_history,
         "events_omitted": max(0, schedule.samples - event_history["records"]),
+        "events_unverified": (
+            event_history["records"] if event_history["status"] != "complete" else 0
+        ),
         "pressure_counts": dict(schedule.reasons),
         "config": config,
         "candidate": "candidate" if state == "completed" else None,

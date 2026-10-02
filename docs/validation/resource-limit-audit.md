@@ -1370,3 +1370,10 @@ strict mypy 已通过；实际 CPU 更新仍单独待验证。
 **66 passed / 3 deselected / 1.54 秒**，`cache-green.xml`。这不是实际长时间休眠实验。
 另为真实 CPU 更新增加可选历史文件打开时的 OS/内存故障用例，与正常训练共三项，
 均等待已有完整回归释放模型测试资源后运行。
+
+同一固定片段 Spec 审阅指出：附属整数计数超出解释器 JSON 转换接口时，编码异常仍会中止调度；
+以及刷新失败后写入计数不能证明持久化。公开反例 **7 failed / 0.37 秒**（`journal-red.xml`）。
+可选日志编码错误现在标为 unavailable；`events_omitted` 计未追加记录，
+`events_unverified` 计已追加但不能确认完整保存的记录，不再混同两者。
+轻量组合 **67 passed / 3 deselected / 1.61 秒**（`journal-green.xml`）；
+实际 CPU 更新、完整片段复审仍待完成。

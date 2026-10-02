@@ -30,7 +30,8 @@ session、其他状态文件和候选清单读取的剩余限制仍列在资源�
 每次资源观察按行写入可选 `diagnostics/schedule-events.jsonl`，包括导致停止的最后一份指标。
 `schedule.json` 的 `event_history` 保存路径、格式、行数、摘要和写入状态，替代旧内嵌 `events` 数组；
 没有只留最后 1000 条的截断。展示历史时逐行读取此文件，不重新展开到主摘要。
-日志打开、写入或刷新失败会标为 unavailable，并通过 `events_omitted` 显示缺口；
+日志编码、打开、写入或刷新失败会标为 unavailable；`events_omitted` 表示未成功追加的条数，
+`events_unverified` 表示已追加、但无法确认完整保存的条数。刷新失败时不能用“未遗漏”推断已保存。
 资源检查、停止请求和必要训练状态不依赖这份日志。未知诊断文本不进入此契约，错误的存在仍参与准入判断。
 
 `schedule.json` 记录等待、压力原因、已完成及已持久化更新数、最长工作单元、输入配置和候选哈希。`requested-training.json` 保留原训练配置字节，`requested-schedule.json` 保留原调度参数；`training.json` 固定解析后的数据路径，`schedule-config.json` 绑定这份训练配置与解析后的采集路径。保留这些产物及数据依赖后，可在新输出目录重跑冻结配置，工作区原配置的修改不影响它。CPU 数值 BC 另可通过[完整 learner 检查点](bc-resume.md)继续剩余更新。完整训练和重载验证结束后，才把 `.candidate` 发布为 `candidate/`，其中仍是标准 BC 模型和联动画面报告；随报告发布的预览使用相对链接。停止时不发布候选，可能留下 `.candidate` 诊断文件；它不是 learner 检查点，也不证明可以续训。

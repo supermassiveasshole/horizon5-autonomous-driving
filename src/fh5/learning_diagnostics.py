@@ -35,7 +35,7 @@ class RecordJournal:
         except (OSError, MemoryError) as error:
             self.unavailable(error)
 
-    def unavailable(self, error: OSError | MemoryError) -> None:
+    def unavailable(self, error: Exception) -> None:
         if self.error is None:
             self.error = f"{type(error).__name__}: {error}"
         self.close()
@@ -54,7 +54,7 @@ class RecordJournal:
             return
         try:
             self.write(record_bytes(entry))
-        except MemoryError as error:
+        except (MemoryError, ValueError, TypeError, OverflowError) as error:
             self.unavailable(error)
 
     def write(self, raw: bytes) -> None:
