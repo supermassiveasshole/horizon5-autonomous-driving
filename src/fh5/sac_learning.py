@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any, NamedTuple
 
 from fh5.artifact_io import VerifiedFile, copy_evidence
 from fh5.checkpoint_history import HistorySource, empty_history
-from fh5.collection_store import encode, read_bounded, write_file
+from fh5.collection_store import encode, read_bounded
 from fh5.learning_diagnostics import PredictionRecorder, RecordJournal
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
@@ -371,8 +371,11 @@ def _train(
         warm_sha = manifest["warmup_manifest_sha256"]
         bc_dir = request.warmup_dir / "bc"
     bounds = ActionBounds(**warm["bounds"])
-    bc_bytes = {n: read_bounded(bc_dir / n, 256 * 1024**2) for n in ("model.json", "actor.pt")}
-    bc_manifest = json.loads(bc_bytes["model.json"])
+    bc_bytes = read_bounded(bc_dir / "model.json", 256 * 1024**2)
+    bc_manifest = json.loads(bc_bytes)
+    bc_digest = hashlib.sha256(bc_bytes).hexdigest()
+    if bc_digest != warm["actor_manifest_sha256"]:
+        raise ValueError("BC bytes changed while loading SAC initialization")
     imitation = (
         initial_imitation(
             request.imitation_weights,
@@ -391,11 +394,7 @@ def _train(
     imitation_review = None
     pixels = PixelContract.from_metadata(bc_manifest["numeric_contract"])
     bc = FrozenNumericActor(bc_dir, pixels, expected_manifest_sha256=warm["actor_manifest_sha256"])
-    if (
-        hashlib.sha256(bc_bytes["model.json"]).hexdigest() != warm["actor_manifest_sha256"]
-        or hashlib.sha256(bc_bytes["actor.pt"]).hexdigest() != bc.manifest["weights_sha256"]
-    ):
-        raise ValueError("BC bytes changed while loading SAC initialization")
+    bc_weights = VerifiedFile(bc_dir / "actor.pt", bc.manifest["weights_sha256"])
     if restored is None:
         saved = initial_critic
         if any(
@@ -511,9 +510,7 @@ def _train(
     history = history_source.retain(output) if history_source is not None else empty_history()
     experience = seal_experience(data.replay, data.file, output / "experience")
     copy_evidence(output, history_blobs)
-    (output / "bc").mkdir()
-    for name, value in bc_bytes.items():
-        write_file(output / "bc" / name, value)
+    copy_evidence(output / "bc", {"model.json": bc_bytes, "actor.pt": bc_weights})
     updates, encoder_actor_change, actor_critic_change = 0, 0.0, 0.0
     started = time.monotonic()
     journal = RecordJournal(output, "diagnostics/updates.jsonl", "sac-update-jsonl-v1")
@@ -709,7 +706,7 @@ def _train(
         "bounds": asdict(bounds),
         "replay_sha256": warm["replay_sha256"],
         "warmup_manifest_sha256": warm_sha,
-        "bc_manifest_sha256": hashlib.sha256(bc_bytes["model.json"]).hexdigest(),
+        "bc_manifest_sha256": bc_digest,
         "density_coordinates": summary["density_coordinates"],
         "q_action_coordinates": summary["q_action_coordinates"],
         "device": "cpu",

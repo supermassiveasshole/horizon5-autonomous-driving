@@ -6,10 +6,10 @@ import hashlib
 import importlib
 import json
 from collections import OrderedDict
-from io import BytesIO
 from pathlib import Path
 from typing import Any
 
+from fh5.artifact_io import VerifiedFile
 from fh5.bc_learning import ARCHITECTURE, MODEL_METADATA_KEYS, _numeric
 from fh5.bc_network import make_actor
 from fh5.numeric_images import NumericFrame, PixelContract
@@ -73,16 +73,15 @@ class FrozenNumericActor:
             or contract.resize != "full-frame-pillow-bilinear-v1"
         ):
             raise ValueError("Frozen numerical actor preprocessing contract mismatch")
-        weights = (model_dir / "actor.pt").read_bytes()
-        if hashlib.sha256(weights).hexdigest() != original["weights_sha256"]:
-            raise ValueError("Frozen numerical actor weight hash mismatch")
+        weights = VerifiedFile(model_dir / "actor.pt", original["weights_sha256"])
         self.torch = importlib.import_module("torch")
         self.device = device
         if device not in ("cpu", "cuda") or (
             device == "cuda" and not self.torch.cuda.is_available()
         ):
             raise ValueError("Requested numerical actor device unavailable")
-        saved = self.torch.load(BytesIO(weights), map_location=device, weights_only=True)
+        with weights.snapshot() as stream:
+            saved = self.torch.load(stream, map_location=device, weights_only=True)
         keys = TEMPORAL_METADATA_KEYS if temporal else MODEL_METADATA_KEYS
         if saved["metadata"] != {k: original[k] for k in keys}:
             raise ValueError("Frozen numerical actor metadata mismatch")

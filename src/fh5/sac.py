@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fh5.artifact_io import VerifiedFile, sha256_file
+from fh5.artifact_io import VerifiedFile, copy_evidence, sha256_file
 from fh5.checkpoint_history import HistorySource, empty_history
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.learning_diagnostics import PredictionRecorder, RecordJournal
@@ -199,15 +199,12 @@ def _run(
 
     stack.enter_context(replay_roles(request.replay_file.parent, replay))
     pixels = PixelContract.from_metadata(replay["pixel_contract"])
-    model_payload = {
-        name: read_bounded(model_dir / name, 256 * 1024**2) for name in ("model.json", "actor.pt")
-    }
-    model_digest = hashlib.sha256(model_payload["model.json"]).hexdigest()
+    model_bytes = read_bounded(model_dir / "model.json", 256 * 1024**2)
+    model_digest = hashlib.sha256(model_bytes).hexdigest()
     if saved is not None and model_digest != manifest["actor_manifest_sha256"]:
         raise ValueError("Critic's frozen BC manifest changed")
     actor = FrozenNumericActor(model_dir, pixels, expected_manifest_sha256=model_digest)
-    if hashlib.sha256(model_payload["actor.pt"]).hexdigest() != actor.manifest["weights_sha256"]:
-        raise ValueError("BC snapshot changed while loading critic warm-up")
+    weights = VerifiedFile(model_dir / "actor.pt", actor.manifest["weights_sha256"])
     for parameter in actor.model.parameters():
         parameter.requires_grad_(False)
     original = deepcopy(actor.model.state_dict())
@@ -290,9 +287,7 @@ def _run(
         output.mkdir(parents=True)
         history = history_source.retain(output) if history_source is not None else empty_history()
         experience = seal_experience(replay, replay_file, output / "experience")
-        (output / "actor").mkdir()
-        for name, value in model_payload.items():
-            write_file(output / "actor" / name, value)
+        copy_evidence(output / "actor", {"model.json": model_bytes, "actor.pt": weights})
         # Validate the sealed actor/experience before spending update budget.
         # Constructing a reload model must not alter the learner sampling RNG.
         with preserve_torch_state(torch):
@@ -426,8 +421,8 @@ def _run(
             "rng": torch.get_rng_state(),
             "step": start_step + updates,
         }
-        for name, value in model_payload.items():
-            if sha256_file(output / "actor" / name) != hashlib.sha256(value).hexdigest():
+        for name, digest in (("model.json", model_digest), ("actor.pt", weights.sha256)):
+            if sha256_file(output / "actor" / name) != digest:
                 raise ValueError("Frozen BC changed during checkpoint publication")
         summary["reload_max_abs_error"] = reload_error
         summary["learner_state_sha256"] = state_digest(torch, state)
