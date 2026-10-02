@@ -6,15 +6,16 @@ import hashlib
 import json
 from contextlib import closing
 from copy import deepcopy
+from itertools import chain
 from pathlib import Path
 from typing import Any
 
 from fh5.artifact_io import VerifiedFile
 from fh5.collection_store import encode, write_file
 from fh5.numeric_actor import FrozenNumericActor
-from fh5.numeric_recording import read_numeric_frame, read_numeric_pixels
 from fh5.sac_actions import ActionBounds
 from fh5.sac_data import LearningReplay
+from fh5.sac_experience_assets import ExperienceAssets, experience_assets
 from fh5.sac_source_files import source_replays
 from fh5.sac_sources import check_compatible
 
@@ -28,15 +29,27 @@ def expand_experience(
     bc: FrozenNumericActor,
     bounds: ActionBounds,
 ) -> tuple[Path, str, int, dict[str, Any]]:
-    if not 1 <= len(additions) <= 10:
-        raise ValueError("SAC expansion requires 1..10 sealed replay additions")
-    sources = [(parent, parent_sha), *additions]
+    with experience_assets() as assets:
+        return _expand(torch, parent, parent_sha, additions, output, bc, bounds, assets)
+
+
+def _expand(
+    torch: Any,
+    parent: Path,
+    parent_sha: str,
+    additions: tuple[tuple[Path, str], ...],
+    output: Path,
+    bc: FrozenNumericActor,
+    bounds: ActionBounds,
+    assets: ExperienceAssets,
+) -> tuple[Path, str, int, dict[str, Any]]:
+    if not additions:
+        raise ValueError("SAC expansion requires sealed replay additions")
+    sources = chain(((parent, parent_sha),), additions)
     inventory: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
     hashes, source_ids, transition_ids = set(), set(), set()
-    frames: dict[str, tuple[Path, dict[str, Any]]] = {}
-    manifests: dict[str, VerifiedFile] = {}
-    byte_count, added = 0, 0
+    added = 0
     combined: dict[str, Any] | None = None
     for number, (path, sha) in enumerate(sources):
         data = LearningReplay(torch, path, sha, bc, bounds)
@@ -54,9 +67,9 @@ def expand_experience(
         if replay.get("source_inventory"):
             with closing(source_replays(path.parent, replay)) as originals:
                 for original_source in originals:
-                    manifests[original_source.name] = original_source.file
+                    assets.add_source(original_source.file)
         else:
-            manifests[f"sources/{sha}.json"] = VerifiedFile(path, sha)
+            assets.add_source(VerifiedFile(path, sha))
         for entry in entries:
             # Re-reviewing or reformatting metadata does not create another interaction.
             identity = entry["source_hashes"]["packets"]
@@ -64,7 +77,7 @@ def expand_experience(
                 raise ValueError("Duplicate SAC experience cannot earn new update credit")
             hashes.add(entry["replay_sha256"])
             source_ids.add(identity)
-            inventory.append(entry)
+            inventory.append({**entry, "path": f"sources/{entry['replay_sha256']}.json"})
         for original in replay["transitions"]:
             row = deepcopy(original)
             provenance = row.get("provenance") or {"replay_sha256": sha, "transition_id": row["id"]}
@@ -79,15 +92,7 @@ def expand_experience(
                 if observation is None:
                     continue
                 for entry in observation["frames"]:
-                    frame = read_numeric_frame(path.parent, entry)
-                    name = "frames/" + entry["sha256"] + ".rgb"
-                    if name not in frames:
-                        byte_count += frame.pixels.nbytes
-                        if byte_count > 512 * 1024**2:
-                            raise ValueError("Expanded SAC experience exceeds 512 MiB")
-                        frames[name] = path.parent, dict(entry)
-                    entry["path"] = name
-                    del frame
+                    entry["path"] = assets.add_frame(path.parent, entry)
             rows.append(row)
             added += int(number > 0)
             if len(rows) > 10_000:
@@ -106,30 +111,12 @@ def expand_experience(
     if len(raw) > 128 * 1024**2:
         raise ValueError("Expanded SAC replay exceeds 128 MiB")
     output.mkdir(parents=True, exist_ok=False)
-    peak = 0
-    for name, (source, entry) in frames.items():
-        width, height = entry["size"]
-        payload = read_numeric_pixels(source, entry, width * height * 3)
-        peak = max(peak, len(payload))
-        target = output / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        write_file(target, payload)
-        del payload
-    for name, original_file in manifests.items():
-        target = output / name
-        target.parent.mkdir(parents=True, exist_ok=True)
-        original_file.copy_to(target)
+    statistics = assets.copy_into(output)
     path = output / "replay.json"
     write_file(path, raw)
     return (
         path,
         hashlib.sha256(raw).hexdigest(),
         added,
-        {
-            "mode": "verified-frame-stream",
-            "frame_files": len(frames),
-            "frame_bytes": byte_count,
-            "copy_peak_frame_bytes": peak,
-            "files_deleted": 0,
-        },
+        statistics,
     )
