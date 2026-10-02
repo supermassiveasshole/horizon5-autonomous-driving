@@ -775,3 +775,15 @@ CLI 错把数据资源停止返回为 0 的反例 **1 failed / 2.17 秒**；现�
 全排列采样仍分配随样本数增长的排列；模型读取门槛、原生 Torch/优化器中途资源错误、
 部分采集与父循环入口仍待清理。本片段未声明整仓完成或实机/4K 性能已验证。
 独立审阅待完成；冻结 `d60d3a7` 的全量在运行，不覆盖本节修改。
+
+另外在新索引/逐条预测实现上重跑 10001 条输入的实际 critic 更新，
+**1 passed / 20.26 秒**，`runs/resource-critic-large-corpus-results.xml`；
+确认新输出形式没有重新引入旧条数门槛。该专项不作为运行吞吐基准。
+
+固定 `d60d3a7...413556b` 的最终双轴只读审阅：**Standards 0 项、Spec 0 项**。
+
+冻结 `d60d3a7` 全量已结束：**816 passed / 1 failed / 2055.88 秒**，
+`runs/resource-provenance-full-20261002-results.xml`（隔离检出）。失败位于旧视觉策略测试
+`test_visual_policy_sends_bounded_actions_with_causal_history_and_stops[0.2-6553]`：
+预期 `local_end`，实际 `image_writer_backpressure`。该全量不包含本节修改，不能报告为通过；
+写入队列/模拟环境时钟的原因另行诊断，不以加大队列或超时绕过。
