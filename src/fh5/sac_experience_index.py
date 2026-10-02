@@ -38,7 +38,11 @@ class ExperienceUnion:
         # Re-reviewing or reformatting metadata does not create another interaction.
         added = self.database.execute(
             "INSERT OR IGNORE INTO origins VALUES (?, ?, ?)",
-            (entry["replay_sha256"], replay_identity_key(entry["source_hashes"]["packets"]), addition),
+            (
+                entry["replay_sha256"],
+                replay_identity_key(entry["source_hashes"]["packets"]),
+                addition,
+            ),
         ).rowcount
         if not added:
             raise ValueError("Duplicate SAC experience cannot earn new update credit")

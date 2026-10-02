@@ -707,3 +707,10 @@ critic 冻结特征、10000 行以及配置 batch 取值上限仍待结构迁移
 这些检查仅证明软件资源结构和可恢复性，不代表新的驾驶样本多样性或实机表现。
 `torch.randperm` 仍随样本数分配，critic 全量特征/预测、采集入口与配置上限仍待清理；
 未宣称整仓资源审计完成。冻结 `c68f3ba` 的全量仍在运行，不包含本节修改；本节独立复审待完成。
+
+独立审阅 `c68f3ba...57061e3` 发现同一去重语义还须覆盖数字别名：旧集合把
+`1`、`1.0`、`True` 视为相同身份，不能让重新描述的来源获得额外更新额度。
+公开 `SACResume` 两个别名反例 **2 failed / 2 passed / 4.69 秒**，
+`runs/resource-union-review-red-results.xml`。修正为角色核验与合并来源共享
+`replay_identity_key` 后，去重、篡改、磁盘失败及循环额度组合 **13 passed / 9.00 秒**，
+`runs/resource-union-review-green-results.xml`。未提高任何阈值；最终复审待回报。
