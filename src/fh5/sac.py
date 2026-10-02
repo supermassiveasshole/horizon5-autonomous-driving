@@ -15,6 +15,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fh5.artifact_io import sha256_file
 from fh5.checkpoint_history import HistorySource, empty_history
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.learning_diagnostics import RecordJournal
@@ -210,28 +211,34 @@ def _run(
     for parameter in actor.model.parameters():
         parameter.requires_grad_(False)
     original = deepcopy(actor.model.state_dict())
-    frame_cache: dict[str, Any] = {}
     encoded: dict[str, tuple[Any, list[float]]] = {}
-    reload_inputs: dict[str, Any] = {}
+    reload_inputs: dict[str, dict[str, Any]] = {}
+    seen_frames: set[str] = set()
     total_bytes = 0
+
+    def predict_observation(
+        predictor: FrozenNumericActor, root: Path, row: dict[str, Any]
+    ) -> tuple[Any, list[float]]:
+        frame_bytes = pixels.size[0] * pixels.size[1] * 3
+        try:
+            frames = tuple(read_numeric_frame(root, item, frame_bytes) for item in row["frames"])
+            return predictor.predict_with_features(row["actor"], frames)
+        finally:
+            # Only frozen features are reused. Neither the corpus nor a reload
+            # check retains image buffers after this observation is encoded.
+            predictor.clear_input_cache()
 
     def observation(row: dict[str, Any]) -> tuple[Any, list[float]]:
         nonlocal total_bytes
         identity = hashlib.sha256(encode(row)).hexdigest()
         if identity not in encoded:
-            frames = []
+            encoded[identity] = predict_observation(actor, request.replay_file.parent, row)
+            reload_inputs[identity] = row
             for metadata in row["frames"]:
                 key = json.dumps(metadata, sort_keys=True)
-                if key not in frame_cache:
-                    frame = read_numeric_frame(request.replay_file.parent, metadata)
-                    total_bytes += frame.pixels.nbytes
-                    if total_bytes > 512 * 1024**2:
-                        raise ValueError("SAC numerical replay exceeds 512 MiB frame budget")
-                    frame_cache[key] = frame
-                frames.append(frame_cache[key])
-            sequence = tuple(frames)
-            encoded[identity] = actor.predict_with_features(row["actor"], sequence)
-            reload_inputs[identity] = (row["actor"], sequence, encoded[identity][1])
+                if key not in seen_frames:
+                    total_bytes += pixels.size[0] * pixels.size[1] * 3
+                    seen_frames.add(key)
         return encoded[identity]
 
     current, following, actions, next_actions, rewards, discounts, predictions = (
@@ -309,6 +316,7 @@ def _run(
         before_q = _values(torch, critic, state_tensor, command_tensor)
     updates = 0
     journal = None
+    reload_error = None
     started = time.monotonic()
     stop_reason = "budget_completed" if training else "frozen_replay"
     if isinstance(request, SACCriticWarmup):
@@ -319,6 +327,23 @@ def _run(
         (output / "actor").mkdir()
         for name, value in model_payload.items():
             write_file(output / "actor" / name, value)
+        # Validate the sealed actor/experience before spending update budget.
+        # Constructing a reload model must not alter the learner sampling RNG.
+        with preserve_torch_state(torch):
+            reloaded = FrozenNumericActor(
+                output / "actor", pixels, expected_manifest_sha256=model_digest
+            )
+            reload_error = max(
+                abs(a - b)
+                for identity, row in reload_inputs.items()
+                for a, b in zip(
+                    encoded[identity][1],
+                    predict_observation(reloaded, output / "experience", row)[1],
+                )
+            )
+            if reloaded.manifest != actor.manifest or reload_error > 1e-6:
+                raise ValueError("Frozen BC changed during checkpoint publication")
+            del reloaded
         optimizer = torch.optim.Adam(critic.parameters(), lr=request.learning_rate)
         if saved is not None:
             optimizer.load_state_dict(saved["optimizer"])
@@ -407,16 +432,9 @@ def _run(
             "rng": torch.get_rng_state(),
             "step": start_step + updates,
         }
-        reloaded = FrozenNumericActor(
-            output / "actor", pixels, expected_manifest_sha256=model_digest
-        )
-        reload_error = max(
-            abs(a - b)
-            for state, frames, prediction in reload_inputs.values()
-            for a, b in zip(prediction, reloaded.predict(state, frames))
-        )
-        if reloaded.manifest != actor.manifest or reload_error > 1e-6:
-            raise ValueError("Frozen BC changed during checkpoint publication")
+        for name, value in model_payload.items():
+            if sha256_file(output / "actor" / name) != hashlib.sha256(value).hexdigest():
+                raise ValueError("Frozen BC changed during checkpoint publication")
         summary["reload_max_abs_error"] = reload_error
         summary["learner_state_sha256"] = state_digest(torch, state)
         # Training diagnostics grow with steps/transitions. Keep them outside
