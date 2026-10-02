@@ -586,3 +586,5 @@ Ruff、365 文件格式、138 源文件 mypy 通过；新冻结版本的全量�
 与 SAC/critic 诊断、接续组合最终 **35 passed / 23.29 秒**，
 `runs/resource-replay-optional-final-20261002-results.xml`。
 Ruff、366 文件格式、138 源文件 mypy 通过。
+固定 `ae06002...12edfab` 最终独立只读复审：**Standards 0 项、Spec 0 项**；前述 P2 已解决。
+即将启动的新隔离全量覆盖该修正，结果尚未完成；此前失败全量不追认为通过。
