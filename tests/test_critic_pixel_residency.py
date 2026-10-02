@@ -15,7 +15,7 @@ from fh5.sac import SACCriticReplay, SACCriticResume, SACCriticWarmup
 from fh5.temporal_bc import TemporalBCTrain
 
 
-def test_critic_pixel_residency_does_not_grow_with_the_frozen_corpus(tmp_path):
+def critic_corpus(tmp_path, count=16):
     pytest.importorskip("torch")
     request = experience(tmp_path)
     run_experiment(request)
@@ -45,7 +45,7 @@ def test_critic_pixel_residency_does_not_grow_with_the_frozen_corpus(tmp_path):
     # inputs, not a claim of independent game driving or a production quota.
     template = replay["transitions"][-1]
     replay["transitions"] = []
-    for index in range(16):
+    for index in range(count):
         row = deepcopy(template)
         row["id"] = f"terminal-{index}"
         row["current"]["decision_id"] = f"current-{index}"
@@ -64,6 +64,11 @@ def test_critic_pixel_residency_does_not_grow_with_the_frozen_corpus(tmp_path):
     replay_path.write_text(json.dumps(replay))
     digest = hashlib.sha256(replay_path.read_bytes()).hexdigest()
     source_bytes = sum(p.stat().st_size for p in replay_path.parent.glob("corpus-*.rgb"))
+    return bc / "model", replay_path, digest, source_bytes
+
+
+def test_critic_pixel_residency_does_not_grow_with_the_frozen_corpus(tmp_path):
+    model, replay_path, digest, source_bytes = critic_corpus(tmp_path)
     observed = []
 
     def stop_after_three(step):
@@ -74,7 +79,7 @@ def test_critic_pixel_residency_does_not_grow_with_the_frozen_corpus(tmp_path):
     tracemalloc.start()
     try:
         first = run_experiment(
-            SACCriticWarmup(bc / "model", replay_path, digest, tmp_path / "first", steps=5),
+            SACCriticWarmup(model, replay_path, digest, tmp_path / "first", steps=5),
             sac_stop_requested=stop_after_three,
         ).summary["sac"]
     finally:
@@ -89,7 +94,7 @@ def test_critic_pixel_residency_does_not_grow_with_the_frozen_corpus(tmp_path):
         "sac"
     ]
     whole = run_experiment(
-        SACCriticWarmup(bc / "model", replay_path, digest, tmp_path / "whole", steps=5)
+        SACCriticWarmup(model, replay_path, digest, tmp_path / "whole", steps=5)
     ).summary["sac"]
     replayed = run_experiment(
         SACCriticReplay(tmp_path / "resumed", replay_path, tmp_path / "reloaded.html")

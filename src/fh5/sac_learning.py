@@ -8,7 +8,7 @@ import json
 import math
 import time
 from collections.abc import Callable, Iterator
-from contextlib import ExitStack
+from contextlib import ExitStack, closing
 from copy import deepcopy
 from dataclasses import asdict, dataclass, replace
 from pathlib import Path
@@ -241,8 +241,9 @@ def validate_sac_candidate(root: Path, expected_sha256: str) -> dict[str, Any]:
         )
         replay = json.loads(data.raw)
         source_replays(replay_file.parent, replay)
-        for _ in experience_frames(replay_file.parent, replay):
-            pass
+        with closing(experience_frames(replay_file.parent, replay)) as frames:
+            for _ in frames:
+                pass
         ReplaySampling(data.roles, request.batch_size, request.demonstration_fraction)
         learner = _make_learner(torch, bc, saved, request, resume=True)
         # Exercise the actual numerical observation contract and reject non-finite output.

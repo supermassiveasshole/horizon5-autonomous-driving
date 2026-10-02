@@ -6,8 +6,11 @@ import hashlib
 import io
 import json
 import os
-from collections.abc import Iterator
+import sqlite3
+from collections.abc import Generator
+from contextlib import closing
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 from fh5.artifact_io import VerifiedFile, sha256_file
@@ -202,26 +205,35 @@ def state_digest(torch: Any, state: dict[str, Any]) -> str:
     return digest.hexdigest()
 
 
-def experience_frames(root: Path, replay: dict[str, Any]) -> Iterator[tuple[str, NumericFrame]]:
+def experience_frames(
+    root: Path, replay: dict[str, Any]
+) -> Generator[tuple[str, NumericFrame], None, None]:
     """Check every referenced path, including terminal observations not used by the learner."""
-    seen: dict[str, str] = {}
-    total = 0
-    for row in replay["transitions"]:
-        for observation in (row["current"], row["next"]):
-            if observation is None:
-                continue
-            for entry in observation["frames"]:
-                name, sha = entry["path"], entry["sha256"]
-                if name in seen:
-                    if seen[name] != sha:
-                        raise ValueError("SAC frame path has conflicting contents")
-                    continue
-                frame = read_numeric_frame(root, entry)
-                total += frame.pixels.nbytes
-                if total > 512 * 1024**2:
-                    raise ValueError("Sealed SAC experience exceeds 512 MiB")
-                seen[name] = sha
-                yield name, frame
+    with TemporaryDirectory(prefix="fh5-experience-index-") as temporary:
+        try:
+            with closing(sqlite3.connect(Path(temporary) / "frames.sqlite3")) as index:
+                index.execute(
+                    "CREATE TABLE frames (name TEXT PRIMARY KEY, sha256 TEXT NOT NULL) "
+                    "WITHOUT ROWID"
+                )
+                for row in replay["transitions"]:
+                    for observation in (row["current"], row["next"]):
+                        if observation is None:
+                            continue
+                        for entry in observation["frames"]:
+                            name, sha = entry["path"], entry["sha256"]
+                            prior = index.execute(
+                                "SELECT sha256 FROM frames WHERE name = ?", (name,)
+                            ).fetchone()
+                            if prior is not None:
+                                if prior[0] != sha:
+                                    raise ValueError("SAC frame path has conflicting contents")
+                                continue
+                            frame = read_numeric_frame(root, entry)
+                            index.execute("INSERT INTO frames VALUES (?, ?)", (name, sha))
+                            yield name, frame
+        except sqlite3.Error as error:
+            raise OSError("Cannot index SAC experience frames: " + str(error)) from error
 
 
 def seal_experience(raw: bytes, source: Path, output: Path) -> dict[str, Any]:
@@ -229,12 +241,13 @@ def seal_experience(raw: bytes, source: Path, output: Path) -> dict[str, Any]:
     sources = source_replays(source.parent, replay)
     output.mkdir(parents=True)
     count, total = 0, 0
-    for name, frame in experience_frames(source.parent, replay):
-        target = asset(output, name)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        write_file(target, bytes(frame.pixels))
-        count += 1
-        total += frame.pixels.nbytes
+    with closing(experience_frames(source.parent, replay)) as frames:
+        for name, frame in frames:
+            target = asset(output, name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            write_file(target, bytes(frame.pixels))
+            count += 1
+            total += frame.pixels.nbytes
     write_file(output / "replay.json", raw)
     for name, payload in sources.items():
         target = asset(output, name)
