@@ -11,7 +11,10 @@ from fh5.experiment import run_experiment
 from fh5.learning_schedule import ScheduledBCTrain
 
 
-@pytest.mark.parametrize("error_type", [OSError, MemoryError])
+@pytest.mark.parametrize(
+    "error_type",
+    [OSError, MemoryError, RuntimeError, pytest.importorskip("torch").OutOfMemoryError],
+)
 @pytest.mark.parametrize("fault_location", ["pixels", "resource_probe"])
 def test_preupdate_io_failure_resumes_the_same_unconsumed_random_batch(
     tmp_path, monkeypatch, error_type, fault_location

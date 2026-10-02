@@ -15,7 +15,6 @@ from typing import TYPE_CHECKING, Any, Protocol
 from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.bc_checkpoint import BCRecovery, read_bc_checkpoint
 from fh5.collection_store import encode, read_bounded, write_file
-from fh5.learning_runtime import TrainingStopped
 from fh5.replay_document import read_document_fields
 from fh5.temporal_bc import TemporalBCTrain, _configuration, run_temporal_bc
 
@@ -45,7 +44,7 @@ class LearningResources(Protocol):
     def close(self) -> None: ...
 
 
-class ScheduleStopped(TrainingStopped):
+class ScheduleStopped(Exception):
     pass
 
 

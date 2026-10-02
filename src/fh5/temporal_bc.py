@@ -19,7 +19,6 @@ from fh5.bc_losses import BCLossHistory, read_bc_manifest
 from fh5.bc_network import make_actor
 from fh5.learning_runtime import (
     TrainingBudget,
-    TrainingStopped,
     move_learning_state,
     preserve_torch_state,
 )
@@ -170,7 +169,7 @@ def _run(
                     lambda: move_learning_state(torch, models, optimizer, "cpu"),
                     lambda: move_learning_state(torch, models, optimizer, device),
                 )
-            except (TrainingStopped, OSError, MemoryError):
+            except Exception:
                 # Both a controlled stop and a failed resource probe occur
                 # between updates, while Adam/RNG describe a complete boundary.
                 seal(completed)
@@ -297,9 +296,10 @@ def _run(
                 gradient_delta = float(
                     features.grad[:, -2 * (len(first.frames) - 1) :: 2].abs().sum().item()
                 )
-            except (OSError, MemoryError):
+            except Exception:
                 # No parameter update has started. Release the unfinished batch
                 # and retry the same random draw after input/resources recover.
+                # Torch allocation failures may be RuntimeError, not MemoryError.
                 batch = rgb = features = target = loss = None
                 optimizer.zero_grad(set_to_none=True)
                 if sampling_rng is not None:

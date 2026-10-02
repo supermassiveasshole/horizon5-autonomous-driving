@@ -242,3 +242,23 @@ def test_bc_resume_rejects_a_parameter_update_count_behind_durable_progress(tmp_
     history["step"].sub_(1)
     expected = rewrite_learner_artifact(torch, source, summary, saved)
     assert_resume_rejected_before_admission(source, tmp_path / "rejected", expected)
+
+
+def test_bc_resume_rejects_adam_history_reassigned_between_same_shape_parameters(tmp_path):
+    torch = pytest.importorskip("torch")
+    schedule, _ = resume_inputs(tmp_path)
+    source = tmp_path / "stopped"
+    summary = run_experiment(
+        ScheduledBCTrain(schedule, source), learning_resources=PressureAfterTwoUpdates()
+    ).summary["learning_schedule"]
+    root = Path(summary["learner_checkpoint"]["directory"])
+    saved = torch.load(root / "learner.pt", map_location="cpu", weights_only=True)
+    keys = list(saved["actor"])
+    left, right = keys.index("encoder.11.bias"), keys.index("state.0.bias")
+    assert saved["actor"][keys[left]].shape == saved["actor"][keys[right]].shape == (64,)
+    keys[left], keys[right] = keys[right], keys[left]
+    saved["actor"] = {key: saved["actor"][key] for key in keys}
+    history = saved["optimizer"]["state"]
+    history[left], history[right] = history[right], history[left]
+    expected = rewrite_learner_artifact(torch, source, summary, saved)
+    assert_resume_rejected_before_admission(source, tmp_path / "rejected", expected)

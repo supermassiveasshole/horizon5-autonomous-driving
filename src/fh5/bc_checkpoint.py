@@ -11,6 +11,7 @@ from typing import Any
 
 from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.bc_learning import _checked_config
+from fh5.bc_network import make_actor
 from fh5.collection_store import atomic_json, encode
 from fh5.replay_document import read_document_fields
 from fh5.sac_checkpoint import state_digest
@@ -109,13 +110,30 @@ def _configuration(metadata: dict[str, Any]) -> dict[str, Any]:
     return config
 
 
-def _validate_state(torch: Any, state: dict[str, Any], config: dict[str, Any]) -> None:
+def _validate_state(
+    torch: Any, state: dict[str, Any], config: dict[str, Any], contract: dict[str, Any]
+) -> None:
     if set(state) != {"actor", "optimizer", "rng", "step"}:
         raise ValueError("Incomplete BC learner state")
     if type(state["step"]) is not int or not 0 <= state["step"] <= config["steps"]:
         raise ValueError("BC learner progress exceeds its original budget")
     if not isinstance(state["actor"], dict) or not isinstance(state["optimizer"], dict):
         raise ValueError("Invalid BC actor or optimizer state")
+    # Adam restores by position; the actor restores by name. Validate against
+    # actual registration order, not an order supplied by the checkpoint.
+    # Meta tensors describe that schema without allocation or CPU RNG draws.
+    with torch.device("meta"):
+        actor_schema = make_actor(contract).state_dict()
+    if list(state["actor"]) != list(actor_schema):
+        raise ValueError("BC Adam optimizer ownership differs from actor registration order")
+    for name, expected in actor_schema.items():
+        parameter = state["actor"][name]
+        if (
+            not torch.is_tensor(parameter)
+            or parameter.shape != expected.shape
+            or parameter.dtype != expected.dtype
+        ):
+            raise ValueError("BC Adam optimizer actor schema mismatch")
     optimizer = state["optimizer"]
     groups, history = optimizer.get("param_groups"), optimizer.get("state")
     if not isinstance(groups, list) or len(groups) != 1 or not isinstance(history, dict):
@@ -305,7 +323,7 @@ def publish_bc_checkpoint(
         "rng": torch.get_rng_state(),
         "step": completed,
     }
-    _validate_state(torch, state, config)
+    _validate_state(torch, state, config, model_metadata["contract"])
     metadata = {
         "version": 1,
         "stage": "temporal_bc_updates",
@@ -371,7 +389,7 @@ def read_bc_checkpoint(
     metadata = saved.pop("metadata", None)
     if metadata != {key: value for key, value in manifest.items() if key != "weights_sha256"}:
         raise ValueError("BC checkpoint metadata mismatch")
-    _validate_state(torch, saved, config)
+    _validate_state(torch, saved, config, manifest["model_metadata"]["contract"])
     if (
         saved["step"] != manifest["steps_completed"]
         or state_digest(torch, saved) != manifest["learner_state_sha256"]

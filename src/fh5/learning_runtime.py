@@ -8,10 +8,6 @@ from contextlib import contextmanager
 from typing import Any, Protocol
 
 
-class TrainingStopped(Exception):
-    """A cooperative stop raised only at a complete work-unit boundary."""
-
-
 class TrainingBudget(Protocol):
     def checkpoint(
         self,
