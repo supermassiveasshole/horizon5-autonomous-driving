@@ -922,3 +922,4 @@ mypy 142 源文件、Ruff 与 380 文件格式检查通过。
 必要证据的失败。没有扩大存储上限，也没有强行将 ENOSPC 当作成功。
 最终组合 **66 passed / 15.77 秒**，`runs/resource-bc-presentation-reviewed-results.xml`，
 包含空间回收后继续核验和回放、清理权限失败与原有采集/数值/BC/SAC 行为。
+固定 `de71ca2...5e879bf` 最终独立只读复审：**Standards 0 项、Spec 0 项**，原 P2 关闭。
