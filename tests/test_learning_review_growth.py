@@ -1,6 +1,8 @@
 """Rebuild derived evaluation reviews without a publication-count ceiling."""
 
 import json
+import os
+import subprocess
 
 import pytest
 from test_candidate_store import candidates as candidates
@@ -13,8 +15,10 @@ from fh5.experiment import run_experiment
 from fh5.learning_loop import LearningContinue
 
 
-@pytest.mark.parametrize("legacy", [False, True])
-def test_retained_review_directories_cannot_exhaust_continuation(tmp_path, seeded_loop, legacy):
+@pytest.mark.parametrize("legacy,dangling_link", [(False, False), (True, False), (False, True)])
+def test_retained_review_directories_cannot_exhaust_continuation(
+    tmp_path, seeded_loop, legacy, dangling_link
+):
     request = loop_request(tmp_path, seeded_loop, rounds=1)
     interrupt_selection(request, seeded_loop[0], "before_parent_review_ack")
     root = request.output_dir
@@ -29,6 +33,17 @@ def test_retained_review_directories_cannot_exhaust_continuation(tmp_path, seede
         directory = root / f"round-000/reviewed-{index:03d}"
         directory.mkdir()
         (directory / "partial.txt").write_text(f"retained diagnostic {index}")
+    link = root / "round-000/reviewed-011"
+    if dangling_link:
+        target = tmp_path / "absent-report-target"
+        if os.name == "nt":
+            subprocess.run(
+                ["cmd.exe", "/c", "mklink", "/J", str(link), str(target)],
+                check=True,
+                capture_output=True,
+            )
+        else:
+            link.symlink_to(target, target_is_directory=True)
     originals = {
         path: sha(path)
         for directory in (root / "round-000").glob("reviewed*")
@@ -44,10 +59,14 @@ def test_retained_review_directories_cannot_exhaust_continuation(tmp_path, seede
     assert result["latest_learner"] == prior["latest_learner"]
     assert not backend.leases and backend.closed and result["resources_released"]
     row = result["rounds"][0]
+    sequence = 12 if dangling_link else 11
     assert row["review_publication"] == {
-        "directory": str(root / "round-000/reviewed-011"),
-        "sequence": 11,
+        "directory": str(root / f"round-000/reviewed-{sequence:03d}"),
+        "sequence": sequence,
     }
-    assert (root / "round-000/reviewed-011/batch-report.json").is_file()
+    assert (root / f"round-000/reviewed-{sequence:03d}/batch-report.json").is_file()
     assert row.get("review_directories", []) == prior["rounds"][0].get("review_directories", [])
     assert all(sha(path) == digest for path, digest in originals.items())
+    if dangling_link:
+        assert link.is_junction() if os.name == "nt" else link.is_symlink()
+        assert not target.exists()

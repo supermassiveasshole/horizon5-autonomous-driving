@@ -968,7 +968,7 @@ class _Loop:
         review_output = root / ("reviewed" if attempt == 0 else f"reviewed-{attempt:03d}")
         if publication is not None and Path(publication["directory"]) != review_output:
             raise ValueError("Parent review publication directory changed")
-        while review_output.exists() or review_output.is_symlink():
+        while review_output.exists() or review_output.is_symlink() or review_output.is_junction():
             attempt += 1
             review_output = root / f"reviewed-{attempt:03d}"
         # Older directories remain independently readable on disk. Preserve a

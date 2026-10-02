@@ -310,7 +310,10 @@ Ruff、350 文件格式及 133 源文件 strict mypy 通过。另有父更新恢
 像素读取、缓存及数值图像组合 **59 passed / 68.31 秒**，
 结果 `runs/resource-frame-change-green-20261002-results.xml`。Ruff、350 文件格式及 133 源文件 strict mypy 通过。
 固定 `3910558...3aa3181` 独立只读审阅：**Standards 0 项、Spec 0 项**。
-包含父阶段日志及像素读取修复的 `3aa3181` 已启动新全量回归，结果尚未返回，不记为通过。
+包含父阶段日志及像素读取修复的冻结 `3aa3181` 全量回归已结束：
+**1269 passed / 1751.84 秒**，结果在隔离检出
+`runs/resource-stages-full-20261002-results.xml`。
+该版本不包含其后的 learner 分块摘要、续训绑定索引及报告目录改造，不能作为这些改动的全量结果。
 
 ## learner 摘要分块
 
@@ -352,4 +355,9 @@ Ruff、353 文件格式及 134 源文件 mypy 通过。
 
 真实进程在父审阅确认前退出，再准备额外的部分报告目录作为输入，旧实现接续时
 **1 failed / 39.40 秒**：`Parent evaluation review exceeds 10 retained publications`。
-这不声称已执行十一批评估。新版结构与旧状态兼容、原件保持及已有审阅恢复正在组合验证。
+这不声称已执行十一批评估。新版结构与旧状态兼容、原件保持及已有审阅恢复组合
+**7 passed / 137.34 秒**，结果 `runs/resource-review-growth-green-20261002-results.xml`。
+
+固定 `e1f2f24...cf86523` 审阅：Standards 0 项，Spec 1 项 P2。
+Windows 悬空目录联接不满足 `exists()` 或 `is_symlink()`，被反复选作下一报告目录。
+以真实 junction 复现 **1 failed / 39.76 秒**；已补查 `is_junction()`，扩展组合验证进行中。
