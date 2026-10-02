@@ -10,6 +10,26 @@ from test_control import control_config
 from test_experiment import config_file, sample_packet
 from test_tracking import tracking_config
 
+from fh5.cli import main
+
+
+def test_retired_policy_command_explains_migration_before_reading_old_assets(tmp_path, capsys):
+    output = tmp_path / "not-created"
+    result = main(
+        [
+            "policy",
+            "--config",
+            str(tmp_path / "old-config.json"),
+            "--output",
+            str(output),
+            "--live",
+        ]
+    )
+    error = json.loads(capsys.readouterr().err)
+    assert result == 2
+    assert "retired" in error["message"] and "realtime-drive" in error["message"]
+    assert not output.exists()
+
 
 def test_tracking_cli_defaults_to_validation_without_controller(tmp_path):
     output = tmp_path / "drive"

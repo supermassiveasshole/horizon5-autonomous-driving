@@ -22,7 +22,6 @@ from fh5.events import EventRun, validate_event_file
 from fh5.experiment import Packet, Record, Replay, run_experiment
 from fh5.observations import ObservationReplay
 from fh5.perception import Perception, PerceptionReplay
-from fh5.policy import PolicyDrive, validate_policy_file
 from fh5.recovery import RecoveryReplay
 from fh5.reward_audit import RewardAudit
 from fh5.rewards import RewardReplay
@@ -401,15 +400,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     capture.add_argument(
         "--live", action="store_true", help="Read-only physical client capture; F8 stops"
     )
-    policy = commands.add_parser(
-        "policy", help="Validate frozen BC assets; --live drives one bounded attempt"
-    )
-    policy.add_argument("--config", type=Path, required=True)
-    policy.add_argument("--output", type=Path, required=True)
+    policy = commands.add_parser("policy", help="Retired encoded-image driver; use realtime-drive")
+    policy.add_argument("--config", type=Path)
+    policy.add_argument("--output", type=Path)
     policy.add_argument("--port", type=int, default=5300)
-    policy.add_argument(
-        "--live", action="store_true", help="Send bounded policy input; F8 releases"
-    )
+    policy.add_argument("--live", action="store_true", help="Retired; no game input is sent")
     attempt = commands.add_parser(
         "attempt-review",
         help="Review complete local attempts with independent evidence; no game input",
@@ -824,60 +819,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({"devices": input_devices(), "commands_sent": False}))
             return 0
         if args.mode == "policy":
-            from fh5.policy_actor import FrozenActor
-
-            root, policy_route = validate_policy_file(args.config)
-            actor = FrozenActor(args.config)
-            if not args.live:
-                print(
-                    json.dumps(
-                        {
-                            "status": "validated_only",
-                            "commands_sent": False,
-                            "model_sha256": actor.manifest["weights_sha256"],
-                            "device": root["policy"]["device"],
-                            "route_length_m": policy_route["length_m"],
-                            "policy": root["policy"],
-                        }
-                    )
-                )
-                return 0
-            if not 0 <= args.port <= 65535:
-                raise ValueError("--port must be between 0 and 65535")
-            if args.output.exists():
-                raise FileExistsError(f"Output directory already exists: {args.output}")
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            if shutil.disk_usage(args.output.parent).free < 512 * 1024**2:
-                raise OSError("Need 512 MiB free for bounded capture and report")
-            from fh5.live import WindowsDesktop, XboxController
-            from fh5.live_policy import LivePolicyEnvironment
-            from fh5.live_vision import WindowsColorFrames
-
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
-                receiver.bind(("127.0.0.1", args.port))
-                desktop = WindowsDesktop()
-                policy_env = LivePolicyEnvironment(
-                    receiver,
-                    XboxController(),
-                    desktop,
-                    frame_factory=lambda: WindowsColorFrames(desktop),
-                )
-                print(
-                    json.dumps(
-                        {
-                            "status": "waiting_for_verified_local_start",
-                            "stop_key": "F8",
-                            "port": receiver.getsockname()[1],
-                            "reference_mode": root["policy"]["reference_mode"],
-                        }
-                    ),
-                    flush=True,
-                )
-                result = run_experiment(
-                    PolicyDrive(args.config, args.output),
-                    policy_environment=policy_env,
-                    policy_actor=actor,
-                )
+            raise ValueError(
+                "The encoded-image policy command is retired. Use realtime-drive with a numerical "
+                "temporal BC model and configs/realtime-drive.example.json; old configurations "
+                "are not interchangeable. Existing recordings remain readable with replay."
+            )
         elif args.mode == "bc-train":
             result = run_experiment(BCTrain(args.config, args.output))
         elif args.mode == "bc-replay":
@@ -1115,33 +1061,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError, ImportError) as error:
         print(json.dumps({"status": "error", "message": str(error)}), file=sys.stderr)
         return 2
-    if args.mode == "policy":
-        if result.summary["capture_status"] == "source_error":
-            print(json.dumps({"status": "source_error", "report": str(result.report_path)}))
-            return 2
-        p = result.summary["policy"]
-        print(
-            json.dumps(
-                {
-                    **{
-                        k: p[k]
-                        for k in (
-                            "stop_reason",
-                            "release_sent",
-                            "resources_released",
-                            "geometry_completed",
-                            "formal_validity",
-                        )
-                    },
-                    "report": str(result.report_path),
-                }
-            )
-        )
-        return (
-            0
-            if p["stop_reason"] == "local_end" and p["release_sent"] and p["resources_released"]
-            else 4
-        )
     if "recovery" in result.summary:
         print(
             json.dumps(

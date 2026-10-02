@@ -16,7 +16,7 @@
 
 报告保存执行器发送次数、失败、独立看门狗与收尾事件，另增加 `source_to_send_return_ms`。原 `source_to_sendable_ms` 仍表示推理结果就绪时间。两者都不能代表游戏实际采用命令的时刻；`real_game_validation`、训练与晋升资格不会因 API 成功而置为真。原生来源的记录可以离线重放，重放始终不创建执行器。
 
-新增 `realtime-drive` CLI；旧 `policy --live` 保留为原管线入口，不自动迁移或追认旧成绩。不把接口接通当作 #9 完成。验证细节见 [数值驾驶适配记录](validation/t08-numeric-driving-adapter.md)。
+模型驾驶统一使用 `realtime-drive` CLI；旧 `policy` 在线入口已退役，配置迁移与旧录制回放见[迁移说明](policy-driving.md)。不把接口接通当作 #9 完成，也不追认旧成绩。验证细节见 [数值驾驶适配记录](validation/t08-numeric-driving-adapter.md)。
 
 ## 有界驾驶命令与条件绑定
 

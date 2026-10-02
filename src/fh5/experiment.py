@@ -91,7 +91,7 @@ from fh5.perception import (
     replay_perception,
     run_perception,
 )
-from fh5.policy import PolicyActor, PolicyDrive, PolicyEnvironment, read_policy, run_policy
+from fh5.policy_recording import read_policy
 from fh5.realtime import RealtimeEnvironment, RealtimeNumericReplay, RealtimeReplay, RealtimeRun
 from fh5.realtime_numeric_replay import replay_realtime_numeric
 from fh5.realtime_replay import replay_realtime
@@ -298,7 +298,6 @@ def run_experiment(
     | LegacyNumericImport
     | NumericInfer
     | NumericReplay
-    | PolicyDrive
     | AttemptReplay
     | RewardReplay
     | SACReplayPrepare
@@ -338,8 +337,6 @@ def run_experiment(
     event_environment: EventEnvironment | None = None,
     vision_environment: VisionEnvironment | None = None,
     road_model: RoadModel | None = None,
-    policy_environment: PolicyEnvironment | None = None,
-    policy_actor: PolicyActor | None = None,
     numeric_inputs: Iterable[NumericDecision] | None = None,
     numeric_actor: DecisionActor | None = None,
     capture_source_factory: Callable[[], CaptureSource] | None = None,
@@ -441,10 +438,6 @@ def run_experiment(
         if isinstance(numeric_actor, ContextualNumericActor):
             raise ValueError("Contextual actors require the real-time decision interface")
         return run_numeric(request, numeric_actor, numeric_inputs)
-    if isinstance(request, PolicyDrive):
-        if policy_environment is None:
-            raise ValueError("Policy execution requires an explicit game environment")
-        return run_policy(request, policy_environment, policy_actor)
     if isinstance(request, AttemptReplay):
         return review_attempts(request)
     if isinstance(request, RewardReplay):

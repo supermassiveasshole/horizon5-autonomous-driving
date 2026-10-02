@@ -20,7 +20,7 @@ T13 / #14 的[候选比较](docs/candidate-selection.md)可从原始证据重新
 
 T07 / #8 新增[物理时间奖励与终止结算](docs/rewards.md)：`fh5 reward-replay` 重算历史局部片段，`fh5 reward-audit` 生成完整合成反例与回报排序。独立有效性、奖励标签和正式成绩保持各自结论；未启动 SAC 或新的实机驾驶。
 
-T31 / #33 已加入独立的[数值图像输入与精确回放](docs/numeric-images.md)：旧图像仅在离线准备时解码，冻结策略接收数值 RGB，数值存档在后台执行。真实历史数据已有 200 个观测精确回放；页面交互仍待验收，旧实机 `policy` 尚未迁移。参见 [T31 验证](docs/validation/t31-numeric-images.md)。
+T31 / #33 已加入独立的[数值图像输入与精确回放](docs/numeric-images.md)：旧图像仅在离线准备时解码，冻结策略接收数值 RGB，数值存档在后台执行。真实历史数据已有 200 个观测精确回放；页面交互仍待验收。参见 [T31 验证](docs/validation/t31-numeric-images.md)。
 
 需要 Python 3.12 和 [uv](https://docs.astral.sh/uv/)。在仓库根目录运行 PowerShell：
 
@@ -132,8 +132,10 @@ uv run --locked ruff format --check .
 
 安装 `learning` 可选依赖后，通过 `fh5 bc-train --config configs/bc.example.json --output runs/bc-first` 训练固定预算的多模态 BC；`fh5 bc-replay` 重放冻结模型。两者不发送游戏输入。数据、参考遮蔽、模型与误差解释见 [BC 说明](docs/bc.md)，首轮结果见 [T27 验证](docs/validation/t27-bc.md)。
 
-#35 新增 `fh5 temporal-prepare`、`temporal-train`、`temporal-replay`：历史画面仅在导入时解码，训练与推理使用数值像素和明确的帧间 Δt。支持实际/固定时间对照及冻结输入/预测核验，见[数值 Δt BC](docs/temporal-bc.md)和[离线验证](docs/validation/t33-temporal-bc.md)。首轮结果未证明 Δt 收益或起步能力，尚未接入实时驾驶。
+#35 新增 `fh5 temporal-prepare`、`temporal-train`、`temporal-replay`：历史画面仅在导入时解码，训练与推理使用数值像素和明确的帧间 Δt。支持实际/固定时间对照及冻结输入/预测核验，见[数值 Δt BC](docs/temporal-bc.md)和[离线验证](docs/validation/t33-temporal-bc.md)。数值 Δt BC 已接入实时驾驶软件路径；首轮结果未证明 Δt 收益或起步能力，实机驾驶仍待验收。
 
 #34 已有 [DXGI 数值采集基础入口](docs/dxgi-capture.md)，`fh5 capture-dxgi` 默认只校验配置。独立采集/预处理、最新待处理槽和带 QPC 时间的历史支持软件验证；原生动态采集、性能对照与页面交互仍待验收，不构成实时驾驶通过。
 
 #36 已有[容错数值决策软件切片](docs/realtime-decisions.md)：常驻推理、缺帧跳过、绝对动作租期和独立监督通过故障回放及真实线程测试。`fh5 realtime-shadow` 默认只校验，显式 `--live` 才组合 DXGI、UDP、独立任务几何和冻结 Δt 模型做只读预测；不会连接虚拟手柄。组合通过合成像素与回环 UDP 验证，实际 FH5 的 10/20 Hz 性能和页面交互仍待验收。
+
+当前模型驾驶入口为 `fh5 realtime-drive`，使用数值 Δt BC 与新的驾驶配置，默认只校验，显式 `--live` 才连接控制；用法与所需条件见[数值驾驶说明](docs/realtime-decisions.md#有界驾驶命令与条件绑定)。旧 `policy` 在线入口已退役，旧模型和 JSON 不自动转发；旧录制仍可离线回放，见[迁移说明](docs/policy-driving.md)。
