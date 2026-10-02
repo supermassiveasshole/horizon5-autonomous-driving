@@ -2,18 +2,16 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 import shutil
 import time
 from pathlib import Path
 from typing import Any
 
-from fh5.artifact_io import sha256_file
+from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.capture_resources import WindowsResources
 from fh5.collection import CollectionControl
 from fh5.collection_process import control_bundle
-from fh5.collection_store import read_bounded
+from fh5.collection_status import read_collection_session
 from fh5.learning_observation import resource_observation
 
 
@@ -50,10 +48,10 @@ class NativeLearningResources:
         self._check_manifest()
         status = control_bundle(CollectionControl(self.bundle)).summary["collection"]
         if "session_sha256" in status:
-            raw = read_bounded(self.bundle / "recording/session.json", 1024**2)
-            if hashlib.sha256(raw).hexdigest() != status["session_sha256"]:
-                raise ValueError("Collector status does not match its recorded session")
-            snapshot = json.loads(raw).get("software_snapshot") or {}
+            session = read_collection_session(
+                VerifiedFile(self.bundle / "recording/session.json", status["session_sha256"])
+            )
+            snapshot = session.get("software_snapshot") or {}
             worker = status.get("worker-state") or {}
             for name, binding in (("session", snapshot), ("worker", worker)):
                 digest = binding.get("manifest_sha256")

@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Any, Literal
 from fh5.capture_config import parse_capture_config
 from fh5.collection import CollectionConfig, CollectionControl
 from fh5.collection_host import process_identity
+from fh5.collection_status import PROCESS_FIELDS, control_source, read_control_status
 from fh5.collection_store import atomic_json, read_bounded
 from fh5.demonstrations import _profile
 
@@ -293,7 +294,8 @@ def control_bundle(request: CollectionControl) -> RunResult:
     process_path = root / "process.json"
     process = None
     if process_path.is_file():
-        process = json.loads(read_bounded(process_path, 16384))
+        process = read_control_status(process_path, PROCESS_FIELDS)
+        value.setdefault("source_documents", {})["process"] = control_source(process_path)
         state = _process_liveness(process)
         value.update(
             process_liveness=state,
@@ -305,8 +307,11 @@ def control_bundle(request: CollectionControl) -> RunResult:
         )
     for filename in ("worker-state.json", "launch-failed.json"):
         if (root / filename).is_file():
-            child = json.loads(read_bounded(root / filename, 65536))
+            child = read_control_status(root / filename, PROCESS_FIELDS)
             value[filename.removesuffix(".json")] = child
+            value.setdefault("source_documents", {})[filename.removesuffix(".json")] = (
+                control_source(root / filename)
+            )
             if filename == "worker-state.json":
                 matching = (
                     process is not None

@@ -2,6 +2,9 @@
 
 状态：已实现数据/存储核心、冻结环境的独立进程启动和 Windows DXGI/UDP/XInput 被动组合适配器。软件测试使用隔离的合成输入；**真实两次人工驾驶与重开、4K 性能及边采集边开发仍待实机验收**，本票保持开放。不连接虚拟手柄。
 
+资源策略以[资源限制与数据增长](resource-policy.md)为准。下文仍描述部分待清理的旧默认值和门槛，
+它们本身不构成容量或测量依据；当前迁移范围及剩余项见[审计记录](validation/resource-limit-audit.md)。
+
 ## 冻结与后台运行
 
 在开发仓库执行准备命令。它复制当前源文件、锁文件、配置和已校准输入档案，通过 `uv sync --locked --no-dev --no-editable --link-mode copy` 安装独立依赖；不打开采集设备。原配置与源码以后改变，不影响已经准备好的副本。记录实际 Python 基础运行时路径/版本和包版本；基础 Python 与 Windows 系统库仍属于机器运行环境，第三方包和项目代码独立复制。
@@ -43,6 +46,21 @@ uv run --locked fh5 collection-review runs/collection-001 --report runs/collecti
 ```
 
 直接查询 recording 目录只读取最新心跳/最终状态，标记 `process_liveness=not_checked`；查询其 bundle 则额外向操作系统核对实际进程。停止请求使采集退出并封存尾块。数据是否完整与进程是否存活分别报告。
+
+状态读取按字段逐步解析，不再因 session 超过 1 MiB、status/final 超过 4 MiB、
+process 超过 16 KiB 或 worker/启动失败状态超过 64 KiB 拒绝查询。
+返回结果保留状态、行数/块数/积压、时钟、错误与释放证据，以及进程和软件绑定。
+`source_documents` 提供原文件路径；`counts`、`coverage_polls`、块明细、运行时清单和附属诊断
+不再整个嵌入 CLI 的状态 JSON，需要详情时从引用文件按需读取。动态路径可能已指向后续状态，
+因此引用不是当前返回值的不可变快照。
+
+动态状态从同一次打开的文件读取并检查完整 JSON 语法。Windows 读取允许文件替换共享，
+既有状态的发布使用保留属性/ACL 错误的 [`ReplaceFileW`](https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-replacefilew)，让正在读取旧版本的调用完成，
+后续调用读到新版本。已完成原型和公开控制入口的文件系统检查；冻结进程集成仍待验证。
+原生学习准入另以状态提供的摘要校验整个 session 私有副本，只提取嵌套的软件绑定，
+文件增大不会绕过摘要或进程身份检查。
+
+本次仅迁移查询与准入的读取路径；session 写入和离线审查/数据集准备中的旧门槛仍待清理。
 
 ## 数据与边界
 

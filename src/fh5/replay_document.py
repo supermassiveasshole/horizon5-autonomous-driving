@@ -224,6 +224,34 @@ class _JSONInput:
                 self.take(",")
         self.take("]")
 
+    def selected(self, wanted: set[tuple[str, ...]]) -> Any:
+        """Project nested scalar leaves; discard other containers incrementally."""
+        token = self.peek()
+        if () in wanted or token != "{":
+            if token in ("[", "{"):
+                self.discard()
+                return _NON_SCALAR
+            return self.value()
+        self.take("{")
+        result = {}
+        if self.peek() != "}":
+            while True:
+                key = self.value()
+                if not isinstance(key, str):
+                    raise ValueError("JSON object keys must be strings")
+                self.take(":")
+                children = {path[1:] for path in wanted if path[0] == key}
+                if children:
+                    # Later duplicate parents replace their entire projection.
+                    result[key] = self.selected(children)
+                else:
+                    self.discard()
+                if self.peek() != ",":
+                    break
+                self.take(",")
+        self.take("}")
+        return result
+
     def projected(
         self,
         reducers: dict[tuple[str, ...], Callable[[Iterator[Any]], Any]],
@@ -294,6 +322,33 @@ def read_document_projection(
     if not isinstance(value, dict):
         raise ValueError("Expected a JSON object")
     return value
+
+
+def read_stream_paths(stream: TextIO, wanted: set[tuple[str, ...]]) -> dict[str, Any]:
+    """Select scalar leaves from one open JSON document, validating all syntax."""
+    parser = _JSONInput(stream)
+    value = parser.selected(wanted)
+    if parser.peek():
+        raise ValueError("Trailing data after JSON document")
+    if not isinstance(value, dict):
+        raise ValueError("Expected a JSON object")
+
+    def validate_shape(item: Any) -> None:
+        if item is _NON_SCALAR:
+            raise ValueError("Expected a scalar JSON document field")
+        if isinstance(item, dict):
+            for child in item.values():
+                validate_shape(child)
+
+    validate_shape(value)
+    return value
+
+
+def read_document_paths(source: VerifiedFile, wanted: set[tuple[str, ...]]) -> dict[str, Any]:
+    """Select nested scalar metadata from the private hash-verified file bytes."""
+    with source.snapshot() as frozen:
+        with io.TextIOWrapper(frozen, encoding="utf-8-sig") as stream:
+            return read_stream_paths(stream, wanted)
 
 
 @contextmanager

@@ -10,13 +10,18 @@ from typing import TYPE_CHECKING, Any
 
 from fh5.collection import CollectionControl, CollectionEnvironment, CollectionRun
 from fh5.collection_state import CollectionState
+from fh5.collection_status import (
+    STATUS_FIELDS,
+    control_source,
+    read_collection_session,
+    read_control_status,
+)
 from fh5.collection_store import (
     CollectionArchive,
     WriteFile,
     atomic_json,
     collection_complete,
     encode,
-    read_bounded,
     write_file,
 )
 from fh5.demonstrations import _profile
@@ -26,8 +31,6 @@ if TYPE_CHECKING:
 
 
 def control_collection(request: CollectionControl) -> RunResult:
-    import json
-
     from fh5.experiment import RunResult
 
     root = request.recording_dir
@@ -35,13 +38,11 @@ def control_collection(request: CollectionControl) -> RunResult:
         from fh5.collection_process import control_bundle
 
         return control_bundle(request)
-    session = json.loads(read_bounded(root / "session.json", 1024**2))
-    if session.get("kind") != "continuous-numeric-collection-v1":
-        raise ValueError("Not a continuous collection session")
+    read_collection_session(root / "session.json")
     final = root / "final.json"
     status = final if final.exists() else root / "status.json"
     if status.is_file():
-        value = json.loads(read_bounded(status, 4 * 1024**2))
+        value = read_control_status(status, STATUS_FIELDS)
     else:
         value = {"state": "starting", "commands_sent": False}
     if request.stop and not final.exists():
@@ -50,6 +51,10 @@ def control_collection(request: CollectionControl) -> RunResult:
         stop_requested=(root / "stop.request").exists(),
         process_liveness="not_checked; status file alone does not prove a running process",
         final_status_present=final.exists(),
+        source_documents={
+            "session": control_source(root / "session.json"),
+            "status": control_source(status),
+        },
     )
     return RunResult({"source_kind": "collection_control"}, [], [], {"collection": value}, status)
 

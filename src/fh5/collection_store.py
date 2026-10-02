@@ -16,6 +16,7 @@ from queue import Empty, Full, Queue
 from typing import Any
 
 from fh5.collection import CollectionConfig, metadata_budget
+from fh5.collection_file_io import replace_control_file
 from fh5.numeric_images import NumericFrame
 
 WriteFile = Callable[[Path, bytes], None]
@@ -69,7 +70,7 @@ def atomic_json(path: Path, value: Any) -> None:
     deadline = time.monotonic() + 0.25
     while True:
         try:
-            temporary.replace(path)
+            replace_control_file(temporary, path)
             break
         except PermissionError as error:
             # Windows readers can briefly deny delete/rename sharing. Retry only
