@@ -260,7 +260,7 @@ def test_changed_training_source_during_freeze_releases_resources_and_records_fa
 def test_large_preparation_configuration_exports_the_same_causal_dataset(tmp_path):
     from test_collection_bc import prepare_inputs
 
-    config, _ = prepare_inputs(tmp_path)
+    config = prepare_inputs(tmp_path)
     original = json.loads(config.read_bytes())
     reference = run_experiment(CollectionBCPrepare(config, tmp_path / "reference")).summary[
         "collection_bc"

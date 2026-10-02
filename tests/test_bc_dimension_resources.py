@@ -11,7 +11,6 @@ from test_temporal_bc import temporal_fixture
 
 from fh5.bc import BCReplay
 from fh5.collection_bc import CollectionBCPrepare
-from fh5.collection_dataset import CollectionDataset
 from fh5.experiment import run_experiment
 from fh5.numeric_images import (
     NumericDecision,
@@ -133,23 +132,7 @@ def test_legacy_bc_learns_at_explicit_resize_shape_and_replays_exactly(tmp_path,
 
 @pytest.mark.parametrize("size", ((641, 32), (1, 1)))
 def test_collection_prepares_original_rgb_shape_then_learns_and_replays(tmp_path, size):
-    source_config = dataset_inputs(tmp_path, vary_action=True, size=size)
-    run_experiment(CollectionDataset(source_config, tmp_path / "selection"))
-    selection = tmp_path / "selection/dataset.json"
-    prepare = tmp_path / "prepare.json"
-    prepare.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "dataset": str(selection),
-                "dataset_sha256": hashlib.sha256(selection.read_bytes()).hexdigest(),
-                "action_history_offsets_ms": [100, 50, 0],
-                "max_action_age_ms": 100,
-                "waypoint_distances_m": [5, 10, 20],
-            }
-        ),
-        encoding="utf-8",
-    )
+    prepare = dataset_inputs(tmp_path, vary_action=True, size=size)
     output = tmp_path / "numeric"
     prepared = run_experiment(CollectionBCPrepare(prepare, output)).summary["collection_bc"]
     assert prepared["commands_sent"] is False

@@ -22,12 +22,6 @@ if TYPE_CHECKING:
 
 
 @dataclass(frozen=True)
-class CollectionDataset:
-    config_file: Path
-    output_dir: Path
-
-
-@dataclass(frozen=True)
 class CollectionDatasetReview:
     dataset_file: Path
     report_path: Path
@@ -300,34 +294,16 @@ def _summary(data: dict[str, Any], digest: str) -> dict[str, Any]:
     }
 
 
-def run_collection_dataset(request: CollectionDataset | CollectionDatasetReview) -> RunResult:
+def review_collection_dataset(request: CollectionDatasetReview) -> RunResult:
     from fh5.experiment import RunResult
 
-    if isinstance(request, CollectionDataset):
-        if request.output_dir.exists():
-            raise FileExistsError(request.output_dir)
-        config = json.loads(read_bounded(request.config_file, 4 * 1024**2))
-        _config(config)
-        sources = [_freeze_source(s, request.config_file.parent) for s in config["sources"]]
-        _report_destination(request.output_dir / "report.html", sources)
-        data = build_snapshot(config, sources)
-        payload = encode(data)
-        if len(payload) > 128 * 1024**2:
-            raise ValueError("Dataset exceeds 128 MiB snapshot budget; reduce sources or reviews")
-        request.output_dir.mkdir(parents=True)
-        path = request.output_dir / "dataset.json"
-        temporary = path.with_suffix(".tmp")
-        write_file(temporary, payload)
-        temporary.rename(path)
-        report = request.output_dir / "report.html"
-    else:
-        path, report = request.dataset_file, request.report_path
-        data = json.loads(read_bounded(path, 128 * 1024**2))
-        if data.get("kind") != "collection-dataset-snapshot-v1" or data.get("version") != 1:
-            raise ValueError("Unsupported collection dataset snapshot")
-        _report_destination(report, data["sources"])
-        if build_snapshot(data["config"], data["sources"]) != data:
-            raise ValueError("Dataset differs from canonical frozen source reconstruction")
+    path, report = request.dataset_file, request.report_path
+    data = json.loads(read_bounded(path, 128 * 1024**2))
+    if data.get("kind") != "collection-dataset-snapshot-v1" or data.get("version") != 1:
+        raise ValueError("Unsupported collection dataset snapshot")
+    _report_destination(report, data["sources"])
+    if build_snapshot(data["config"], data["sources"]) != data:
+        raise ValueError("Dataset differs from canonical frozen source reconstruction")
     summary = _summary(data, hashlib.sha256(read_bounded(path, 128 * 1024**2)).hexdigest())
     collection_result(report, summary, title="持续采集数据快照")
     write_file(report.with_suffix(".json"), encode(summary))

@@ -12,7 +12,14 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fh5.artifact_io import VerifiedFile, sha256_file
-from fh5.collection_dataset import _evidence, _report_destination, build_snapshot
+from fh5.collection_dataset import (
+    _config,
+    _evidence,
+    _freeze_source,
+    _report_destination,
+    _summary,
+    build_snapshot,
+)
 from fh5.collection_review import collection_result
 from fh5.collection_selection import sealed_rows
 from fh5.collection_store import encode, read_bounded, write_file
@@ -36,15 +43,19 @@ def _settings(config: dict[str, Any]) -> None:
         set(config) - {"reference"}
         != {
             "version",
-            "dataset",
-            "dataset_sha256",
+            "seed",
+            "sources",
+            "rules",
             "action_history_offsets_ms",
             "max_action_age_ms",
             "waypoint_distances_m",
         }
-        or config["version"] != 1
+        or config["version"] != 2
     ):
-        raise ValueError("Unsupported collection BC preparation settings")
+        raise ValueError(
+            "Collection BC preparation requires v2 sources, seed, rules and observation settings; "
+            "replace the old selection path/hash with its source configuration"
+        )
     for name, maximum, descending in (
         ("action_history_offsets_ms", 2000, True),
         ("waypoint_distances_m", 500, False),
@@ -168,6 +179,9 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
             "version",
             "dataset",
             "dataset_sha256",
+            "seed",
+            "sources",
+            "rules",
             "action_history_offsets_ms",
             "max_action_age_ms",
             "waypoint_distances_m",
@@ -176,15 +190,13 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
         reject_unknown=True,
     )
     _settings(config)
-    selection_path = request.config_file.parent / config["dataset"]
-    raw = read_bounded(selection_path, 128 * 1024**2)
+    selection_config = {"version": 1, **{k: config[k] for k in ("seed", "sources", "rules")}}
+    _config(selection_config)
+    sources = [_freeze_source(s, request.config_file.parent) for s in config["sources"]]
+    _report_destination(request.output_dir / "report.html", sources)
+    data = build_snapshot(selection_config, sources)
+    raw = encode(data)
     digest = hashlib.sha256(raw).hexdigest()
-    if digest != config["dataset_sha256"]:
-        raise ValueError("Frozen collection selection hash mismatch")
-    data = json.loads(raw)
-    if data != build_snapshot(data["config"], data["sources"]):
-        raise ValueError("Collection selection differs from frozen source reconstruction")
-    _report_destination(request.output_dir / "report.html", data["sources"])
     contract = PixelContract.from_metadata(data["pixel_contract"])
     reference_files, reference_info = _reference(
         config, request.config_file.parent, data["sources"]
@@ -381,9 +393,11 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
         write_file(temporary, payload)
         temporary.rename(request.output_dir / filename)
         hashes[filename] = hashlib.sha256(payload).hexdigest()
+    selection_summary = _summary(data, digest)
     summary = {
         "version": 1,
         "selection_sha256": digest,
+        "selection": selection_summary,
         "snapshot_sha256": hashes,
         "commands_sent": False,
         "diagnostic_only": data["diagnostic_only"],
@@ -396,4 +410,6 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
     report = request.output_dir / "report.html"
     collection_result(report, summary, title="数值 BC 数据准备")
     write_file(report.with_suffix(".json"), encode(summary))
-    return RunResult({}, [], [], {"collection_bc": summary}, report)
+    return RunResult(
+        {}, [], [], {"collection_bc": summary, "collection_dataset": selection_summary}, report
+    )

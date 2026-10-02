@@ -131,7 +131,7 @@ def test_temporal_metrics_preserve_exact_percentiles_groups_and_history_baseline
 
 
 def assessment_inputs(tmp_path, *, audit_items=0):
-    prepare, _ = prepare_inputs(tmp_path)
+    prepare = prepare_inputs(tmp_path)
     numeric = tmp_path / "numeric"
     run_experiment(CollectionBCPrepare(prepare, numeric))
     dataset, heldout = numeric / "dataset.json", numeric / "evaluation.json"

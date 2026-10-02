@@ -6,6 +6,7 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from test_control import control_config
 from test_experiment import config_file, sample_packet
 from test_tracking import tracking_config
@@ -13,21 +14,27 @@ from test_tracking import tracking_config
 from fh5.cli import main
 
 
-def test_retired_policy_command_explains_migration_before_reading_old_assets(tmp_path, capsys):
+@pytest.mark.parametrize(
+    ("command", "replacement", "flags"),
+    [("policy", "realtime-drive", ["--live"]), ("collection-dataset", "collection-bc-prepare", [])],
+)
+def test_retired_command_explains_migration_before_reading_old_assets(
+    tmp_path, capsys, command, replacement, flags
+):
     output = tmp_path / "not-created"
     result = main(
         [
-            "policy",
+            command,
             "--config",
             str(tmp_path / "old-config.json"),
             "--output",
             str(output),
-            "--live",
+            *flags,
         ]
     )
     error = json.loads(capsys.readouterr().err)
     assert result == 2
-    assert "retired" in error["message"] and "realtime-drive" in error["message"]
+    assert "retired" in error["message"] and replacement in error["message"]
     assert not output.exists()
 
 

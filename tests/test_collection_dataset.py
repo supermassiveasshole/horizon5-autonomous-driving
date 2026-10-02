@@ -11,6 +11,8 @@ from pathlib import Path
 import pytest
 from test_collection import Stream, input_at, request
 
+from fh5.collection_bc import CollectionBCPrepare
+from fh5.collection_dataset import CollectionDatasetReview
 from fh5.experiment import run_experiment
 
 
@@ -84,7 +86,7 @@ def dataset_inputs(tmp_path, invalid_packet=False, vary_action=False, overlap=Fa
     config.write_text(
         json.dumps(
             {
-                "version": 1,
+                "version": 2,
                 "seed": 7,
                 "sources": sources,
                 "rules": {
@@ -94,6 +96,9 @@ def dataset_inputs(tmp_path, invalid_packet=False, vary_action=False, overlap=Fa
                     "longitudinal_limit": 1.0,
                     "max_label_delay_ms": 50,
                 },
+                "action_history_offsets_ms": [100, 50, 0],
+                "max_action_age_ms": 100,
+                "waypoint_distances_m": [5, 10, 20],
             }
         )
     )
@@ -101,13 +106,12 @@ def dataset_inputs(tmp_path, invalid_packet=False, vary_action=False, overlap=Fa
 
 
 def test_freeze_binds_sealed_sources_reviews_and_independent_groups(tmp_path):
-    from fh5.collection_dataset import CollectionDataset, CollectionDatasetReview
-
     config = dataset_inputs(tmp_path)
     output = tmp_path / "snapshot"
-    result = run_experiment(CollectionDataset(config, output))
-    data = json.loads((output / "dataset.json").read_bytes())
+    result = run_experiment(CollectionBCPrepare(config, output))
+    data = json.loads((output / "selection.json").read_bytes())
     assert data["kind"] == "collection-dataset-snapshot-v1"
+    assert data["version"] == data["config"]["version"] == 1
     assert {g["split"] for g in data["groups"]} == {"train", "development", "evaluation"}
     assert data["diagnostic_only"] and not data["closed_loop_validated"]
     assert data["samples"] and all(s["bc_eligible"] for s in data["samples"])
@@ -115,22 +119,20 @@ def test_freeze_binds_sealed_sources_reviews_and_independent_groups(tmp_path):
     assert all(source["blocks"] for source in data["sources"])
     assert result.summary["collection_dataset"]["ready_for_software_training"]
     assert result.summary["collection_dataset"]["evaluation"]["coverage"] == "withheld"
-    before = (output / "dataset.json").read_bytes()
+    before = (output / "selection.json").read_bytes()
     for source in json.loads(config.read_bytes())["sources"]:
         Path(source["review"]).write_text("changed later review")
     verified = run_experiment(
-        CollectionDatasetReview(output / "dataset.json", tmp_path / "reviewed.html")
+        CollectionDatasetReview(output / "selection.json", tmp_path / "reviewed.html")
     )
     assert verified.summary["collection_dataset"]["verified"]
-    assert (output / "dataset.json").read_bytes() == before
+    assert (output / "selection.json").read_bytes() == before
 
 
 @pytest.mark.parametrize(
     "fault", ["group_split", "related_split", "duplicate_source", "review_binding"]
 )
 def test_invalid_independence_or_review_never_publishes_snapshot(tmp_path, fault):
-    from fh5.collection_dataset import CollectionDataset
-
     config = dataset_inputs(tmp_path)
     value = json.loads(config.read_bytes())
     review_path = Path(value["sources"][1]["review"])
@@ -146,13 +148,11 @@ def test_invalid_independence_or_review_never_publishes_snapshot(tmp_path, fault
     review_path.write_text(json.dumps(review))
     config.write_text(json.dumps(value))
     with pytest.raises(ValueError):
-        run_experiment(CollectionDataset(config, tmp_path / "snapshot"))
+        run_experiment(CollectionBCPrepare(config, tmp_path / "snapshot"))
     assert not (tmp_path / "snapshot").exists()
 
 
 def test_failed_and_out_of_envelope_labels_are_retained_without_clipping(tmp_path):
-    from fh5.collection_dataset import CollectionDataset
-
     config = dataset_inputs(tmp_path)
     value = json.loads(config.read_bytes())
     value["rules"]["steering_limit"] = 0.5
@@ -162,8 +162,8 @@ def test_failed_and_out_of_envelope_labels_are_retained_without_clipping(tmp_pat
     interval = review["attempts"][0]["intervals"][0]
     interval.update(quality="failed", reasons=["offroad"])
     review_path.write_text(json.dumps(review))
-    run_experiment(CollectionDataset(config, tmp_path / "snapshot"))
-    data = json.loads((tmp_path / "snapshot/dataset.json").read_bytes())
+    run_experiment(CollectionBCPrepare(config, tmp_path / "snapshot"))
+    data = json.loads((tmp_path / "snapshot/selection.json").read_bytes())
     assert data["samples"] and all(not s["bc_eligible"] for s in data["samples"])
     assert all(s["target_action"][0] == -1 for s in data["samples"])
     assert all("action_outside_envelope" in s["reasons"] for s in data["samples"])
@@ -172,12 +172,10 @@ def test_failed_and_out_of_envelope_labels_are_retained_without_clipping(tmp_pat
 
 @pytest.mark.parametrize("changed", ["pixel", "rows", "session", "selection"])
 def test_changed_frozen_dependencies_or_selection_are_rejected(tmp_path, changed):
-    from fh5.collection_dataset import CollectionDataset, CollectionDatasetReview
-
     config = dataset_inputs(tmp_path)
     output = tmp_path / "snapshot"
-    run_experiment(CollectionDataset(config, output))
-    document = output / "dataset.json"
+    run_experiment(CollectionBCPrepare(config, output))
+    document = output / "selection.json"
     data = json.loads(document.read_bytes())
     root = Path(data["sources"][0]["recording"])
     if changed == "pixel":
@@ -196,10 +194,8 @@ def test_changed_frozen_dependencies_or_selection_are_rejected(tmp_path, changed
 
 
 def test_event_coverage_counts_one_contiguous_turn_and_withholds_final_holdout(tmp_path):
-    from fh5.collection_dataset import CollectionDataset
-
     config = dataset_inputs(tmp_path)
-    result = run_experiment(CollectionDataset(config, tmp_path / "snapshot"))
+    result = run_experiment(CollectionBCPrepare(config, tmp_path / "snapshot"))
     coverage = result.summary["collection_dataset"]["development_coverage"]
     assert {c["attempt"] for c in coverage} == {"attempt-0", "attempt-1"}
     assert all(c["trusted_events"]["left"] == 1 for c in coverage)
@@ -209,14 +205,12 @@ def test_event_coverage_counts_one_contiguous_turn_and_withholds_final_holdout(t
 
 @pytest.mark.parametrize("destination", ["snapshot", "source", "source_new", "existing", "json"])
 def test_review_report_never_overwrites_frozen_or_existing_evidence(tmp_path, destination):
-    from fh5.collection_dataset import CollectionDataset, CollectionDatasetReview
-
     config = dataset_inputs(tmp_path)
     output = tmp_path / "snapshot"
-    run_experiment(CollectionDataset(config, output))
+    run_experiment(CollectionBCPrepare(config, output))
     source = Path(json.loads(config.read_bytes())["sources"][0]["recording"])
     report = {
-        "snapshot": output / "dataset.html",
+        "snapshot": output / "selection.html",
         "source": source / "session.html",
         "source_new": source / "new-report.html",
         "existing": output / "report.html",
@@ -224,7 +218,7 @@ def test_review_report_never_overwrites_frozen_or_existing_evidence(tmp_path, de
     }[destination]
     before = {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()}
     with pytest.raises((ValueError, FileExistsError)):
-        run_experiment(CollectionDatasetReview(output / "dataset.json", report))
+        run_experiment(CollectionDatasetReview(output / "selection.json", report))
     assert {p: p.read_bytes() for p in tmp_path.rglob("*") if p.is_file()} == before
 
 
@@ -232,8 +226,6 @@ def test_review_report_never_overwrites_frozen_or_existing_evidence(tmp_path, de
 def test_review_subdivision_preserves_events_unless_trust_is_interrupted(
     tmp_path, middle_quality, expected_events
 ):
-    from fh5.collection_dataset import CollectionDataset
-
     config = dataset_inputs(tmp_path)
     review_path = Path(json.loads(config.read_bytes())["sources"][0]["review"])
     review = json.loads(review_path.read_bytes())
@@ -251,33 +243,29 @@ def test_review_subdivision_preserves_events_unless_trust_is_interrupted(
         dict(original, start_sequence=8),
     ]
     review_path.write_text(json.dumps(review))
-    result = run_experiment(CollectionDataset(config, tmp_path / "snapshot"))
+    result = run_experiment(CollectionBCPrepare(config, tmp_path / "snapshot"))
     coverage = result.summary["collection_dataset"]["development_coverage"][0]
     assert coverage["trusted_events"]["left"] == expected_events
     assert coverage["trusted_events"]["throttle"] == expected_events
     assert coverage["trusted_events"]["medium_speed"] == expected_events
-    data = json.loads((tmp_path / "snapshot/dataset.json").read_bytes())
+    data = json.loads((tmp_path / "snapshot/selection.json").read_bytes())
     tail = [s for s in data["samples"] if s["attempt"] == "attempt-0" and s["sequence"] >= 8]
     assert tail and all(s["history_floor_ns"] == 1_650_000_000 for s in tail)
 
 
 def test_invalid_packet_is_excluded_without_discarding_valid_parts_of_attempt(tmp_path):
-    from fh5.collection_dataset import CollectionDataset
-
     config = dataset_inputs(tmp_path, invalid_packet=True)
-    result = run_experiment(CollectionDataset(config, tmp_path / "snapshot"))
-    data = json.loads((tmp_path / "snapshot/dataset.json").read_bytes())
+    result = run_experiment(CollectionBCPrepare(config, tmp_path / "snapshot"))
+    data = json.loads((tmp_path / "snapshot/selection.json").read_bytes())
     kept = [s for s in data["samples"] if s["attempt"] == "attempt-0"]
     assert kept and all(s["sequence"] != 6 for s in kept)
     assert result.summary["collection_dataset"]["ready_for_software_training"]
 
 
 def test_label_is_first_next_poll_and_cannot_become_current_action_history(tmp_path):
-    from fh5.collection_dataset import CollectionDataset
-
     config = dataset_inputs(tmp_path, vary_action=True)
-    run_experiment(CollectionDataset(config, tmp_path / "snapshot"))
-    data = json.loads((tmp_path / "snapshot/dataset.json").read_bytes())
+    run_experiment(CollectionBCPrepare(config, tmp_path / "snapshot"))
+    data = json.loads((tmp_path / "snapshot/selection.json").read_bytes())
     sample = next(s for s in data["samples"] if s["attempt"] == "attempt-0" and s["sequence"] == 5)
     assert sample["target_action"][0] == pytest.approx(16384 / 32767)
     assert sample["label_sequence"] == 6
@@ -285,26 +273,22 @@ def test_label_is_first_next_poll_and_cannot_become_current_action_history(tmp_p
 
 
 def test_overlapping_source_windows_cannot_claim_independent_attempts(tmp_path):
-    from fh5.collection_dataset import CollectionDataset
-
     config = dataset_inputs(tmp_path, overlap=True)
     with pytest.raises(ValueError, match="Overlapping"):
-        run_experiment(CollectionDataset(config, tmp_path / "snapshot"))
+        run_experiment(CollectionBCPrepare(config, tmp_path / "snapshot"))
 
 
 def test_reservoir_is_reproducible_and_does_not_change_event_counts(tmp_path):
-    from fh5.collection_dataset import CollectionDataset
-
     config = dataset_inputs(tmp_path)
     value = json.loads(config.read_bytes())
     value["rules"]["max_samples_per_attempt"] = 2
     config.write_text(json.dumps(value))
-    first = run_experiment(CollectionDataset(config, tmp_path / "first"))
-    run_experiment(CollectionDataset(config, tmp_path / "second"))
-    assert (tmp_path / "first/dataset.json").read_bytes() == (
-        tmp_path / "second/dataset.json"
+    first = run_experiment(CollectionBCPrepare(config, tmp_path / "first"))
+    run_experiment(CollectionBCPrepare(config, tmp_path / "second"))
+    assert (tmp_path / "first/selection.json").read_bytes() == (
+        tmp_path / "second/selection.json"
     ).read_bytes()
-    data = json.loads((tmp_path / "first/dataset.json").read_bytes())
+    data = json.loads((tmp_path / "first/selection.json").read_bytes())
     assert len(data["samples"]) == 6
     assert all(
         c["trusted_events"]["left"] == 1
@@ -314,7 +298,6 @@ def test_reservoir_is_reproducible_and_does_not_change_event_counts(tmp_path):
 
 def test_snapshot_stays_fixed_while_collector_publishes_later_blocks(tmp_path):
     from fh5.collection import CollectionControl
-    from fh5.collection_dataset import CollectionDataset, CollectionDatasetReview
 
     config = dataset_inputs(tmp_path)
     folder = tmp_path / "continuing"
@@ -353,8 +336,8 @@ def test_snapshot_stays_fixed_while_collector_publishes_later_blocks(tmp_path):
         value = json.loads(config.read_bytes())
         value["sources"].append({"recording": str(req.output_dir), "review": str(review)})
         config.write_text(json.dumps(value))
-        run_experiment(CollectionDataset(config, tmp_path / "snapshot"))
-        path = tmp_path / "snapshot/dataset.json"
+        run_experiment(CollectionBCPrepare(config, tmp_path / "snapshot"))
+        path = tmp_path / "snapshot/selection.json"
         before = path.read_bytes()
         frozen_count = len(json.loads(before)["sources"][-1]["blocks"])
         deadline = time.monotonic() + 4

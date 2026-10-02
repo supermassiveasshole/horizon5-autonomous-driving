@@ -36,9 +36,8 @@ from fh5.collection import CollectionControl, CollectionEnvironment, CollectionR
 from fh5.collection_assessment import CollectionBCAssess, assess_collection_bc
 from fh5.collection_bc import CollectionBCPrepare, prepare_collection_bc
 from fh5.collection_dataset import (
-    CollectionDataset,
     CollectionDatasetReview,
-    run_collection_dataset,
+    review_collection_dataset,
 )
 from fh5.collection_process import (
     CollectionInstaller,
@@ -286,7 +285,6 @@ def run_experiment(
     | CaptureReplay
     | CaptureRun
     | CaptureTraceReview
-    | CollectionDataset
     | CollectionDatasetReview
     | CollectionBCPrepare
     | CollectionBCAssess
@@ -426,8 +424,8 @@ def run_experiment(
         return assess_collection_bc(request)
     if isinstance(request, (ScheduledBCTrain, ScheduledBCResume)):
         return run_scheduled_bc(request, learning_resources)
-    if isinstance(request, (CollectionDataset, CollectionDatasetReview)):
-        return run_collection_dataset(request)
+    if isinstance(request, CollectionDatasetReview):
+        return review_collection_dataset(request)
     if isinstance(request, (TemporalBCTrain, TemporalBCReplay)):
         return run_temporal_bc(request)
     if isinstance(request, LegacyNumericImport):

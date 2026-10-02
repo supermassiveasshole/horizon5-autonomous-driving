@@ -7,36 +7,20 @@ from pathlib import Path
 import pytest
 from test_collection_dataset import dataset_inputs
 
-from fh5.collection_dataset import CollectionDataset
 from fh5.experiment import run_experiment
 
 
 def prepare_inputs(tmp_path):
-    config = dataset_inputs(tmp_path, vary_action=True, size=(64, 36))
-    run_experiment(CollectionDataset(config, tmp_path / "selection"))
-    selection = tmp_path / "selection/dataset.json"
-    prepare = tmp_path / "prepare.json"
-    prepare.write_text(
-        json.dumps(
-            {
-                "version": 1,
-                "dataset": str(selection),
-                "dataset_sha256": hashlib.sha256(selection.read_bytes()).hexdigest(),
-                "action_history_offsets_ms": [100, 50, 0],
-                "max_action_age_ms": 100,
-                "waypoint_distances_m": [5, 10, 20],
-            }
-        )
-    )
-    return prepare, selection
+    return dataset_inputs(tmp_path, vary_action=True, size=(64, 36))
 
 
 def test_collection_export_preserves_pixels_past_inputs_and_separate_holdout(tmp_path):
     from fh5.collection_bc import CollectionBCPrepare
 
-    config, selection = prepare_inputs(tmp_path)
+    config = prepare_inputs(tmp_path)
     output = tmp_path / "numeric"
     result = run_experiment(CollectionBCPrepare(config, output))
+    selection = output / "selection.json"
     train = json.loads((output / "dataset.json").read_bytes())
     final = json.loads((output / "evaluation.json").read_bytes())
     assert {g["split"] for g in train["groups"]} == {"train", "development"}
@@ -69,7 +53,7 @@ def test_exported_collection_trains_and_reloads_without_final_holdout_feedback(t
     from fh5.collection_bc import CollectionBCPrepare
     from fh5.temporal_bc import TemporalBCReplay, TemporalBCTrain
 
-    config, _ = prepare_inputs(tmp_path)
+    config = prepare_inputs(tmp_path)
     output = tmp_path / "numeric"
     run_experiment(CollectionBCPrepare(config, output))
     dataset = output / "dataset.json"
@@ -109,7 +93,7 @@ def test_optional_independent_reference_only_changes_paired_reference_branch(tmp
     from fh5.collection_bc import CollectionBCPrepare
     from fh5.routes import BuildRoute
 
-    config, _ = prepare_inputs(tmp_path)
+    config = prepare_inputs(tmp_path)
     reference_source = recording(tmp_path, [(x, 0) for x in range(0, 101, 5)])
     run_experiment(BuildRoute(reference_source, tmp_path / "route", 0, 20))
     options = json.loads(config.read_bytes())
@@ -136,16 +120,34 @@ def test_optional_independent_reference_only_changes_paired_reference_branch(tmp
         }
 
 
-@pytest.mark.parametrize("fault", ["selection", "pixels"])
-def test_collection_export_rejects_changed_input_before_publishing(tmp_path, fault):
+def test_collection_export_rejects_changed_pixels_before_publishing(tmp_path):
     from fh5.collection_bc import CollectionBCPrepare
 
-    config, selection = prepare_inputs(tmp_path)
-    if fault == "selection":
-        selection.write_bytes(selection.read_bytes() + b" ")
-    else:
-        source = Path(json.loads(selection.read_bytes())["sources"][0]["recording"])
-        next((source / "blocks").rglob("*.rgb")).write_bytes(b"corrupt")
+    config = prepare_inputs(tmp_path)
+    source = Path(json.loads(config.read_bytes())["sources"][0]["recording"])
+    next((source / "blocks").rglob("*.rgb")).write_bytes(b"corrupt")
     with pytest.raises(ValueError):
         run_experiment(CollectionBCPrepare(config, tmp_path / "numeric"))
     assert not (tmp_path / "numeric").exists()
+
+
+def test_old_prepare_config_requests_migration_before_reading_selection(tmp_path):
+    from fh5.collection_bc import CollectionBCPrepare
+
+    config = tmp_path / "old-prepare.json"
+    config.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "dataset": "legacy-selection.json",
+                "dataset_sha256": "0" * 64,
+                "action_history_offsets_ms": [100, 50, 0],
+                "max_action_age_ms": 100,
+                "waypoint_distances_m": [5, 10, 20],
+            }
+        )
+    )
+    output = tmp_path / "not-created"
+    with pytest.raises(ValueError, match="requires v2.*source configuration"):
+        run_experiment(CollectionBCPrepare(config, output))
+    assert not output.exists()

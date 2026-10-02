@@ -313,7 +313,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     start.add_argument("bundle", type=Path)
     start.add_argument("--live", action="store_true")
     dataset = commands.add_parser(
-        "collection-dataset", help="Freeze reviewed sealed-source selections"
+        "collection-dataset", help="Retired: use collection-bc-prepare with a v2 configuration"
     )
     dataset.add_argument("--config", type=Path, required=True)
     dataset.add_argument("--output", type=Path, required=True)
@@ -323,7 +323,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     dataset_review.add_argument("dataset", type=Path)
     dataset_review.add_argument("--report", type=Path, required=True)
     collection_bc = commands.add_parser(
-        "collection-bc-prepare", help="Export sealed numeric BC inputs"
+        "collection-bc-prepare", help="Select sealed sources and prepare numeric BC inputs"
     )
     collection_bc.add_argument("--config", type=Path, required=True)
     collection_bc.add_argument("--output", type=Path, required=True)
@@ -624,14 +624,16 @@ def main(argv: Sequence[str] | None = None) -> int:
             started = run_experiment(CollectionStart(args.bundle, live=args.live))
             print(json.dumps(started.summary["collection"]))
             return 0
-        if args.mode in ("collection-dataset", "collection-dataset-review"):
-            from fh5.collection_dataset import CollectionDataset, CollectionDatasetReview
-
-            selected = run_experiment(
-                CollectionDataset(args.config, args.output)
-                if args.mode == "collection-dataset"
-                else CollectionDatasetReview(args.dataset, args.report)
+        if args.mode == "collection-dataset":
+            raise ValueError(
+                "collection-dataset is retired; use collection-bc-prepare with a v2 "
+                "configuration containing sources, selection rules and observation settings. "
+                "Existing selections remain readable with collection-dataset-review."
             )
+        if args.mode == "collection-dataset-review":
+            from fh5.collection_dataset import CollectionDatasetReview
+
+            selected = run_experiment(CollectionDatasetReview(args.dataset, args.report))
             print(json.dumps(selected.summary["collection_dataset"], ensure_ascii=False))
             return 0
         if args.mode in ("candidate-archive", "candidate-restore"):
