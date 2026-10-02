@@ -95,8 +95,11 @@ class RecordJournal:
 class PredictionRecorder:
     """Independent numerical fingerprint, even when optional storage is unavailable."""
 
-    def __init__(self, journal: RecordJournal | None = None) -> None:
+    def __init__(
+        self, journal: RecordJournal | None = None, *, format: str = "sac-predictions-v1"
+    ) -> None:
         self.journal = journal
+        self.format = format
         self.digest = hashlib.sha256()
         self.records = 0
         self.error: str | None = None
@@ -110,7 +113,7 @@ class PredictionRecorder:
 
     def finish(self) -> dict[str, Any]:
         return {
-            "format": "sac-predictions-v1",
+            "format": self.format,
             "status": "complete" if self.error is None else "unavailable",
             "records": self.records,
             "sha256": self.digest.hexdigest() if self.error is None else None,

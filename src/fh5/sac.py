@@ -18,11 +18,10 @@ from typing import TYPE_CHECKING, Any
 from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.checkpoint_history import HistorySource, empty_history
 from fh5.collection_store import encode, read_bounded, write_file
-from fh5.learning_diagnostics import RecordJournal
+from fh5.learning_diagnostics import PredictionRecorder, RecordJournal
 from fh5.learning_runtime import preserve_torch_state
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import PixelContract
-from fh5.numeric_recording import read_numeric_frame
 from fh5.presentation import optional_report
 from fh5.replay_document import replay_document
 from fh5.sac_actions import ActionBounds
@@ -34,6 +33,8 @@ from fh5.sac_checkpoint import (
     seal_experience,
     state_digest,
 )
+from fh5.sac_critic_data import CriticData
+from fh5.sac_data_index import learning_data_index
 from fh5.sac_timing import next_action_elapsed
 
 if TYPE_CHECKING:
@@ -210,47 +211,11 @@ def _run(
     for parameter in actor.model.parameters():
         parameter.requires_grad_(False)
     original = deepcopy(actor.model.state_dict())
-    encoded: dict[str, tuple[Any, list[float]]] = {}
-    reload_inputs: dict[str, dict[str, Any]] = {}
-    seen_frames: set[str] = set()
-    total_bytes = 0
-
-    def predict_observation(
-        predictor: FrozenNumericActor, root: Path, row: dict[str, Any]
-    ) -> tuple[Any, list[float]]:
-        frame_bytes = pixels.size[0] * pixels.size[1] * 3
-        try:
-            frames = tuple(read_numeric_frame(root, item, frame_bytes) for item in row["frames"])
-            return predictor.predict_with_features(row["actor"], frames)
-        finally:
-            # Only frozen features are reused. Neither the corpus nor a reload
-            # check retains image buffers after this observation is encoded.
-            predictor.clear_input_cache()
-
-    def observation(row: dict[str, Any]) -> tuple[Any, list[float]]:
-        nonlocal total_bytes
-        identity = hashlib.sha256(encode(row)).hexdigest()
-        if identity not in encoded:
-            encoded[identity] = predict_observation(actor, request.replay_file.parent, row)
-            reload_inputs[identity] = row
-            for metadata in row["frames"]:
-                key = json.dumps(metadata, sort_keys=True)
-                if key not in seen_frames:
-                    total_bytes += pixels.size[0] * pixels.size[1] * 3
-                    seen_frames.add(key)
-        return encoded[identity]
-
-    current, following, actions, next_actions, rewards, discounts, predictions = (
-        [],
-        [],
-        [],
-        [],
-        [],
-        [],
-        [],
+    data = CriticData(
+        torch, stack.enter_context(learning_data_index()), pixels, request.replay_file.parent
     )
     for row in replay["transitions"]:
-        state, prediction = observation(row["current"])
+        state, prediction = data.observation(actor, row["current"])
         previous, elapsed = row["previous_action"], row["action_elapsed_s"]
         lower, upper = bounds.interval(previous, elapsed)
         if any(
@@ -261,48 +226,50 @@ def _run(
                 "Recorded SAC action is outside executable support; never clip replay labels"
             )
         task_features = _task_features(row["task_state"], replay["task_context"])
-        current.append(
-            torch.cat([state, torch.tensor([*bounds.context(previous, elapsed), *task_features])])
-        )
-        actions.append(row["action"])
-        predictions.append(
-            {"id": row["id"], "bc_action": prediction, "critic_task_features": task_features}
+        current = torch.cat(
+            [state, torch.tensor([*bounds.context(previous, elapsed), *task_features])]
         )
         if row["bootstrap"]:
             if row["next"] is None or row["terminated"]:
                 raise ValueError("SAC bootstrap requires a nonterminal real final observation")
-            next_state, next_prediction = observation(row["next"])
-            following.append(
-                torch.cat(
-                    [
-                        next_state,
-                        torch.tensor(
-                            [
-                                *bounds.context(row["action"], next_action_elapsed(row)),
-                                *_task_features(row["next_task_state"], replay["task_context"]),
-                            ]
-                        ),
-                    ]
-                )
+            next_state, next_prediction = data.observation(actor, row["next"])
+            following = torch.cat(
+                [
+                    next_state,
+                    torch.tensor(
+                        [
+                            *bounds.context(row["action"], next_action_elapsed(row)),
+                            *_task_features(row["next_task_state"], replay["task_context"]),
+                        ]
+                    ),
+                ]
             )
-            next_actions.append(
-                bounds.deterministic(next_prediction, row["action"], next_action_elapsed(row))
+            next_action = bounds.deterministic(
+                next_prediction, row["action"], next_action_elapsed(row)
             )
-            discounts.append(row["discount"])
+            discount = row["discount"]
         else:
             if not row["terminated"]:
                 raise ValueError("Missing bootstrap cannot be converted to a zero-value terminal")
-            following.append(torch.zeros_like(current[-1]))
-            next_actions.append([0.0, 0.0])
-            discounts.append(0.0)
-        rewards.append(row["reward"])
-    state_tensor, next_tensor = torch.stack(current), torch.stack(following)
-    command_tensor = torch.tensor(actions, dtype=torch.float32)
-    next_command_tensor = torch.tensor(next_actions, dtype=torch.float32)
-    reward_tensor, discount_tensor = (
-        torch.tensor(v, dtype=torch.float32) for v in (rewards, discounts)
-    )
-    critic = _q_heads(torch, state_tensor.shape[1])
+            following = torch.zeros_like(current)
+            next_action = [0.0, 0.0]
+            discount = 0.0
+        data.add(
+            {
+                "current": current.tolist(),
+                "following": following.tolist(),
+                "actions": row["action"],
+                "next_actions": next_action,
+                "rewards": row["reward"],
+                "discounts": discount,
+                "prediction": {
+                    "id": row["id"],
+                    "bc_action": prediction,
+                    "critic_task_features": task_features,
+                },
+            }
+        )
+    critic = _q_heads(torch, data.width)
     target = deepcopy(critic)
     if saved is not None:
         if set(saved["target_encoder"]) != set(original) or any(
@@ -311,13 +278,13 @@ def _run(
             raise ValueError("Warm-up target encoder differs from the frozen BC")
         critic.load_state_dict(saved["critic"], strict=True)
         target.load_state_dict(saved["target"], strict=True)
-    with torch.no_grad():
-        before_q = _values(torch, critic, state_tensor, command_tensor)
+    before_critic = deepcopy(critic)
     updates = 0
     journal = None
     reload_error = None
     started = time.monotonic()
     stop_reason = "budget_completed" if training else "frozen_replay"
+    training_error = None
     if isinstance(request, SACCriticWarmup):
         output = request.output_dir
         output.mkdir(parents=True)
@@ -332,14 +299,7 @@ def _run(
             reloaded = FrozenNumericActor(
                 output / "actor", pixels, expected_manifest_sha256=model_digest
             )
-            reload_error = max(
-                abs(a - b)
-                for identity, row in reload_inputs.items()
-                for a, b in zip(
-                    encoded[identity][1],
-                    predict_observation(reloaded, output / "experience", row)[1],
-                )
-            )
+            reload_error = data.reload_error(reloaded, output / "experience")
             if reloaded.manifest != actor.manifest or reload_error > 1e-6:
                 raise ValueError("Frozen BC changed during checkpoint publication")
             del reloaded
@@ -355,16 +315,22 @@ def _run(
             ):
                 stop_reason = "stop_requested"
                 break
-            indices = torch.randperm(len(current))[: request.batch_size]
+            sampling_rng = torch.get_rng_state()
+            try:
+                indices = torch.randperm(data.count)[: request.batch_size].tolist()
+                batch = data.batch(indices)
+            except (OSError, MemoryError) as error:
+                # No optimizer ran for this sample. Retry the same draw after
+                # recovering storage/memory, retaining all finished updates.
+                torch.set_rng_state(sampling_rng)
+                stop_reason = "training_data_unavailable"
+                training_error = f"{type(error).__name__}: {error}"
+                break
             with torch.no_grad():
-                boot = (
-                    _values(torch, target, next_tensor[indices], next_command_tensor[indices])
-                    .min(dim=1)
-                    .values
-                )
-                expected_value = reward_tensor[indices] + discount_tensor[indices] * boot
+                boot = _values(torch, target, batch.following, batch.next_actions).min(dim=1).values
+                expected_value = batch.rewards + batch.discounts * boot
             optimizer.zero_grad(set_to_none=True)
-            predicted = _values(torch, critic, state_tensor[indices], command_tensor[indices])
+            predicted = _values(torch, critic, batch.current, batch.actions)
             loss = ((predicted - expected_value[:, None]) ** 2).mean()
             if not torch.isfinite(loss):
                 raise ValueError("Non-finite critic warm-up loss")
@@ -379,21 +345,48 @@ def _run(
                     journal.append(
                         {
                             "step": step + 1,
-                            "transition_ids": [
-                                replay["transitions"][i]["id"] for i in indices.tolist()
-                            ],
+                            "transition_ids": [replay["transitions"][i]["id"] for i in indices],
                             "loss": float(loss.item()),
                             "targets": expected_value.tolist(),
                         }
                     )
             except (OSError, MemoryError) as error:
                 journal.unavailable(error)
-    with torch.no_grad():
-        after_q = _values(torch, critic, state_tensor, command_tensor)
-    if not torch.isfinite(after_q).all():
-        raise ValueError("Non-finite critic checkpoint predictions")
-    for entry, values in zip(predictions, after_q.tolist()):
-        entry["q"] = values
+    prediction_root = (
+        request.output_dir if isinstance(request, SACCriticWarmup) else request.report_path.parent
+    )
+    prediction_path = (
+        "diagnostics/predictions.jsonl"
+        if isinstance(request, SACCriticWarmup)
+        else request.report_path.with_suffix(".predictions.jsonl").name
+    )
+    prediction_journal = RecordJournal(
+        prediction_root, prediction_path, "critic-prediction-jsonl-v1"
+    )
+    stack.callback(prediction_journal.close)
+    predictions = PredictionRecorder(prediction_journal, format="critic-predictions-v1")
+    q_change = 0.0
+    try:
+        for position in range(data.count):
+            batch = data.batch([position])
+            with torch.no_grad():
+                after_q = _values(torch, critic, batch.current, batch.actions)
+                before_q = _values(torch, before_critic, batch.current, batch.actions)
+            if not torch.isfinite(after_q).all():
+                raise ValueError("Non-finite critic checkpoint predictions")
+            q_change = max(q_change, float((after_q - before_q).abs().max()))
+            record = data.record(position)
+            predictions.add(
+                {
+                    **record["prediction"],
+                    "q": after_q[0].tolist(),
+                    "target_action": record["next_actions"],
+                }
+            )
+    except (OSError, MemoryError) as error:
+        if not training:
+            raise
+        predictions.unavailable(error)
     actor_change = max(
         float((original[k] - v).abs().max()) for k, v in actor.model.state_dict().items()
     )
@@ -411,18 +404,19 @@ def _run(
         "updates": journal.finish() if journal is not None else None,
         "actor_optimizer_steps": 0,
         "actor_change_max": actor_change,
-        "q_change_max": float((after_q - before_q).abs().max()) if training else None,
-        "predictions": predictions,
-        "target_actions": next_actions,
+        "q_change_max": q_change if training and predictions.error is None else None,
+        "predictions": predictions.finish(),
         "target_policy": "deterministic bounded BC; no SAC entropy update yet",
         "replay_sha256": expected,
-        "transitions": len(current),
+        "transitions": data.count,
         "frozen_encoder_sha256": actor.manifest["weights_sha256"],
-        "raw_frame_bytes": total_bytes,
+        "raw_frame_bytes": data.total_bytes,
         "duration_s": time.monotonic() - started,
         "commands_sent": False,
         "real_driving_validated": False,
     }
+    if training_error is not None:
+        summary["training_error"] = training_error
     if isinstance(request, SACCriticWarmup):
         state = {
             "critic": critic.state_dict(),

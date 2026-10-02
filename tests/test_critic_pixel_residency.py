@@ -6,6 +6,7 @@ import tracemalloc
 from copy import deepcopy
 
 import pytest
+from checkpoint_files import prediction_records
 from test_critic_resume import warm_inputs
 from test_sac import experience
 from test_temporal_bc import temporal_fixture
@@ -100,7 +101,11 @@ def test_critic_pixel_residency_does_not_grow_with_the_frozen_corpus(tmp_path):
         SACCriticReplay(tmp_path / "resumed", replay_path, tmp_path / "reloaded.html")
     ).summary["sac"]
     assert resumed["learner_state_sha256"] == whole["learner_state_sha256"]
-    assert resumed["predictions"] == whole["predictions"] == replayed["predictions"]
+    assert (
+        prediction_records(tmp_path / "resumed", resumed)
+        == prediction_records(tmp_path / "whole", whole)
+        == prediction_records(tmp_path, replayed)
+    )
     assert resumed["actor_change_max"] == resumed["reload_max_abs_error"] == 0
 
 

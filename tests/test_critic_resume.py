@@ -5,7 +5,7 @@ import json
 from pathlib import Path
 
 import pytest
-from checkpoint_files import history_entries, update_records
+from checkpoint_files import history_entries, prediction_records, update_records
 from test_sac import experience
 from test_temporal_bc import temporal_fixture
 
@@ -261,7 +261,7 @@ def test_legacy_warmup_still_replays_and_initializes_sac_but_cannot_claim_portab
     replayed = run_experiment(SACCriticReplay(source, replay, tmp_path / "legacy.html")).summary[
         "sac"
     ]
-    assert replayed["predictions"] == expected["predictions"]
+    assert prediction_records(tmp_path, replayed) == prediction_records(source, expected)
     with pytest.raises(ValueError, match="sealed version 2"):
         run_experiment(SACCriticResume(source, tmp_path / "invalid"))
     learned = run_experiment(SACTrain(source, replay, tmp_path / "sac", steps=2)).summary[

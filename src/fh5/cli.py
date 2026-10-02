@@ -116,7 +116,11 @@ def _sac(args: argparse.Namespace) -> int:
     else:
         result = run_experiment(SACCriticReplay(args.checkpoint, args.replay, args.report))
     print(json.dumps(result.summary["sac"], ensure_ascii=False))
-    return 4 if result.summary["sac"]["stop_reason"] == "stop_requested" else 0
+    return (
+        4
+        if result.summary["sac"]["stop_reason"] in {"stop_requested", "training_data_unavailable"}
+        else 0
+    )
 
 
 def _udp_packets(receiver: socket.socket, seconds: float) -> Iterator[Packet]:

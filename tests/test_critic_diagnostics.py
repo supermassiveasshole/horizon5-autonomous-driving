@@ -5,10 +5,82 @@ import json
 from pathlib import Path
 
 import pytest
+from checkpoint_files import prediction_records
 from test_critic_resume import warm_inputs
 
 from fh5.experiment import run_experiment
 from fh5.sac import SACCriticResume, SACCriticWarmup
+
+
+def test_critic_predictions_and_target_actions_are_one_optional_stream(tmp_path):
+    model, replay, digest = warm_inputs(tmp_path)
+    output = tmp_path / "warm"
+    summary = run_experiment(SACCriticWarmup(model, replay, digest, output, steps=2)).summary["sac"]
+    descriptor = summary["predictions"]
+    assert isinstance(descriptor, dict), "Predictions must not embed the entire replay corpus"
+    assert descriptor["format"] == "critic-predictions-v1"
+    assert descriptor["records"] == summary["transitions"] == 2
+    rows = prediction_records(output, summary)
+    assert len(rows[0]["q"]) == len(rows[0]["target_action"]) == 2
+    assert rows[1]["target_action"] == [0, 0], "Terminal observations cannot bootstrap"
+    assert "target_actions" not in summary
+    (output / descriptor["diagnostic"]["path"]).unlink()
+    restored = run_experiment(SACCriticResume(output, tmp_path / "restored")).summary["sac"]
+    assert restored["learner_state_sha256"] == summary["learner_state_sha256"]
+    assert prediction_records(tmp_path / "restored", restored) == rows
+
+
+@pytest.mark.parametrize("failure", [OSError, MemoryError])
+@pytest.mark.parametrize("stage", ["open", "write", "flush"])
+def test_optional_prediction_storage_cannot_discard_critic_progress(
+    tmp_path, monkeypatch, failure, stage
+):
+    model, replay, digest = warm_inputs(tmp_path)
+    output = tmp_path / "first"
+    original_open = Path.open
+
+    class FailingSink:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __getattr__(self, name):
+            return getattr(self.stream, name)
+
+        def write(self, raw):
+            if stage == "write":
+                raise failure("optional prediction storage unavailable")
+            return self.stream.write(raw)
+
+        def flush(self):
+            if stage == "flush":
+                raise failure("optional prediction storage unavailable")
+            return self.stream.flush()
+
+    def unavailable(path, mode="r", *args, **kwargs):
+        if path == output / "diagnostics/predictions.jsonl" and mode == "xb":
+            if stage == "open":
+                raise failure("optional prediction storage unavailable")
+            return FailingSink(original_open(path, mode, *args, **kwargs))
+        return original_open(path, mode, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", unavailable)
+        trained = run_experiment(
+            SACCriticWarmup(model, replay, digest, output, steps=5),
+            sac_stop_requested=lambda step: step == 3,
+        ).summary["sac"]
+    assert trained["steps_completed"] == 3
+    assert trained["predictions"]["status"] == "complete"
+    assert trained["predictions"]["diagnostic"]["status"] == "unavailable"
+    assert "optional prediction storage" in trained["predictions"]["diagnostic"]["error"]
+    resumed = run_experiment(SACCriticResume(output, tmp_path / "resumed")).summary["sac"]
+    whole = run_experiment(
+        SACCriticWarmup(model, replay, digest, tmp_path / "whole", steps=5)
+    ).summary["sac"]
+    assert resumed["learner_state_sha256"] == whole["learner_state_sha256"]
+    assert prediction_records(tmp_path / "resumed", resumed) == prediction_records(
+        tmp_path / "whole", whole
+    )
 
 
 def test_critic_updates_are_streamed_without_duplicate_loss_and_target_arrays(tmp_path):

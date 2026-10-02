@@ -48,6 +48,19 @@ class LearningDataIndex:
             self.source_count += 1
         return bool(inserted)
 
+    def items(self, section: str) -> Iterator[tuple[str, Any]]:
+        with _index_errors():
+            cursor = self.database.execute(
+                "SELECT identity, data FROM items WHERE section = ?", (section,)
+            )
+        with closing(cursor):
+            while True:
+                with _index_errors():
+                    row = cursor.fetchone()
+                if row is None:
+                    return
+                yield row[0], json.loads(row[1])
+
 
 @contextmanager
 def learning_data_index() -> Iterator[LearningDataIndex]:

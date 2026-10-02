@@ -5,6 +5,7 @@ import json
 import struct
 
 import pytest
+from checkpoint_files import prediction_records
 from test_attempts import evidence, protocol
 from test_numeric_images import actor_state
 from test_rewards import reward_config
@@ -266,10 +267,12 @@ def test_critic_warmup_updates_values_without_changing_bc_and_reloads_exactly(tm
     assert warm["stage"] == "critic_warmup"
     assert warm["actor_optimizer_steps"] == 0
     assert warm["real_driving_validated"] is False
-    assert warm["predictions"][0]["critic_task_features"] == [0, 0, 1, 1, 1]
+    predictions = prediction_records(tmp_path / "warm", warm)
+    assert predictions[0]["critic_task_features"] == [0, 0, 1, 1, 1]
     # BC exceeds .01 here; the live adapter sends round(.01 * 32767), i.e. 328.
-    assert warm["target_actions"][0][0] * 32767 == pytest.approx(328)
-    for command in warm["target_actions"]:
+    assert predictions[0]["target_action"][0] * 32767 == pytest.approx(328)
+    for row in predictions:
+        command = row["target_action"]
         assert command[0] * 32767 == pytest.approx(round(command[0] * 32767))
         assert command[1] * 255 == pytest.approx(round(command[1] * 255))
     assert (tmp_path / "warm/actor/actor.pt").read_bytes() == original
@@ -280,7 +283,7 @@ def test_critic_warmup_updates_values_without_changing_bc_and_reloads_exactly(tm
             tmp_path / "reloaded.html",
         )
     ).summary["sac"]
-    assert replayed["predictions"] == warm["predictions"]
+    assert prediction_records(tmp_path, replayed) == predictions
     manifest_path = tmp_path / "warm/critic.json"
     manifest = json.loads(manifest_path.read_bytes())
     manifest["stage"] = "unrecognized-future-learner"
@@ -423,7 +426,7 @@ def test_cli_prepares_warms_and_reloads_without_game_adapters(tmp_path, capsys):
         == 0
     )
     again = json.loads(capsys.readouterr().out)
-    assert again["predictions"] == warm["predictions"]
+    assert prediction_records(tmp_path, again) == prediction_records(tmp_path / "warm", warm)
     assert again["commands_sent"] is False
 
 
