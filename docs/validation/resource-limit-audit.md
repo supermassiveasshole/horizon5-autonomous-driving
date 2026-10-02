@@ -259,3 +259,18 @@ Ruff、347 文件格式及 132 源文件 strict mypy 通过。
 父学习循环的更新中断/恢复组合 **10 passed / 111.56 秒**，
 结果 `runs/resource-cache-parent-20261002-results.xml`。Ruff、347 文件格式及 132 源文件 strict mypy 通过。
 固定 `611de1b...597ed83` 独立只读复审：**Standards 0 项、Spec 0 项**。
+
+## 全量验证的实际临时磁盘压力
+
+冻结 `c3ff7ce` 的全量回归使用了默认 C 盘临时目录；运行到约 46%–52% 开始连续失败/错误。
+测得 C 盘可用空间从约 455 MB 降至约 189 MB，本次测试目录占约 10.6 GB、80160 个文件。
+为避免继续占满系统盘，在 86% 后中止该进程。未产生最终 JUnit，工具未返回根错误堆栈；
+因此这次既不能报告通过，也不能断言每项失败都由容量导致。
+
+保留退出/容量记录和测试收集列表后，只清理已确认终止且归本轮进程所有的临时目录，
+C 盘恢复约 11.7 GB 可用空间。重新验证将显式使用 G 盘工作区的 pytest basetemp 以及 TMP/TEMP，
+该盘当时有约 316.5 GB 实际余量。这里调整测试数据位置，不提高产品拒绝阈值。
+记录在冻结检出的 `runs/resource-predictions-capacity-stop-20261002.md`；前述专项结果与旧版全量结果保留各自范围。
+在同一 `c3ff7ce` 代码、G 盘临时目录下复查最初失败区域的 `test_learning_update_resume.py`，
+**5 passed / 50.11 秒**，结果 `runs/resource-predictions-capacity-recheck-results.xml`。
+这不代替全量结果；接下来从包含预热/缓存修复的版本重新全量验证，遇到首次失败即保留堆栈停止，避免级联掩盖原因。
