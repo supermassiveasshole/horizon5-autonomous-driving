@@ -164,7 +164,8 @@ def test_cold_frame_changed_after_initial_predictions_is_rejected_on_reload(
 
     def open_file(path, *args, **kwargs):
         stream = opened(path, *args, **kwargs)
-        return writing_copy(stream) if path == copied_replay else stream
+        mode = args[0] if args else kwargs.get("mode", "r")
+        return writing_copy(stream) if path == copied_replay and mode in ("xb", "wb") else stream
 
     try:
         with pytest.MonkeyPatch.context() as patch:

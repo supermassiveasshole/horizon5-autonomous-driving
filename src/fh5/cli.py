@@ -52,7 +52,7 @@ def _sac(args: argparse.Namespace) -> int:
             )
         )
         print(json.dumps(resumed.summary["sac_learning"], ensure_ascii=False))
-        return 4 if resumed.summary["sac_learning"]["stop_reason"] == "stop_requested" else 0
+        return 0 if resumed.summary["sac_learning"]["stop_reason"] == "budget_completed" else 4
     if args.mode == "sac-train":
         options = json.loads(args.config.read_text(encoding="utf-8-sig"))
         if not isinstance(options, dict) or options.pop("version", None) != 1:
@@ -72,7 +72,7 @@ def _sac(args: argparse.Namespace) -> int:
             raise ValueError("Invalid SAC training fields") from error
         summary = run_experiment(request).summary["sac_learning"]
         print(json.dumps(summary, ensure_ascii=False))
-        return 4 if summary["stop_reason"] == "stop_requested" else 0
+        return 0 if summary["stop_reason"] == "budget_completed" else 4
     if args.mode == "sac-policy-replay":
         replayed = run_experiment(
             SACPolicyReplay(

@@ -51,7 +51,13 @@ def retained_update_progress(
             or not 0 <= updates <= earned - completed
             or report["steps_requested"] != earned - completed
             or report["stop_reason"]
-            != ("budget_completed" if updates == earned - completed else "stop_requested")
+            not in (
+                ("budget_completed",)
+                if updates == earned - completed
+                else ("stop_requested", "training_data_unavailable")
+            )
+            or report["stop_reason"] == "training_data_unavailable"
+            and not report.get("training_error")
             or report["experience_added_transitions"] != 0
             or manifest["configuration"] != configuration
             or manifest["replay_sha256"] != previous["replay_sha256"]

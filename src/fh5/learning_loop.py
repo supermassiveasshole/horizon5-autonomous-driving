@@ -794,8 +794,8 @@ class _Loop:
         ).summary["sac_learning"]
         self.accept_updates(number, row, progress, output, "resumed_updates")
         self.save("learned")
-        if learned["stop_reason"] == "stop_requested" or self.stopped():
-            self.state["stop_reason"] = self.stopping_reason() or "stop_requested"
+        if learned["stop_reason"] != "budget_completed" or self.stopped():
+            self.state["stop_reason"] = self.stopping_reason() or learned["stop_reason"]
             return False
         return True
 
@@ -1152,7 +1152,8 @@ class _Loop:
                 if not self.sample(number, row):
                     if (
                         self.stopped()
-                        or row.get("sampling_stop_reason") == "stop_requested"
+                        or row.get("sampling_stop_reason")
+                        in ("stop_requested", "training_data_unavailable")
                         or "learning" not in row
                         or not self.config.get("sampling_retry", {}).get("max_retries", 0)
                     ):

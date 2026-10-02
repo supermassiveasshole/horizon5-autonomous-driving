@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections import OrderedDict
 from contextlib import ExitStack
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -15,6 +17,7 @@ from fh5.numeric_recording import read_numeric_frame
 from fh5.replay_document import replay_document
 from fh5.sac import _task_features
 from fh5.sac_actions import ActionBounds
+from fh5.sac_data_index import learning_data_index
 from fh5.sac_sources import replay_roles
 from fh5.sac_timing import next_action_elapsed
 
@@ -22,6 +25,17 @@ from fh5.sac_timing import next_action_elapsed
 def validate_cache_budget(value: int) -> None:
     if type(value) is not int or value < 0:
         raise ValueError("SAC raw frame cache budget must be nonnegative integer bytes")
+
+
+@dataclass(frozen=True)
+class LearningBatch:
+    context: Any
+    next_context: Any
+    task: Any
+    next_task: Any
+    actions: Any
+    rewards: Any
+    discounts: Any
 
 
 class LearningReplay:
@@ -48,18 +62,13 @@ class LearningReplay:
         if replay["pixel_contract"] != actor.contract.metadata():
             raise ValueError("Unsupported SAC learning replay contract")
         self.rows = replay["transitions"]
-        if not 1 <= len(self.rows) <= 10_000:
-            raise ValueError("SAC replay must contain 1..10000 transitions")
         self.images: OrderedDict[str, Any] = OrderedDict()
-        self.sources: dict[str, dict[str, Any]] = {}
-        self.observations: dict[str, tuple[list[str], list[float]]] = {}
-        self.current: list[str] = []
-        self.following: list[str] = []
+        self.index = resources.enter_context(learning_data_index())
         self.raw_bytes = self.source_bytes = 0
 
         def observation(row: dict[str, Any]) -> str:
-            identity = json.dumps(row, sort_keys=True)
-            if identity in self.observations:
+            identity = hashlib.sha256(json.dumps(row, sort_keys=True).encode("utf-8")).hexdigest()
+            if self.index.get("observations", identity) is not None:
                 return identity
             frame_bytes = actor.contract.size[0] * actor.contract.size[1] * 3
             frames = tuple(read_numeric_frame(path.parent, f, frame_bytes) for f in row["frames"])
@@ -73,47 +82,56 @@ class LearningReplay:
             references = []
             for frame, entry in zip(frames, row["frames"]):
                 digest = entry["sha256"]
-                if digest not in self.sources:
+                if self.index.add("sources", digest, entry):
                     self.source_bytes += frame.pixels.nbytes
-                self.sources.setdefault(digest, dict(entry))
                 references.append(digest)
-            self.observations[identity] = references, numeric
+            self.index.add("observations", identity, [references, numeric])
             return identity
 
-        contexts, next_contexts, tasks, next_tasks, discounts = [], [], [], [], []
-        for row in self.rows:
-            self.current.append(observation(row["current"]))
+        for position, row in enumerate(self.rows):
+            current = observation(row["current"])
             context = bounds.context(row["previous_action"], row["action_elapsed_s"])
             if len(row["action"]) != 2 or any(
                 not lo - 1e-9 <= value <= hi + 1e-9
                 for lo, hi, value in zip(context[3:5], context[5:7], row["action"])
             ):
                 raise ValueError("SAC replay action outside executable command support")
-            contexts.append(context)
-            tasks.append(_task_features(row["task_state"], replay["task_context"]))
+            task = _task_features(row["task_state"], replay["task_context"])
             if row["bootstrap"]:
                 if row["next"] is None or row["terminated"]:
                     raise ValueError("SAC bootstrap requires a real nonterminal final observation")
-                self.following.append(observation(row["next"]))
-                next_contexts.append(bounds.context(row["action"], next_action_elapsed(row)))
-                next_tasks.append(_task_features(row["next_task_state"], replay["task_context"]))
-                discounts.append(row["discount"])
+                following = observation(row["next"])
+                next_context = bounds.context(row["action"], next_action_elapsed(row))
+                next_task = _task_features(row["next_task_state"], replay["task_context"])
+                discount = row["discount"]
             else:
                 if not row["terminated"]:
                     raise ValueError("Missing bootstrap is not a true SAC terminal")
-                self.following.append(self.current[-1])
-                next_contexts.append(context)
-                next_tasks.append(tasks[-1])
-                discounts.append(0.0)
-        self.context = torch.tensor(contexts, dtype=torch.float32)
-        self.next_context = torch.tensor(next_contexts, dtype=torch.float32)
-        self.task = torch.tensor(tasks, dtype=torch.float32)
-        self.next_task = torch.tensor(next_tasks, dtype=torch.float32)
-        self.actions = torch.tensor([r["action"] for r in self.rows], dtype=torch.float32)
-        self.rewards = torch.tensor([r["reward"] for r in self.rows], dtype=torch.float32)
-        self.discounts = torch.tensor(discounts, dtype=torch.float32)
-        if not all(torch.isfinite(t).all() for t in (self.actions, self.rewards, self.discounts)):
-            raise ValueError("Non-finite SAC training data")
+                following, next_context, next_task, discount = current, context, task, 0.0
+            values = {
+                "context": context,
+                "next_context": next_context,
+                "task": task,
+                "next_task": next_task,
+                "actions": row["action"],
+                "rewards": row["reward"],
+                "discounts": discount,
+            }
+            if not all(
+                torch.isfinite(torch.tensor(values[key], dtype=torch.float32)).all()
+                for key in ("actions", "rewards", "discounts")
+            ):
+                raise ValueError("Non-finite SAC training data")
+            self.index.add("transitions", position, [current, following, values])
+
+    def batch(self, indices: list[int]) -> LearningBatch:
+        rows = [self.index.get("transitions", i)[2] for i in indices]
+        return LearningBatch(
+            **{
+                key: self.torch.tensor([row[key] for row in rows], dtype=self.torch.float32)
+                for key in LearningBatch.__dataclass_fields__
+            }
+        )
 
     def cache_summary(self) -> dict[str, Any]:
         return {
@@ -121,7 +139,7 @@ class LearningReplay:
             "peak_bytes": self.peak_bytes,
             "retained_bytes": self.raw_bytes,
             "retained_frames": len(self.images),
-            "unique_frames": len(self.sources),
+            "unique_frames": self.index.source_count,
             "source_bytes": self.source_bytes,
             "hits": self.cache_hits,
             "misses": self.cache_misses,
@@ -138,7 +156,7 @@ class LearningReplay:
             return self.images[digest]
         self.cache_misses += 1
         frame_bytes = self.actor.contract.size[0] * self.actor.contract.size[1] * 3
-        frame = read_numeric_frame(self.root, self.sources[digest], frame_bytes)
+        frame = read_numeric_frame(self.root, self.index.get("sources", digest), frame_bytes)
         size = frame.pixels.nbytes
         width, height = frame.size
         value = (
@@ -162,10 +180,10 @@ class LearningReplay:
     def inputs(self, indices: list[int], *, following: bool = False) -> tuple[Any, Any]:
         width, height = self.actor.contract.size
         history = self.actor.original_contract["image_count"]
-        if len(indices) * history * width * height * 3 * 4 > 256 * 1024**2:
-            raise ValueError("SAC image batch exceeds 256 MiB; reduce batch size")
-        keys = self.following if following else self.current
-        entries = [self.observations[keys[i]] for i in indices]
+        entries = [
+            self.index.get("observations", self.index.get("transitions", i)[int(following)])
+            for i in indices
+        ]
         images = self.torch.empty(
             (len(indices), history, 3, height, width), dtype=self.torch.float32
         )

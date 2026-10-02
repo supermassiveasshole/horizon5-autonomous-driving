@@ -282,7 +282,7 @@ def policy_predictions(
     for i, row in enumerate(data.rows):
         with torch.no_grad():
             features = encode_history(torch, encoder, *data.inputs([i]))
-            context = data.context[i : i + 1]
+            context = data.batch([i]).context
             output = policy(features, context, features.new_tensor([noise]))
             prediction = {
                 "id": row["id"],
@@ -520,6 +520,7 @@ def _train(
     resources.callback(journal.close)
     steps_completed = 0
     stop_reason = "budget_completed"
+    training_error = None
     for step in range(start_step, start_step + request.steps):
         if (
             (output / "stop.request").exists()
@@ -528,10 +529,22 @@ def _train(
         ):
             stop_reason = "stop_requested"
             break
-        indices = sampling.sample(torch)
-        context, task = data.context[indices], data.task[indices]
-        next_context, next_task = data.next_context[indices], data.next_task[indices]
-        inputs, next_inputs = data.inputs(indices), data.inputs(indices, following=True)
+        sampling_rng = torch.get_rng_state()
+        sampled_counts = dict(sampling.sampled)
+        try:
+            indices = sampling.sample(torch)
+            batch = data.batch(indices)
+            inputs, next_inputs = data.inputs(indices), data.inputs(indices, following=True)
+        except (OSError, MemoryError) as error:
+            # No optimizer has run for this batch. Preserve the exact next
+            # sample as well as all completed updates when input I/O fails.
+            torch.set_rng_state(sampling_rng)
+            sampling.sampled = sampled_counts
+            stop_reason = "training_data_unavailable"
+            training_error = f"{type(error).__name__}: {error}"
+            break
+        context, task = batch.context, batch.task
+        next_context, next_task = batch.next_context, batch.next_task
         before_actor = _snapshot(policy)
         with torch.no_grad():
             next_features = encode_history(torch, encoder, *next_inputs)
@@ -539,12 +552,12 @@ def _train(
             target_features = encode_history(torch, target_encoder, *next_inputs)
             target_state = torch.cat([target_features, next_context, next_task], dim=1)
             boot = _values(torch, target_critic, target_state, sampled["command"]).min(dim=1).values
-            expected = data.rewards[indices] + data.discounts[indices] * (
+            expected = batch.rewards + batch.discounts * (
                 boot - log_alpha.exp() * sampled["log_probability"]
             )
         features = encode_history(torch, encoder, *inputs)
         states = torch.cat([features, context, task], dim=1)
-        predicted = _values(torch, critic, states, data.actions[indices])
+        predicted = _values(torch, critic, states, batch.actions)
         critic_loss = (predicted - expected[:, None]).square().mean()
         if not torch.isfinite(critic_loss):
             raise ValueError("Non-finite SAC critic loss")
@@ -668,6 +681,8 @@ def _train(
         "commands_sent": False,
         "real_driving_validated": False,
     }
+    if training_error is not None:
+        summary["training_error"] = training_error
     config = {k: v for k, v in asdict(request).items() if not isinstance(v, Path)}
     config.pop("imitation_protocol_batch", None)
     if imitation_review is not None:

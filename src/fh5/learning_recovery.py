@@ -255,7 +255,7 @@ def completed_sampling(
         summary.get("source_kind") == "synthetic"
         and summary.get("stop_reason")
         in (
-            ("budget_completed", "stop_requested")
+            ("budget_completed", "stop_requested", "training_data_unavailable")
             if allow_stopped_updates
             else ("budget_completed",)
         )
@@ -275,7 +275,12 @@ def completed_sampling(
         or attempt.get("candidate") != "candidate-000"
         or attempt.get("replay") != "attempt-000/prepared/replay.json"
         or attempt.get("error") is not None
-        or attempt.get("inference_reload_max_error") != 0
+        or (
+            attempt.get("inference_reload_status") != "deferred_training_data_unavailable"
+            or "inference_reload_max_error" in attempt
+            if summary["stop_reason"] == "training_data_unavailable"
+            else attempt.get("inference_reload_max_error") != 0
+        )
     ):
         raise ValueError("Pending sampling result differs from its parent or sealed attempt")
     verify_sampling_sources(attempt.get("source_assets", {}))
@@ -333,7 +338,14 @@ def completed_sampling(
         or (
             (updates != budget or report["stop_reason"] != "budget_completed")
             if summary["stop_reason"] == "budget_completed"
-            else (updates >= budget or report["stop_reason"] != "stop_requested")
+            else (updates >= budget or report["stop_reason"] != summary["stop_reason"])
+        )
+        or (
+            summary["stop_reason"] == "training_data_unavailable"
+            and (
+                not report.get("training_error")
+                or report["training_error"] != attempt.get("training_error")
+            )
         )
         or report["steps_completed"] != updates
         or report["steps_requested"] != budget

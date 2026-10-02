@@ -306,30 +306,38 @@ def run_sac_cycle(
                     learner_updates=learned["steps_completed"],
                     total_steps=learned["total_steps"],
                 )
-                from fh5.sac_learning import SACPolicyReplay
+                if learned["stop_reason"] == "training_data_unavailable":
+                    # Keep the sealed learner and unused update credit. Fresh
+                    # numerical validation is required by parent continuation.
+                    result["inference_reload_status"] = "deferred_training_data_unavailable"
+                    result["training_error"] = learned["training_error"]
+                else:
+                    from fh5.sac_learning import SACPolicyReplay
 
-                checked = run_experiment(
-                    SACPolicyReplay(
-                        candidate,
-                        candidate / "experience/replay.json",
-                        root / f"reload-{number}.html",
-                    )
-                ).summary["sac_policy"]
-                if "presentation" in checked:
-                    result["reload_presentation"] = checked["presentation"]
-                if "diagnostic_export" in checked:
-                    result["reload_diagnostic_export"] = checked["diagnostic_export"]
-                if prediction_identity(checked["predictions"]) != prediction_identity(
-                    learned["predictions"]
-                ):
-                    raise ValueError("Candidate reload differs from the complete learner snapshot")
-                result["inference_reload_max_error"] = 0
+                    checked = run_experiment(
+                        SACPolicyReplay(
+                            candidate,
+                            candidate / "experience/replay.json",
+                            root / f"reload-{number}.html",
+                        )
+                    ).summary["sac_policy"]
+                    if "presentation" in checked:
+                        result["reload_presentation"] = checked["presentation"]
+                    if "diagnostic_export" in checked:
+                        result["reload_diagnostic_export"] = checked["diagnostic_export"]
+                    if prediction_identity(checked["predictions"]) != prediction_identity(
+                        learned["predictions"]
+                    ):
+                        raise ValueError(
+                            "Candidate reload differs from the complete learner snapshot"
+                        )
+                    result["inference_reload_max_error"] = 0
                 checkpoint = candidate
                 expected_sampling_sha = restored.sha
                 summary["latest_candidate"] = candidate.relative_to(root).as_posix()
                 write_file(attempt_dir / "cycle-result.json", encode(result))
-                if learned["stop_reason"] == "stop_requested":
-                    summary["stop_reason"] = "stop_requested"
+                if learned["stop_reason"] != "budget_completed":
+                    summary["stop_reason"] = learned["stop_reason"]
                     break
             else:
                 summary["stop_reason"] = "budget_completed"
