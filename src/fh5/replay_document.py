@@ -124,25 +124,30 @@ class _JSONInput:
             # revisit only linear text. This is not an admission size limit.
             self.more(max(io.DEFAULT_BUFFER_SIZE, len(self.buffer) - self.position))
 
-    def document(self, index: sqlite3.Connection) -> dict[str, Any]:
+    def object_keys(self) -> Iterator[str]:
+        """Consume object syntax; each caller consumes the value after its key."""
         self.take("{")
-        result: dict[str, Any] = {}
         if self.peek() != "}":
             while True:
                 key = self.value()
                 if not isinstance(key, str):
-                    raise ValueError("Replay JSON object keys must be strings")
+                    raise ValueError("JSON object keys must be strings")
                 self.take(":")
-                # Match json.loads' last-key-wins semantics, including arrays.
-                index.execute("DELETE FROM records WHERE section = ?", (key,))
-                if self.peek() == "[":
-                    result[key] = self.array(index, key)
-                else:
-                    result[key] = self.value()
+                yield key
                 if self.peek() != ",":
                     break
                 self.take(",")
         self.take("}")
+
+    def document(self, index: sqlite3.Connection) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key in self.object_keys():
+            # Match json.loads' last-key-wins semantics, including arrays.
+            index.execute("DELETE FROM records WHERE section = ?", (key,))
+            if self.peek() == "[":
+                result[key] = self.array(index, key)
+            else:
+                result[key] = self.value()
         if self.peek():
             raise ValueError("Trailing data after replay JSON")
         return result
@@ -185,24 +190,14 @@ class _JSONInput:
         self.take(end)
 
     def fields(self, wanted: set[str], *, reject_unknown: bool = False) -> dict[str, Any]:
-        self.take("{")
         result: dict[str, Any] = {}
         unknown = False
-        if self.peek() != "}":
-            while True:
-                key = self.value()
-                if not isinstance(key, str):
-                    raise ValueError("JSON object keys must be strings")
-                self.take(":")
-                if key in wanted:
-                    result[key] = self.value()
-                else:
-                    unknown = True
-                    self.discard()
-                if self.peek() != ",":
-                    break
-                self.take(",")
-        self.take("}")
+        for key in self.object_keys():
+            if key in wanted:
+                result[key] = self.value()
+            else:
+                unknown = True
+                self.discard()
         if self.peek():
             raise ValueError("Trailing data after JSON document")
         if reject_unknown and unknown:
@@ -232,24 +227,14 @@ class _JSONInput:
                 self.discard()
                 return _NON_SCALAR
             return self.value()
-        self.take("{")
         result = {}
-        if self.peek() != "}":
-            while True:
-                key = self.value()
-                if not isinstance(key, str):
-                    raise ValueError("JSON object keys must be strings")
-                self.take(":")
-                children = {path[1:] for path in wanted if path[0] == key}
-                if children:
-                    # Later duplicate parents replace their entire projection.
-                    result[key] = self.selected(children)
-                else:
-                    self.discard()
-                if self.peek() != ",":
-                    break
-                self.take(",")
-        self.take("}")
+        for key in self.object_keys():
+            children = {path[1:] for path in wanted if path[0] == key}
+            if children:
+                # Later duplicate parents replace their entire projection.
+                result[key] = self.selected(children)
+            else:
+                self.discard()
         return result
 
     def projected(
@@ -271,22 +256,33 @@ class _JSONInput:
             return self.value()
         if self.peek() != "{" or not any(key[: len(path)] == path for key in reducers):
             return self.value()
-        self.take("{")
         result = {}
-        if self.peek() != "}":
-            while True:
-                key = self.value()
-                if not isinstance(key, str):
-                    raise ValueError("JSON object keys must be strings")
-                self.take(":")
-                # Later keys replace the complete earlier projection, just as
-                # json.loads replaces an earlier object or array value.
-                result[key] = self.projected(reducers, (*path, key))
-                if self.peek() != ",":
-                    break
-                self.take(",")
-        self.take("}")
+        for key in self.object_keys():
+            # Later keys replace the complete earlier projection, just as
+            # json.loads replaces an earlier object or array value.
+            result[key] = self.projected(reducers, (*path, key))
         return result
+
+
+def consume_document_strings(
+    source: VerifiedFile, consume: Callable[[str, str | None], None]
+) -> None:
+    """Visit every verified object field; None marks a fully parsed non-string value.
+
+    Consumers apply last-key-wins before validating their final schema. No
+    growing container is retained, and the complete document must be valid JSON.
+    """
+    with source.snapshot() as frozen:
+        with io.TextIOWrapper(frozen, encoding="utf-8-sig") as text:
+            parser = _JSONInput(text)
+            for key in parser.object_keys():
+                if parser.peek() == '"':
+                    consume(key, parser.value())
+                else:
+                    parser.discard()
+                    consume(key, None)
+            if parser.peek():
+                raise ValueError("Trailing data after JSON document")
 
 
 def read_document_fields(

@@ -22,8 +22,6 @@ from fh5.sampling_evidence import (
     verify_sampling_sources,
 )
 
-_INVENTORY_LIMIT = 64 * 1024**2
-
 
 def checkpoint_learning_evidence(
     root: Path, expected_sha256: str
@@ -51,34 +49,30 @@ def sampling_bindings(row: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def archive_failed_sampling(binding: dict[str, Any]) -> dict[str, Any]:
-    """Keep large original inventories outside the bounded parent state document."""
+    """Publish an immutable source index; reuse interrupted publications after verification."""
     root = Path(binding["directory"])
     path = root.with_name(root.name + "-originals.json")
-    inventory = seal_sampling_sources(root, None)
-    payload = encode(inventory)
-    if len(payload) > _INVENTORY_LIMIT:
-        raise ValueError("Sampling originals inventory exceeds 64 MiB")
     if path.exists():
-        if read_bounded(path, _INVENTORY_LIMIT) != payload:
-            raise ValueError("Retained sampling originals inventory changed")
+        digest = sha256_file(path)
+        verify_sampling_sources(VerifiedFile(path, digest), root=root)
     else:
+        inventory = seal_sampling_sources(root, None, indexed=True)
+        digest = hashlib.sha256(encode(inventory)).hexdigest()
         atomic_json(path, inventory)
     return {
         **binding,
         "originals_file": str(path),
-        "originals_sha256": hashlib.sha256(payload).hexdigest(),
+        "originals_sha256": digest,
     }
 
 
 def verify_archived_sampling(binding: dict[str, Any]) -> None:
     root = Path(binding["directory"])
     path = root.with_name(root.name + "-originals.json")
-    raw = read_bounded(path, _INVENTORY_LIMIT)
-    if str(path) != binding.get("originals_file") or hashlib.sha256(raw).hexdigest() != binding.get(
-        "originals_sha256"
-    ):
+    digest = binding.get("originals_sha256")
+    if str(path) != binding.get("originals_file") or not isinstance(digest, str):
         raise ValueError("Retained sampling originals inventory changed")
-    verify_sampling_sources(json.loads(raw))
+    verify_sampling_sources(VerifiedFile(path, digest), root=root)
 
 
 def _expected_protocol(request: SACCycle | SACRealtimeCycle) -> dict[str, Any]:
