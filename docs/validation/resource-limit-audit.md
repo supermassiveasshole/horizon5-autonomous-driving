@@ -206,3 +206,10 @@ BC 初始命令交接仍逐条核对；全部预测行按固定 JSON 编码增�
 学习状态保持不变。**1 passed / 3.22 秒**，结果 `runs/resource-prediction-gate-20261002-results.xml`。
 
 本片段不测量 FH5 / GPU / 整机压力，也未移除经验、缓存、batch、预热及父循环的剩余限制。
+
+实时采样/学习循环、模仿阶段评估及父更新中断/恢复最终组合
+**29 passed / 190.40 秒**，结果 `runs/resource-predictions-recovery-20261002-results.xml`。
+Ruff、346 文件格式及 132 源文件 strict mypy 通过。
+固定 `9ccdb2d...136279e` 独立只读复审：**Standards 0 项、Spec 0 项**。
+此前冻结 `c246c70` 的完整回归 **1230 passed / 1630.23 秒**，
+结果 `runs/resource-candidate-integrated-20261002-results.xml`；该全量结果不覆盖后续更新日志和本片段预测迁移。
