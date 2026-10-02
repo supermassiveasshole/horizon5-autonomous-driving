@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from collections import OrderedDict
+from contextlib import ExitStack
 from pathlib import Path
 from typing import Any
 
-from fh5.collection_store import read_bounded
+from fh5.artifact_io import VerifiedFile
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import NumericDecision, validate_decision
 from fh5.numeric_recording import read_numeric_frame
+from fh5.replay_document import replay_document
 from fh5.sac import _task_features
 from fh5.sac_actions import ActionBounds
 from fh5.sac_sources import replay_roles
@@ -32,6 +33,7 @@ class LearningReplay:
         actor: FrozenNumericActor,
         bounds: ActionBounds,
         *,
+        resources: ExitStack,
         cache_bytes: int = 0,
     ) -> None:
         validate_cache_budget(cache_bytes)
@@ -40,10 +42,8 @@ class LearningReplay:
         self.cache_bypasses = 0
         self.root = path.parent
         self.torch, self.actor, self.bounds = torch, actor, bounds
-        self.raw = read_bounded(path, 128 * 1024**2)
-        if hashlib.sha256(self.raw).hexdigest() != expected:
-            raise ValueError("SAC replay changed from its frozen digest")
-        replay = json.loads(self.raw)
+        self.file = VerifiedFile(path, expected)
+        self.replay = replay = resources.enter_context(replay_document(self.file))
         self.roles = replay_roles(path.parent, replay)
         if replay["pixel_contract"] != actor.contract.metadata():
             raise ValueError("Unsupported SAC learning replay contract")

@@ -9,10 +9,11 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from fh5.artifact_io import read_json, sha256_file
+from fh5.artifact_io import VerifiedFile, read_json, sha256_file
 from fh5.collection_store import atomic_json, encode, read_bounded
 from fh5.numeric_images import asset
 from fh5.realtime_numeric_replay import read_realtime_journal, read_realtime_recording
+from fh5.replay_document import replay_document
 from fh5.sac_cycle import SACCycle, SACRealtimeCycle, sampling_update_budget
 from fh5.sac_learning import validate_sac_candidate
 from fh5.sampling_evidence import (
@@ -279,10 +280,9 @@ def completed_sampling(
         raise ValueError("Pending sampling result differs from its parent or sealed attempt")
     verify_sampling_sources(attempt.get("source_assets", {}))
     replay_path = root / attempt["replay"]
-    if _sha(replay_path) != attempt["replay_sha256"]:
-        raise ValueError("Pending sampling replay changed")
-    replay = json.loads(read_bounded(replay_path, 128 * 1024**2))
-    source_hashes = replay["source_hashes"]
+    with replay_document(VerifiedFile(replay_path, attempt["replay_sha256"])) as replay:
+        source_hashes = replay["source_hashes"]
+        transition_count = len(replay["transitions"])
     originals = {
         "packets": root / "attempt-000/recording/packets.jsonl",
         "session": root / "attempt-000/recording/session.json",
@@ -327,7 +327,7 @@ def completed_sampling(
     if (
         type(count) is not int
         or not 1 <= count <= maximum
-        or count != len(replay["transitions"])
+        or count != transition_count
         or type(updates) is not int
         or not 0 <= updates <= budget
         or (

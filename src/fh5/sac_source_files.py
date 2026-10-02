@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from collections.abc import Generator
 from contextlib import closing
@@ -13,6 +12,7 @@ from typing import Any
 
 from fh5.artifact_io import VerifiedFile
 from fh5.numeric_images import asset
+from fh5.replay_document import replay_document
 
 
 @dataclass(frozen=True)
@@ -38,15 +38,12 @@ def source_replays(root: Path, replay: dict[str, Any]) -> Generator[SourceReplay
                     index.execute("INSERT INTO sources VALUES (?)", (name,))
                     original = VerifiedFile(asset(root, name), item["replay_sha256"])
                     try:
-                        with original.snapshot() as stream:
-                            document = json.load(stream)
+                        with replay_document(original) as document:
+                            if document.get("source_hashes") != item["source_hashes"]:
+                                raise ValueError("SAC experience source manifest changed")
+                            yield SourceReplay(name, original, document)
                     except ValueError as error:
                         raise ValueError("SAC experience source manifest changed") from error
-                    if not isinstance(document, dict) or (
-                        document.get("source_hashes") != item["source_hashes"]
-                    ):
-                        raise ValueError("SAC experience source manifest changed")
-                    yield SourceReplay(name, original, document)
         except sqlite3.Error as error:
             raise OSError("Cannot index SAC source manifests: " + str(error)) from error
 

@@ -23,8 +23,10 @@ def sha256_file(path: Path) -> str:
 def _stream_digest(stream: BinaryIO) -> str:
     # Standard I/O transfer quantum, never a limit on the artifact's total size.
     digest = hashlib.sha256()
-    while block := stream.read(io.DEFAULT_BUFFER_SIZE):
-        digest.update(block)
+    block = bytearray(io.DEFAULT_BUFFER_SIZE)
+    view = memoryview(block)
+    while size := cast(io.BufferedIOBase, stream).readinto(block):
+        digest.update(view[:size])
     return digest.hexdigest()
 
 

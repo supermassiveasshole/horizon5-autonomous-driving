@@ -10,11 +10,13 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
+from fh5.artifact_io import VerifiedFile, read_json
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.learning_diagnostics import prediction_identity
 from fh5.learning_runtime import preserve_torch_state
 from fh5.presentation import optional_report
 from fh5.realtime import RealtimeConfig, RealtimeRun
+from fh5.replay_document import replay_document
 from fh5.sac_actor import FrozenSAC
 from fh5.sac_learning import SACResume
 from fh5.sac_realtime_experience import SACRealtimePrepare
@@ -135,10 +137,12 @@ def run_sac_cycle(
         protocol_bytes = [read_bounded(p, 1024**2) for p in files]
         if json.loads(protocol_bytes[0])["control_source"] != "policy":
             raise ValueError("SAC sampler requires policy recording attribution")
-        old_replay = json.loads(read_bounded(checkpoint / "experience/replay.json", 128 * 1024**2))
-        for kind, raw in zip(("task", "reward"), protocol_bytes[1:]):
-            if hashlib.sha256(raw).hexdigest() != old_replay["source_hashes"][kind]:
-                raise ValueError("Cycle protocol differs from the learner: " + kind)
+        policy = read_json(checkpoint / "policy.json")
+        source = VerifiedFile(checkpoint / "experience/replay.json", policy["replay_sha256"])
+        with replay_document(source) as old_replay:
+            for kind, raw in zip(("task", "reward"), protocol_bytes[1:]):
+                if hashlib.sha256(raw).hexdigest() != old_replay["source_hashes"][kind]:
+                    raise ValueError("Cycle protocol differs from the learner: " + kind)
         write_file(
             root / "protocol.json",
             encode(

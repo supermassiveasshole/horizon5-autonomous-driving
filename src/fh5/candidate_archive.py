@@ -9,10 +9,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
-from fh5.artifact_io import VerifiedFile, read_json, sha256_file
+from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.checkpoint_history import NodeReader, history_assets
 from fh5.collection_store import encode, write_file
 from fh5.numeric_images import asset
+from fh5.replay_document import replay_document
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -39,8 +40,9 @@ def _paths(source: Path, expected: str) -> tuple[dict[str, Any], set[str]]:
     if hashlib.sha256(raw).hexdigest() != expected:
         raise ValueError("Candidate differs from its expected checkpoint identity")
     manifest = json.loads(raw)
-    replay = read_json(source / "experience/replay.json")
-    return manifest, checkpoint_asset_names(source, manifest, replay)
+    replay_file = VerifiedFile(source / "experience/replay.json", manifest["replay_sha256"])
+    with replay_document(replay_file) as replay:
+        return manifest, checkpoint_asset_names(source, manifest, replay)
 
 
 def checkpoint_asset_names(

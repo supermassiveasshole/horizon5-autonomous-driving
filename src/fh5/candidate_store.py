@@ -13,11 +13,12 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
-from fh5.artifact_io import sha256_file
+from fh5.artifact_io import VerifiedFile, read_json, sha256_file
 from fh5.candidate_archive import CandidateArchive, CandidateRestore
 from fh5.candidate_selection import CandidateCompare, _eligibility
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.numeric_images import asset
+from fh5.replay_document import replay_document
 from fh5.sac_source_files import recording_origins
 
 if TYPE_CHECKING:
@@ -203,8 +204,10 @@ def _synthetic_gate(
     bc = json.loads(read_bounded(checkpoint / "bc/model.json", 1024**2))
     if bc.get("provenance", {}).get("kind") != "synthetic":
         reasons.append(side + ":unsupported_training_lineage")
-    replay = json.loads(read_bounded(checkpoint / "experience/replay.json", 128 * 1024**2))
-    training = recording_origins(checkpoint / "experience", replay)
+    policy = read_json(checkpoint / "policy.json")
+    source = VerifiedFile(checkpoint / "experience/replay.json", policy["replay_sha256"])
+    with replay_document(source) as replay:
+        training = recording_origins(checkpoint / "experience", replay)
     origins = {
         row["source_hashes"]["packets"]
         for evaluation in reviews.values()

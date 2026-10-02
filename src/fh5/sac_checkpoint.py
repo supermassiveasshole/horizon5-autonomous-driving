@@ -237,21 +237,20 @@ def experience_frames(
             raise OSError("Cannot index SAC experience frames: " + str(error)) from error
 
 
-def seal_experience(raw: bytes, source: Path, output: Path) -> dict[str, Any]:
-    replay = json.loads(raw)
+def seal_experience(replay: dict[str, Any], source: VerifiedFile, output: Path) -> dict[str, Any]:
     output.mkdir(parents=True)
     count, total = 0, 0
-    with closing(experience_frames(source.parent, replay)) as frames:
+    with closing(experience_frames(source.path.parent, replay)) as frames:
         for name, frame in frames:
             target = asset(output, name)
             target.parent.mkdir(parents=True, exist_ok=True)
             write_file(target, bytes(frame.pixels))
             count += 1
             total += frame.pixels.nbytes
-    with closing(source_replays(source.parent, replay)) as sources:
+    with closing(source_replays(source.path.parent, replay)) as sources:
         for original in sources:
             target = asset(output, original.name)
             target.parent.mkdir(parents=True, exist_ok=True)
             original.file.copy_to(target)
-    write_file(output / "replay.json", raw)
+    source.copy_to(output / "replay.json")
     return {"replay": "experience/replay.json", "frame_files": count, "frame_bytes": total}

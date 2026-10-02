@@ -8,6 +8,7 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from fh5.replay_document import ReplayArray
 from fh5.sac_source_files import source_replays
 from fh5.sac_timing import next_action_elapsed
 
@@ -68,7 +69,7 @@ def replay_roles(root: Path, replay: dict[str, Any]) -> list[str]:
             (3, "sac-numeric-replay-v3"),
         )
         or replay.get("source_kind") != "synthetic"
-        or not isinstance(replay.get("transitions"), list)
+        or not isinstance(replay.get("transitions"), (list, ReplayArray))
         or not 1 <= len(replay["transitions"]) <= 10_000
         or replay.get("version") in (2, 3)
         and not isinstance(replay.get("task_contract"), dict)

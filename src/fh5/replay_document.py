@@ -1,0 +1,190 @@
+"""Verified replay metadata with top-level arrays indexed on disk."""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import sqlite3
+from collections.abc import Iterator, Sequence
+from contextlib import closing, contextmanager
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from typing import Any, TextIO, overload
+
+from fh5.artifact_io import VerifiedFile
+
+
+class ReplayArray(Sequence[Any]):
+    """Load individual records while the owning replay document is open."""
+
+    def __init__(self, index: sqlite3.Connection, section: str, length: int) -> None:
+        self.database, self.section, self.length = index, section, length
+
+    def __len__(self) -> int:
+        return self.length
+
+    @overload
+    def __getitem__(self, key: int) -> Any: ...
+
+    @overload
+    def __getitem__(self, key: slice) -> list[Any]: ...
+
+    def __getitem__(self, key: int | slice) -> Any:
+        if isinstance(key, slice):
+            return [self[i] for i in range(*key.indices(self.length))]
+        if key < 0:
+            key += self.length
+        if not 0 <= key < self.length:
+            raise IndexError(key)
+        row = self.database.execute(
+            "SELECT data FROM records WHERE section = ? AND position = ?", (self.section, key)
+        ).fetchone()
+        return json.loads(row[0])
+
+    def __iter__(self) -> Iterator[Any]:
+        with closing(
+            self.database.execute(
+                "SELECT data FROM records WHERE section = ? ORDER BY position", (self.section,)
+            )
+        ) as rows:
+            for (raw,) in rows:
+                yield json.loads(raw)
+
+
+class _JSONInput:
+    """Incrementally decode one JSON value; no file-size admission ceiling."""
+
+    def __init__(self, stream: TextIO) -> None:
+        self.stream = stream
+        self.buffer = ""
+        self.position = 0
+        self.eof = False
+        self.decoder = json.JSONDecoder()
+
+    def more(self) -> None:
+        # Standard I/O quantum. One nested record can span any number of blocks.
+        block = self.stream.read(io.DEFAULT_BUFFER_SIZE)
+        self.buffer = self.buffer[self.position :] + block
+        self.position = 0
+        self.eof = not block
+
+    def peek(self) -> str:
+        while True:
+            remaining = self.buffer[self.position :]
+            stripped = remaining.lstrip(" \t\r\n")
+            self.position += len(remaining) - len(stripped)
+            if stripped:
+                return stripped[0]
+            if self.eof:
+                return ""
+            self.more()
+
+    def take(self, expected: str) -> None:
+        if self.peek() != expected:
+            raise ValueError("Malformed replay JSON: expected " + expected)
+        self.position += 1
+
+    def value(self) -> Any:
+        self.peek()
+        while True:
+            try:
+                value, end = self.decoder.raw_decode(self.buffer, self.position)
+            except json.JSONDecodeError:
+                if self.eof:
+                    raise
+            else:
+                # A number may continue in the next block (12 -> 123 or 1e-2).
+                # Never accept a partial numeric token or an invalid suffix.
+                if end < len(self.buffer) and self.buffer[end] in " \t\r\n,:]}":
+                    self.position = end
+                    return value
+                if self.eof:
+                    if end != len(self.buffer):
+                        raise ValueError("Malformed replay JSON value suffix")
+                    self.position = end
+                    return value
+            self.more()
+
+    def document(self, index: sqlite3.Connection) -> dict[str, Any]:
+        self.take("{")
+        result: dict[str, Any] = {}
+        if self.peek() != "}":
+            while True:
+                key = self.value()
+                if not isinstance(key, str):
+                    raise ValueError("Replay JSON object keys must be strings")
+                self.take(":")
+                # Match json.loads' last-key-wins semantics, including arrays.
+                index.execute("DELETE FROM records WHERE section = ?", (key,))
+                if self.peek() == "[":
+                    result[key] = self.array(index, key)
+                else:
+                    result[key] = self.value()
+                if self.peek() != ",":
+                    break
+                self.take(",")
+        self.take("}")
+        if self.peek():
+            raise ValueError("Trailing data after replay JSON")
+        return result
+
+    def array(self, index: sqlite3.Connection, section: str) -> ReplayArray:
+        self.take("[")
+        count = 0
+        if self.peek() != "]":
+            while True:
+                item = self.value()
+                index.execute(
+                    "INSERT INTO records VALUES (?, ?, ?)",
+                    (section, count, json.dumps(item, ensure_ascii=True)),
+                )
+                count += 1
+                if self.peek() != ",":
+                    break
+                self.take(",")
+        self.take("]")
+        return ReplayArray(index, section, count)
+
+
+@contextmanager
+def replay_document(source: VerifiedFile) -> Iterator[dict[str, Any]]:
+    """Parse only hash-verified private bytes; scope the on-demand array index."""
+    with TemporaryDirectory(prefix="fh5-replay-document-") as temporary:
+        try:
+            with closing(sqlite3.connect(Path(temporary) / "records.sqlite3")) as index:
+                index.execute(
+                    "CREATE TABLE records (section TEXT, position INTEGER, data TEXT NOT NULL, "
+                    "PRIMARY KEY (section, position)) WITHOUT ROWID"
+                )
+                with source.snapshot() as frozen:
+                    with io.TextIOWrapper(frozen, encoding="utf-8-sig") as text:
+                        document = _JSONInput(text).document(index)
+                index.commit()
+                yield document
+        except sqlite3.Error as error:
+            raise OSError("Cannot index replay document: " + str(error)) from error
+
+
+def write_replay_document(path: Path, document: dict[str, Any]) -> None:
+    """Write canonical legacy JSON without expanding indexed arrays or the whole text."""
+    encoder = json.JSONEncoder(sort_keys=True, allow_nan=False, separators=(",", ":"))
+    with path.open("x", encoding="utf-8", newline="\n") as stream:
+        stream.write("{")
+        for number, key in enumerate(sorted(document)):
+            if number:
+                stream.write(",")
+            stream.write(encoder.encode(key) + ":")
+            value = document[key]
+            if isinstance(value, ReplayArray):
+                stream.write("[")
+                for position, item in enumerate(value):
+                    if position:
+                        stream.write(",")
+                    stream.writelines(encoder.iterencode(item))
+                stream.write("]")
+            else:
+                stream.writelines(encoder.iterencode(value))
+        stream.write("}\n")
+        stream.flush()
+        os.fsync(stream.fileno())

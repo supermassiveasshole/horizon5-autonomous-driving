@@ -2,17 +2,15 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-from contextlib import closing
+from contextlib import ExitStack, closing
 from copy import deepcopy
 from itertools import chain
 from pathlib import Path
 from typing import Any
 
-from fh5.artifact_io import VerifiedFile
-from fh5.collection_store import encode, write_file
+from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.numeric_actor import FrozenNumericActor
+from fh5.replay_document import ReplayArray, write_replay_document
 from fh5.sac_actions import ActionBounds
 from fh5.sac_data import LearningReplay
 from fh5.sac_experience_assets import ExperienceAssets, experience_assets
@@ -29,8 +27,10 @@ def expand_experience(
     bc: FrozenNumericActor,
     bounds: ActionBounds,
 ) -> tuple[Path, str, int, dict[str, Any]]:
-    with experience_assets() as assets:
-        return _expand(torch, parent, parent_sha, additions, output, bc, bounds, assets)
+    with experience_assets() as assets, ExitStack() as parent_resources:
+        return _expand(
+            torch, parent, parent_sha, additions, output, bc, bounds, assets, parent_resources
+        )
 
 
 def _expand(
@@ -42,6 +42,7 @@ def _expand(
     bc: FrozenNumericActor,
     bounds: ActionBounds,
     assets: ExperienceAssets,
+    parent_resources: ExitStack,
 ) -> tuple[Path, str, int, dict[str, Any]]:
     if not additions:
         raise ValueError("SAC expansion requires sealed replay additions")
@@ -52,51 +53,69 @@ def _expand(
     added = 0
     combined: dict[str, Any] | None = None
     for number, (path, sha) in enumerate(sources):
-        data = LearningReplay(torch, path, sha, bc, bounds)
-        replay = json.loads(data.raw)
-        if combined is None:
-            combined = deepcopy(replay)
-        check_compatible(replay, combined)
-        entries = replay.get("source_inventory") or [
-            {
-                "replay_sha256": sha,
-                "source_hashes": replay["source_hashes"],
-                "path": f"sources/{sha}.json",
-            }
-        ]
-        if replay.get("source_inventory"):
-            with closing(source_replays(path.parent, replay)) as originals:
-                for original_source in originals:
-                    assets.add_source(original_source.file)
-        else:
-            assets.add_source(VerifiedFile(path, sha))
-        for entry in entries:
-            # Re-reviewing or reformatting metadata does not create another interaction.
-            identity = entry["source_hashes"]["packets"]
-            if entry["replay_sha256"] in hashes or identity in source_ids:
-                raise ValueError("Duplicate SAC experience cannot earn new update credit")
-            hashes.add(entry["replay_sha256"])
-            source_ids.add(identity)
-            inventory.append({**entry, "path": f"sources/{entry['replay_sha256']}.json"})
-        for original in replay["transitions"]:
-            row = deepcopy(original)
-            provenance = row.get("provenance") or {"replay_sha256": sha, "transition_id": row["id"]}
-            if provenance["replay_sha256"] not in {e["replay_sha256"] for e in entries}:
-                raise ValueError("SAC transition lacks its source inventory")
-            row["provenance"] = provenance
-            row["id"] = provenance["replay_sha256"] + ":" + provenance["transition_id"]
-            if row["id"] in transition_ids:
-                raise ValueError("Duplicate SAC transition")
-            transition_ids.add(row["id"])
-            for observation in (row["current"], row["next"]):
-                if observation is None:
-                    continue
-                for entry in observation["frames"]:
-                    entry["path"] = assets.add_frame(path.parent, entry)
-            rows.append(row)
-            added += int(number > 0)
-            if len(rows) > 10_000:
-                raise ValueError("Expanded SAC replay exceeds 10000 transitions")
+        with ExitStack() as resources:
+            data = LearningReplay(
+                torch,
+                path,
+                sha,
+                bc,
+                bounds,
+                resources=parent_resources if number == 0 else resources,
+            )
+            replay = data.replay
+            if combined is None:
+                replaced = {"transitions", "source_inventory", "excluded", "observation_errors"}
+                # Keep the parent's index alive for extension arrays copied to
+                # the union; don't deep-copy the database or load those arrays.
+                combined = {
+                    k: v if isinstance(v, ReplayArray) else deepcopy(v)
+                    for k, v in replay.items()
+                    if k not in replaced
+                }
+            check_compatible(replay, combined)
+            entries = replay.get("source_inventory") or [
+                {
+                    "replay_sha256": sha,
+                    "source_hashes": replay["source_hashes"],
+                    "path": f"sources/{sha}.json",
+                }
+            ]
+            if replay.get("source_inventory"):
+                with closing(source_replays(path.parent, replay)) as originals:
+                    for original_source in originals:
+                        assets.add_source(original_source.file)
+            else:
+                assets.add_source(VerifiedFile(path, sha))
+            for entry in entries:
+                # Re-reviewing or reformatting metadata does not create another interaction.
+                identity = entry["source_hashes"]["packets"]
+                if entry["replay_sha256"] in hashes or identity in source_ids:
+                    raise ValueError("Duplicate SAC experience cannot earn new update credit")
+                hashes.add(entry["replay_sha256"])
+                source_ids.add(identity)
+                inventory.append({**entry, "path": f"sources/{entry['replay_sha256']}.json"})
+            for original in replay["transitions"]:
+                row = deepcopy(original)
+                provenance = row.get("provenance") or {
+                    "replay_sha256": sha,
+                    "transition_id": row["id"],
+                }
+                if provenance["replay_sha256"] not in {e["replay_sha256"] for e in entries}:
+                    raise ValueError("SAC transition lacks its source inventory")
+                row["provenance"] = provenance
+                row["id"] = provenance["replay_sha256"] + ":" + provenance["transition_id"]
+                if row["id"] in transition_ids:
+                    raise ValueError("Duplicate SAC transition")
+                transition_ids.add(row["id"])
+                for observation in (row["current"], row["next"]):
+                    if observation is None:
+                        continue
+                    for entry in observation["frames"]:
+                        entry["path"] = assets.add_frame(path.parent, entry)
+                rows.append(row)
+                added += int(number > 0)
+                if len(rows) > 10_000:
+                    raise ValueError("Expanded SAC replay exceeds 10000 transitions")
     assert combined is not None
     combined.update(transitions=rows, source_inventory=inventory)
     if combined["version"] in (2, 3):
@@ -107,16 +126,13 @@ def _expand(
     }
     combined["excluded"] = []
     combined["observation_errors"] = []
-    raw = encode(combined)
-    if len(raw) > 128 * 1024**2:
-        raise ValueError("Expanded SAC replay exceeds 128 MiB")
     output.mkdir(parents=True, exist_ok=False)
     statistics = assets.copy_into(output)
     path = output / "replay.json"
-    write_file(path, raw)
+    write_replay_document(path, combined)
     return (
         path,
-        hashlib.sha256(raw).hexdigest(),
+        sha256_file(path),
         added,
         statistics,
     )

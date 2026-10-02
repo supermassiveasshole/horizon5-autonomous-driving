@@ -209,7 +209,7 @@ def _make_learner(
 def validate_sac_candidate(root: Path, expected_sha256: str) -> dict[str, Any]:
     """Restore and inspect all learning state without publishing or adding a stage."""
     torch = importlib.import_module("torch")
-    with preserve_torch_state(torch):
+    with preserve_torch_state(torch), ExitStack() as resources:
         torch.set_num_threads(2)
         torch.use_deterministic_algorithms(True)
         manifest, saved, raw = read_checkpoint(torch, root)
@@ -237,9 +237,10 @@ def validate_sac_candidate(root: Path, expected_sha256: str) -> dict[str, Any]:
             manifest["replay_sha256"],
             bc,
             ActionBounds(**manifest["bounds"]),
+            resources=resources,
             cache_bytes=request.raw_cache_bytes,
         )
-        replay = json.loads(data.raw)
+        replay = data.replay
         with closing(source_replays(replay_file.parent, replay)) as sources:
             for _ in sources:
                 pass
@@ -434,6 +435,7 @@ def _train(
         warm["replay_sha256"],
         bc,
         bounds,
+        resources=resources,
         cache_bytes=request.raw_cache_bytes,
     )
     if isinstance(operation, SACResume) and operation.imitation_comparison is not None:
@@ -442,7 +444,7 @@ def _train(
         from fh5.sac_imitation_review import review_imitation
 
         root = Path(resources.enter_context(TemporaryDirectory(prefix="fh5-imitation-")))
-        replay = json.loads(data.raw)
+        replay = data.replay
         imitation, imitation_review, proof_blobs = review_imitation(
             imitation,
             operation.imitation_comparison,
@@ -507,7 +509,7 @@ def _train(
         raise ValueError("SAC handoff changes deterministic BC commands")
     before_summary = before.finish()
     history = history_source.retain(output) if history_source is not None else empty_history()
-    experience = seal_experience(data.raw, request.replay_file, output / "experience")
+    experience = seal_experience(data.replay, data.file, output / "experience")
     copy_evidence(output, history_blobs)
     (output / "bc").mkdir()
     for name, value in bc_bytes.items():
@@ -737,6 +739,7 @@ def run_sac_policy_replay(request: SACPolicyReplay) -> RunResult:
             manifest["replay_sha256"],
             frozen.bc,
             frozen.bounds,
+            resources=resources,
             cache_bytes=request.raw_cache_bytes
             if request.raw_cache_bytes is not None
             else manifest["configuration"].get("raw_cache_bytes", 512 * 1024**2),

@@ -96,7 +96,7 @@ def test_small_experience_copy_does_not_allocate_the_global_frame_read_limit(
 
     def open_file(path, *args, **kwargs):
         if path.name == "replay.json" and path.parent.name == "expanded":
-            if args and args[0] == "xb":
+            if args and args[0] in ("x", "xb"):
                 measured.append(tracemalloc.get_traced_memory()[1])
                 tracemalloc.stop()
         return opened(path, *args, **kwargs)

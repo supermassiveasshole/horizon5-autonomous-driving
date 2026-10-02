@@ -15,7 +15,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fh5.artifact_io import sha256_file
+from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.checkpoint_history import HistorySource, empty_history
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.learning_diagnostics import RecordJournal
@@ -24,6 +24,7 @@ from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import PixelContract
 from fh5.numeric_recording import read_numeric_frame
 from fh5.presentation import optional_report
+from fh5.replay_document import replay_document
 from fh5.sac_actions import ActionBounds
 from fh5.sac_checkpoint import (
     continuation_history,
@@ -191,10 +192,8 @@ def _run(
     else:
         expected, model_dir = manifest["replay_sha256"], request.checkpoint_dir / "actor"
         bounds = ActionBounds(**manifest["bounds"])
-    raw = read_bounded(request.replay_file, 128 * 1024**2)
-    if hashlib.sha256(raw).hexdigest() != expected:
-        raise ValueError("SAC replay changed from its frozen digest")
-    replay = json.loads(raw)
+    replay_file = VerifiedFile(request.replay_file, expected)
+    replay = stack.enter_context(replay_document(replay_file))
     from fh5.sac_sources import replay_roles
 
     replay_roles(request.replay_file.parent, replay)
@@ -323,7 +322,7 @@ def _run(
         output = request.output_dir
         output.mkdir(parents=True)
         history = history_source.retain(output) if history_source is not None else empty_history()
-        experience = seal_experience(raw, request.replay_file, output / "experience")
+        experience = seal_experience(replay, replay_file, output / "experience")
         (output / "actor").mkdir()
         for name, value in model_payload.items():
             write_file(output / "actor" / name, value)
