@@ -15,10 +15,11 @@ from typing import Any
 
 from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.checkpoint_history import HistorySource, verify_history
-from fh5.collection_store import encode, read_bounded, write_file
+from fh5.collection_store import encode, write_file
 from fh5.numeric_images import NumericFrame, asset
 from fh5.numeric_recording import read_numeric_frame
 from fh5.sac_imitation import checkpoint_imitation, imitation_evidence
+from fh5.sac_source_files import source_replays
 
 
 def _read_state(
@@ -238,7 +239,6 @@ def experience_frames(
 
 def seal_experience(raw: bytes, source: Path, output: Path) -> dict[str, Any]:
     replay = json.loads(raw)
-    sources = source_replays(source.parent, replay)
     output.mkdir(parents=True)
     count, total = 0, 0
     with closing(experience_frames(source.parent, replay)) as frames:
@@ -248,30 +248,10 @@ def seal_experience(raw: bytes, source: Path, output: Path) -> dict[str, Any]:
             write_file(target, bytes(frame.pixels))
             count += 1
             total += frame.pixels.nbytes
+    with closing(source_replays(source.parent, replay)) as sources:
+        for original in sources:
+            target = asset(output, original.name)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            original.file.copy_to(target)
     write_file(output / "replay.json", raw)
-    for name, payload in sources.items():
-        target = asset(output, name)
-        target.parent.mkdir(parents=True, exist_ok=True)
-        write_file(target, payload)
     return {"replay": "experience/replay.json", "frame_files": count, "frame_bytes": total}
-
-
-def source_replays(root: Path, replay: dict[str, Any]) -> dict[str, bytes]:
-    """Retain source manifests, including excluded/failed experience diagnostics."""
-    sources: dict[str, bytes] = {}
-    total = 0
-    for item in replay.get("source_inventory", []):
-        name = item["path"]
-        raw = read_bounded(asset(root, name), 128 * 1024**2)
-        if (
-            hashlib.sha256(raw).hexdigest() != item["replay_sha256"]
-            or json.loads(raw)["source_hashes"] != item["source_hashes"]
-        ):
-            raise ValueError("SAC experience source manifest changed")
-        total += len(raw)
-        if total > 128 * 1024**2 or len(sources) >= 1000:
-            raise ValueError("SAC experience source manifests exceed capacity")
-        if name in sources:
-            raise ValueError("Duplicate SAC experience source manifest")
-        sources[name] = raw
-    return sources

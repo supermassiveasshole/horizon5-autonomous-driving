@@ -35,7 +35,6 @@ from fh5.sac_checkpoint import (
     read_critic_checkpoint,
     resume_contract,
     seal_experience,
-    source_replays,
     state_digest,
 )
 from fh5.sac_data import LearningReplay, validate_cache_budget
@@ -48,6 +47,7 @@ from fh5.sac_imitation import (
     initial_imitation,
 )
 from fh5.sac_policy import encode_history, make_policy, soft_update
+from fh5.sac_source_files import recording_origins, source_replays
 from fh5.sac_sources import ReplaySampling
 
 if TYPE_CHECKING:
@@ -240,7 +240,9 @@ def validate_sac_candidate(root: Path, expected_sha256: str) -> dict[str, Any]:
             cache_bytes=request.raw_cache_bytes,
         )
         replay = json.loads(data.raw)
-        source_replays(replay_file.parent, replay)
+        with closing(source_replays(replay_file.parent, replay)) as sources:
+            for _ in sources:
+                pass
         with closing(experience_frames(replay_file.parent, replay)) as frames:
             for _ in frames:
                 pass
@@ -441,8 +443,6 @@ def _train(
 
         root = Path(resources.enter_context(TemporaryDirectory(prefix="fh5-imitation-")))
         replay = json.loads(data.raw)
-        sources = source_replays(request.replay_file.parent, replay)
-        leaves = [json.loads(raw) for raw in sources.values()] if sources else [replay]
         imitation, imitation_review, proof_blobs = review_imitation(
             imitation,
             operation.imitation_comparison,
@@ -450,7 +450,7 @@ def _train(
             root / "comparison",
             parent_sha256=hashlib.sha256(parent_bytes).hexdigest(),
             bc_manifest=bc_manifest,
-            learning_origins={item["source_hashes"]["packets"] for item in leaves},
+            learning_origins=recording_origins(request.replay_file.parent, replay),
         )
         history_blobs.update(proof_blobs)
     sampling = ReplaySampling(data.roles, request.batch_size, request.demonstration_fraction)

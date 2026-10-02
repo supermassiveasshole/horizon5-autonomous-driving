@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import closing
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
+from fh5.artifact_io import VerifiedFile
 from fh5.collection_store import encode, write_file
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_recording import read_numeric_frame, read_numeric_pixels
 from fh5.sac_actions import ActionBounds
-from fh5.sac_checkpoint import source_replays
 from fh5.sac_data import LearningReplay
+from fh5.sac_source_files import source_replays
 from fh5.sac_sources import check_compatible
 
 
@@ -33,7 +35,7 @@ def expand_experience(
     rows: list[dict[str, Any]] = []
     hashes, source_ids, transition_ids = set(), set(), set()
     frames: dict[str, tuple[Path, dict[str, Any]]] = {}
-    manifests: dict[str, bytes] = {}
+    manifests: dict[str, VerifiedFile] = {}
     byte_count, added = 0, 0
     combined: dict[str, Any] | None = None
     for number, (path, sha) in enumerate(sources):
@@ -49,11 +51,12 @@ def expand_experience(
                 "path": f"sources/{sha}.json",
             }
         ]
-        manifests.update(
-            source_replays(path.parent, replay)
-            if replay.get("source_inventory")
-            else {f"sources/{sha}.json": data.raw}
-        )
+        if replay.get("source_inventory"):
+            with closing(source_replays(path.parent, replay)) as originals:
+                for original_source in originals:
+                    manifests[original_source.name] = original_source.file
+        else:
+            manifests[f"sources/{sha}.json"] = VerifiedFile(path, sha)
         for entry in entries:
             # Re-reviewing or reformatting metadata does not create another interaction.
             identity = entry["source_hashes"]["packets"]
@@ -102,8 +105,6 @@ def expand_experience(
     raw = encode(combined)
     if len(raw) > 128 * 1024**2:
         raise ValueError("Expanded SAC replay exceeds 128 MiB")
-    if sum(map(len, manifests.values())) > 128 * 1024**2:
-        raise ValueError("Expanded SAC source manifests exceed 128 MiB")
     output.mkdir(parents=True, exist_ok=False)
     peak = 0
     for name, (source, entry) in frames.items():
@@ -114,10 +115,10 @@ def expand_experience(
         target.parent.mkdir(parents=True, exist_ok=True)
         write_file(target, payload)
         del payload
-    for name, payload in manifests.items():
+    for name, original_file in manifests.items():
         target = output / name
         target.parent.mkdir(parents=True, exist_ok=True)
-        write_file(target, payload)
+        original_file.copy_to(target)
     path = output / "replay.json"
     write_file(path, raw)
     return (

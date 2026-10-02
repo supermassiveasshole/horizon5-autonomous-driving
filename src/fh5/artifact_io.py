@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 import shutil
@@ -16,7 +17,15 @@ from typing import Any, BinaryIO, cast
 
 def sha256_file(path: Path) -> str:
     with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
+        return _stream_digest(stream)
+
+
+def _stream_digest(stream: BinaryIO) -> str:
+    # Standard I/O transfer quantum, never a limit on the artifact's total size.
+    digest = hashlib.sha256()
+    while block := stream.read(io.DEFAULT_BUFFER_SIZE):
+        digest.update(block)
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -32,7 +41,7 @@ class VerifiedFile:
 
     def copy_to(self, target: Path) -> None:
         with self.path.open("rb") as source, target.open("xb") as destination:
-            shutil.copyfileobj(source, destination)
+            shutil.copyfileobj(source, destination, length=io.DEFAULT_BUFFER_SIZE)
             destination.flush()
             os.fsync(destination.fileno())
         # Verify the copied bytes, not a source that might change between reads.
@@ -44,9 +53,9 @@ class VerifiedFile:
         """Only deserialize the private copy whose digest was actually checked."""
         with TemporaryFile(mode="w+b") as frozen:
             with self.path.open("rb") as source:
-                shutil.copyfileobj(source, frozen)
+                shutil.copyfileobj(source, frozen, length=io.DEFAULT_BUFFER_SIZE)
             frozen.seek(0)
-            if hashlib.file_digest(frozen, "sha256").hexdigest() != self.sha256:
+            if _stream_digest(cast(BinaryIO, frozen)) != self.sha256:
                 raise ValueError("Checkpoint weights changed: " + str(self.path))
             frozen.seek(0)
             yield cast(BinaryIO, frozen)

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import json
 import math
+from contextlib import closing
 from copy import deepcopy
 from pathlib import Path
 from typing import Any
 
-from fh5.sac_checkpoint import source_replays
+from fh5.sac_source_files import source_replays
 from fh5.sac_timing import next_action_elapsed
 
 
@@ -87,18 +87,18 @@ def replay_roles(root: Path, replay: dict[str, Any]) -> list[str]:
             and row.get("action_time_basis") != "asynchronous_send_return_proxy_v1"
         ):
             raise ValueError("Version 3 requires explicit asynchronous transition timing")
-    sources = source_replays(root, replay)
-    if not sources:
+    if not replay.get("source_inventory"):
         return _leaf_roles(replay)
     originals = {}
-    for entry in replay["source_inventory"]:
-        source = json.loads(sources[entry["path"]])
-        if source.get("source_inventory"):
-            raise ValueError("SAC source inventory must contain original leaf replays")
-        roles = replay_roles(root, source)
-        check_compatible(replay, source)
-        for row, role in zip(source["transitions"], roles):
-            originals[(entry["replay_sha256"], row["id"])] = (row, role)
+    with closing(source_replays(root, replay)) as sources:
+        for entry in sources:
+            source = entry.document
+            if source.get("source_inventory"):
+                raise ValueError("SAC source inventory must contain original leaf replays")
+            roles = replay_roles(root, source)
+            check_compatible(replay, source)
+            for row, role in zip(source["transitions"], roles):
+                originals[(entry.file.sha256, row["id"])] = (row, role)
     result = []
     seen = set()
     for row in replay["transitions"]:

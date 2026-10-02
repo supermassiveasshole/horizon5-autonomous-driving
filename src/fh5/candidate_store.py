@@ -18,7 +18,7 @@ from fh5.candidate_archive import CandidateArchive, CandidateRestore
 from fh5.candidate_selection import CandidateCompare, _eligibility
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.numeric_images import asset
-from fh5.sac_checkpoint import source_replays
+from fh5.sac_source_files import recording_origins
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -204,11 +204,7 @@ def _synthetic_gate(
     if bc.get("provenance", {}).get("kind") != "synthetic":
         reasons.append(side + ":unsupported_training_lineage")
     replay = json.loads(read_bounded(checkpoint / "experience/replay.json", 128 * 1024**2))
-    leaves = source_replays(checkpoint / "experience", replay)
-    training = {
-        value["source_hashes"]["packets"]
-        for value in ([json.loads(raw) for raw in leaves.values()] if leaves else [replay])
-    }
+    training = recording_origins(checkpoint / "experience", replay)
     origins = {
         row["source_hashes"]["packets"]
         for evaluation in reviews.values()
