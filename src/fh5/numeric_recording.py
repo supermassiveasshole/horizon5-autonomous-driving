@@ -46,8 +46,8 @@ def read_numeric_pixels(
         raise ValueError("Numerical frame exceeds source byte budget")
     with path.open("rb") as stream:
         pixels = stream.read(size + 1)
-    if len(pixels) > byte_limit:
-        raise ValueError("Numerical frame exceeds source byte budget")
+    # The admitted size already fits the source contract. Any different read
+    # length is a changed file, including growth across that exact byte bound.
     if len(pixels) != size:
         raise ValueError("Numerical frame changed size while reading")
     if hashlib.sha256(pixels).hexdigest() != entry["sha256"]:

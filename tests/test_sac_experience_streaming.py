@@ -151,7 +151,8 @@ def test_frozen_replay_pixel_reads_do_not_allocate_the_cache_capacity(tmp_path, 
     assert peaks and max(peaks) < 64 * 1024
 
 
-def test_pixel_file_growth_between_stat_and_read_is_rejected(tmp_path, saved_candidate):
+@pytest.mark.parametrize("change", ["grow", "shrink"])
+def test_pixel_file_change_between_stat_and_read_is_rejected(tmp_path, saved_candidate, change):
     checkpoint, _ = saved_candidate
     copied = tmp_path / "source"
     shutil.copytree(checkpoint, copied)
@@ -163,7 +164,7 @@ def test_pixel_file_growth_between_stat_and_read_is_rejected(tmp_path, saved_can
     def open_file(path, *args, **kwargs):
         if path == frame and args and args[0] == "rb":
             with opened(frame, "wb") as stream:
-                stream.write(original + b"x")
+                stream.write(original + b"x" if change == "grow" else original[:-1])
             changed.append(True)
         return opened(path, *args, **kwargs)
 
