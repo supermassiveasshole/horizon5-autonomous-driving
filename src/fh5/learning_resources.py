@@ -44,7 +44,7 @@ class NativeLearningResources:
 
     def sample(self) -> dict[str, Any]:
         if self.cached is not None and (
-            self.now_ns() - self.cached["observed_ns"] < self.sample_interval_s * 1e9
+            self.now_ns() - self.cached["observed_ns"] < self.sample_interval_s * 1_000_000_000
         ):
             return self.cached
         self._check_manifest()

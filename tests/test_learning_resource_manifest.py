@@ -145,3 +145,45 @@ def test_changed_large_manifest_rejects_before_the_next_host_query(
         assert summary["steps_completed"] == summary["durable_steps_completed"] == 0
         assert summary["candidate"] is None and not (output / "candidate").exists()
         assert file_hash(output / "requested-training.json") == training_hash
+
+
+def test_native_cache_keeps_integer_interval_without_float_conversion(tmp_path, monkeypatch):
+    import fh5.learning_resources as native
+
+    config, _, manifest = prepared_inputs(tmp_path)
+    output = tmp_path / "scheduled"
+    clock = 10_000_000_000
+    probes, waits = [], []
+
+    def host_metrics(resources):
+        probes.append(resources.include_gpu)
+        return {"process_private_bytes": 64 * 1024**2}
+
+    def stop_after_cached_observation(seconds):
+        nonlocal clock
+        waits.append(seconds)
+        clock += round(seconds * 1_000_000_000)
+        if len(waits) == 2:
+            (output / "stop.request").touch()
+
+    monkeypatch.setattr(native.WindowsResources, "__call__", host_metrics)
+    monkeypatch.setattr(native.time, "perf_counter_ns", lambda: clock)
+    monkeypatch.setattr(native.time, "sleep", stop_after_cached_observation)
+    monkeypatch.setattr(
+        native.shutil, "disk_usage", lambda path: SimpleNamespace(free=50 * 1024**3)
+    )
+    # Supply the real resource port with an independent cache interval. The
+    # scheduler still polls its ordinary experiment interval, without a long sleep.
+    resources = native.NativeLearningResources(
+        manifest.parent, file_hash(manifest), tmp_path, 10**400, include_gpu=False
+    )
+    summary = run_experiment(
+        ScheduledBCTrain(config, output), learning_resources=resources
+    ).summary["learning_schedule"]
+    assert summary["stop_reason"] == "requested_stop"
+    assert summary["sample_count"] == 2 and probes == [False]
+    assert summary["steps_completed"] == 0
+    with (output / summary["event_history"]["path"]).open(encoding="utf-8") as stream:
+        first, second = [json.loads(line) for line in stream]
+    assert first["sample"]["observed_ns"] == second["sample"]["observed_ns"]
+    assert first["at_ns"] < second["at_ns"]

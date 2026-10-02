@@ -1363,3 +1363,10 @@ Ruff、407 文件格式检查、148 源文件 strict mypy 通过。完整 CPU �
 原生清单、预算、调度诊断的三文件组合 **65 passed / 1 deselected / 1.41 秒**，
 `runs/resource-schedule-budget/integrated.xml`。Ruff 与 411 文件格式检查、149 源文件
 strict mypy 已通过；实际 CPU 更新仍单独待验证。
+
+固定 `3dcb308...a45f1d8` Standards 审阅发现一处遗漏：原生资源缓存间隔仍用浮点纳秒换算。
+公开调度入口注入真实原生资源端口，使用独立大整数缓存间隔与正常调度轮询，第二次读取缓存时
+旧实现 **1 failed / 0.27 秒**，`cache-red.xml`。换成整数单位后，轻量组合
+**66 passed / 3 deselected / 1.54 秒**，`cache-green.xml`。这不是实际长时间休眠实验。
+另为真实 CPU 更新增加可选历史文件打开时的 OS/内存故障用例，与正常训练共三项，
+均等待已有完整回归释放模型测试资源后运行。

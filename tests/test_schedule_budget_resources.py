@@ -1,6 +1,7 @@
 """Explicit experiment budgets are not narrowed by unrelated admission caps."""
 
 import json
+from pathlib import Path
 
 import pytest
 from test_training_config_resources import (
@@ -189,12 +190,29 @@ def test_zero_time_allowance_stops_without_waiting_or_starting_learning(tmp_path
     assert result["steps_completed"] == 0 and result["candidate"] is None
 
 
-def test_explicit_schedule_budget_can_complete_actual_cpu_updates(tmp_path):
+@pytest.mark.parametrize("journal_error", [None, OSError, MemoryError])
+def test_explicit_schedule_budget_can_complete_actual_cpu_updates(
+    tmp_path, monkeypatch, journal_error
+):
     torch = pytest.importorskip("torch")
     from test_learning_schedule import Resources, configuration
 
     config, _, _ = configuration(tmp_path, cpu_threads=3, max_total_s=86401, poll_interval_s=6)
     output = tmp_path / "scheduled"
+    failures = []
+    opening = Path.open
+
+    def unavailable(path, mode="r", *args, **kwargs):
+        if (
+            journal_error is not None
+            and path == output / "diagnostics/schedule-events.jsonl"
+            and mode == "xb"
+        ):
+            failures.append(path)
+            raise journal_error("optional scheduler history unavailable")
+        return opening(path, mode, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", unavailable)
     summary = run_experiment(
         ScheduledBCTrain(config, output), learning_resources=Resources()
     ).summary["learning_schedule"]
@@ -206,3 +224,11 @@ def test_explicit_schedule_budget_can_complete_actual_cpu_updates(tmp_path):
     assert saved["metadata"]["resume_contract"]["cpu_threads"] == 3
     report = json.loads((output / "candidate/report.json").read_bytes())
     assert report["decisions"] and report["verification"]["status"] == "verified"
+    if journal_error is None:
+        assert failures == [] and summary["event_history"]["status"] == "complete"
+        assert summary["events_omitted"] == 0
+    else:
+        assert failures == [output / "diagnostics/schedule-events.jsonl"]
+        assert summary["event_history"]["status"] == "unavailable"
+        assert summary["events_omitted"] == summary["sample_count"] > 0
+        assert "optional scheduler history unavailable" in summary["event_history"]["error"]
