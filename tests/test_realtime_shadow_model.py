@@ -4,8 +4,10 @@ import hashlib
 import json
 
 import pytest
+from test_numeric_drive_cli import drive_config
 from test_temporal_bc import temporal_fixture
 
+from fh5.cli import main
 from fh5.experiment import run_experiment
 from fh5.numeric_images import NumericDecision, NumericInfer, PixelContract
 from fh5.numeric_recording import read_numeric_frame
@@ -15,7 +17,9 @@ from fh5.temporal_bc import TemporalBCTrain
 pytest.importorskip("torch")
 
 
-def test_shadow_source_diagnostic_keeps_old_contract_and_uses_direct_numeric_pixels(tmp_path):
+def test_shadow_source_diagnostic_keeps_old_contract_and_uses_direct_numeric_pixels(
+    tmp_path, capsys
+):
     config, dataset = temporal_fixture(tmp_path)
     data = json.loads(dataset.read_text())
     data["pixel_contract"]["origin"] = "legacy_offline"
@@ -66,3 +70,25 @@ def test_shadow_source_diagnostic_keeps_old_contract_and_uses_direct_numeric_pix
         ShadowNumericActor(
             tmp_path / "model", pixels, "0" * 64, allow_legacy_source_diagnostic=True
         )
+
+    model_bytes = (tmp_path / "model/model.json").read_bytes()
+    shared_config = drive_config(tmp_path, tmp_path / "model")
+    capture_path = tmp_path / "capture.json"
+    capture = json.loads(capture_path.read_text())
+    capture["pixels"]["origin"] = "direct_numeric"
+    capture_path.write_text(json.dumps(capture))
+    output = tmp_path / "not-created"
+    args = ["--config", str(shared_config), "--output", str(output)]
+    capsys.readouterr()
+    assert main(["realtime-shadow", *args]) == 2
+    assert "source diagnostic" in json.loads(capsys.readouterr().err)["message"]
+    assert main(["realtime-shadow", *args, "--allow-legacy-source-diagnostic"]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["legacy_source_diagnostic"]
+    assert report["training_pixel_contract"]["origin"] == "legacy_offline"
+    assert report["configuration"]["pixels"]["origin"] == "direct_numeric"
+    assert not report["devices_opened"] and not report["commands_sent_to_game"]
+    assert main(["realtime-drive", *args]) == 2
+    assert "source diagnostic" in json.loads(capsys.readouterr().err)["message"]
+    assert not output.exists()
+    assert (tmp_path / "model/model.json").read_bytes() == model_bytes

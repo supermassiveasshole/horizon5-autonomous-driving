@@ -32,8 +32,5 @@
     "reference_count": 5
   },
   "port": 5300,
-  "shadow": {
-    "directory": "../runs/new-candidate-shadow",
-    "manifest_sha256": "REPLACE_WITH_REALTIME_MANIFEST_JSON_SHA256"
-  }
+  "shadow": null
 }

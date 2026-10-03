@@ -1,4 +1,4 @@
-"""Frozen numerical driving configuration and pre-device qualification."""
+"""Shared numerical shadow/driving configuration and pre-device qualification."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import hashlib
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from fh5.capture_config import parse_capture_config
 from fh5.collection_store import read_bounded
@@ -25,17 +25,29 @@ from fh5.realtime_udp import UDPTelemetry
 class NumericDriveConfiguration:
     """Validate immutable inputs before constructing any native resource."""
 
-    def __init__(self, config_file: Path, output_dir: Path, seconds: float, live: bool) -> None:
-        raw = read_bounded(config_file, 1024**2)
+    def __init__(
+        self,
+        config_file: Path,
+        output_dir: Path,
+        seconds: float,
+        live: bool,
+        *,
+        mode: Literal["drive", "shadow", "legacy-shadow"] = "drive",
+        hz: int | None = None,
+    ) -> None:
+        raw = config_file.read_bytes()
         root = json.loads(raw)
         if (
             set(root)
             != {"version", "capture_config", "model", "task", "decision", "port", "shadow"}
             or root["version"] != 1
         ):
-            raise ValueError("Unsupported numerical driving configuration")
+            raise ValueError(
+                "Use the shared configs/realtime-drive.example.json configuration; "
+                "old shadow-only configurations must add model.manifest_sha256 and shadow: null"
+            )
         base = config_file.parent
-        capture_bytes = read_bounded(base / root["capture_config"], 1024**2)
+        capture_bytes = (base / root["capture_config"]).read_bytes()
         document = json.loads(capture_bytes)
         self.capture, self.target = parse_capture_config(document)
         if self.capture.pixels.origin != "direct_numeric":
@@ -43,13 +55,15 @@ class NumericDriveConfiguration:
         settings = dict(root["decision"])
         if "action_offsets_ms" in settings:
             settings["action_offsets_ms"] = tuple(settings["action_offsets_ms"])
+        if hz is not None:
+            settings["decision_hz"] = hz
         self.request = RealtimeRun(
             output_dir,
             RealtimeConfig(pixels=self.capture.pixels, **settings),
             seconds=seconds,
-            live=live,
+            live=live and mode == "drive",
         )
-        if seconds > 30:
+        if mode == "drive" and seconds > 30:
             raise ValueError("Numerical driving is limited to 30 seconds")
         task = dict(root["task"])
         task["route_file"] = base / task["route_file"]
@@ -61,12 +75,15 @@ class NumericDriveConfiguration:
         ] not in ("cpu", "cuda"):
             raise ValueError("Driving requires frozen model manifest and weight hashes")
         self.model_dir = base / model["directory"]
-        model_bytes = read_bounded(self.model_dir / "model.json", 4 * 1024**2)
+        model_bytes = (self.model_dir / "model.json").read_bytes()
         self.model_hash = hashlib.sha256(model_bytes).hexdigest()
         if self.model_hash != model["manifest_sha256"]:
             raise ValueError("Driving model manifest changed")
-        self.metadata, _ = shadow_model_contract(
-            self.model_dir, self.capture.pixels, model["expected_sha256"]
+        self.metadata, self.training_pixels = shadow_model_contract(
+            self.model_dir,
+            self.capture.pixels,
+            model["expected_sha256"],
+            allow_legacy_source_diagnostic=mode == "legacy-shadow",
         )
         if json.loads(model_bytes) != self.metadata:
             raise ValueError("Driving model changed during validation")
@@ -79,7 +96,9 @@ class NumericDriveConfiguration:
         self.device = model["device"]
         self.telemetry = UDPTelemetry(root["port"])
         self.bindings = {
-            "drive_config_sha256": hashlib.sha256(raw).hexdigest(),
+            "drive_config_sha256" if mode == "drive" else "shadow_config_sha256": hashlib.sha256(
+                raw
+            ).hexdigest(),
             "capture_config_sha256": hashlib.sha256(capture_bytes).hexdigest(),
             "capture_target": asdict(self.target),
             "conditions": document["input_conditions"],
@@ -87,6 +106,13 @@ class NumericDriveConfiguration:
             "model_manifest_sha256": self.model_hash,
         }
         self.bindings = json.loads(json.dumps(self.bindings))
+        self.qualification: dict[str, Any] = {
+            "eligible": False,
+            "reasons": ["read_only_mode"],
+            "shadow": None,
+        }
+        if mode != "drive":
+            return
         provenance = self.metadata.get("provenance", {})
         reasons = []
         if provenance.get("diagnostic_only") is not False:
@@ -120,7 +146,7 @@ class NumericDriveConfiguration:
         else:
             shadow, shadow_reasons = self._shadow(base, root["shadow"])
             reasons.extend(shadow_reasons)
-        self.qualification: dict[str, Any] = {
+        self.qualification = {
             "eligible": not reasons,
             "reasons": reasons,
             "shadow": shadow,

@@ -3,19 +3,16 @@
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 from dataclasses import asdict
-from typing import Any
 
-from fh5.capture_config import parse_capture_config
 from fh5.numeric_actor import FrozenNumericActor
+from fh5.numeric_drive_config import NumericDriveConfiguration
 from fh5.numeric_images import DecisionActor, PixelContract
-from fh5.realtime import RealtimeConfig, RealtimeNumericReplay, RealtimeRun
-from fh5.realtime_model import ShadowNumericActor, shadow_model_contract
+from fh5.realtime import RealtimeNumericReplay
+from fh5.realtime_model import ShadowNumericActor
 from fh5.realtime_numeric_replay import read_realtime_recording
-from fh5.realtime_shadow import LocalTask, ShadowEnvironment
-from fh5.realtime_udp import UDPTelemetry
+from fh5.realtime_shadow import ShadowEnvironment
 
 
 def replay_command(args: argparse.Namespace) -> int:
@@ -66,60 +63,15 @@ def replay_command(args: argparse.Namespace) -> int:
 def shadow_command(args: argparse.Namespace) -> int:
     from fh5.experiment import run_experiment
 
-    raw = args.config.read_bytes()
-    root = json.loads(raw)
-    if (
-        set(root) != {"version", "capture_config", "model", "task", "decision", "port"}
-        or root["version"] != 1
-    ):
-        raise ValueError("Unsupported read-only shadow configuration")
-    capture_bytes = (args.config.parent / root["capture_config"]).read_bytes()
-    document = json.loads(capture_bytes)
-    capture, target = parse_capture_config(document)
-    pixels = capture.pixels
-    if pixels.origin != "direct_numeric":
-        raise ValueError("Shadow DXGI capture requires direct numerical origin")
-    conditions = document["input_conditions"]
-    task_options = dict(root["task"])
-    task_options["route_file"] = args.config.parent / task_options["route_file"]
-    task = LocalTask(**task_options)
-    task.load()
-    settings = dict(root["decision"])
-    if "action_offsets_ms" in settings:
-        settings["action_offsets_ms"] = tuple(settings["action_offsets_ms"])
-    if args.hz is not None:
-        settings["decision_hz"] = args.hz
-    request = RealtimeRun(
-        args.output, RealtimeConfig(pixels=pixels, **settings), seconds=args.seconds
+    configuration = NumericDriveConfiguration(
+        args.config,
+        args.output,
+        args.seconds,
+        args.live,
+        mode="legacy-shadow" if args.allow_legacy_source_diagnostic else "shadow",
+        hz=args.hz,
     )
-    model = root["model"]
-    if set(model) != {"directory", "expected_sha256", "device"} or model["device"] not in (
-        "cpu",
-        "cuda",
-    ):
-        raise ValueError("Invalid shadow model configuration")
-    model_dir = args.config.parent / model["directory"]
-    metadata, trained = shadow_model_contract(
-        model_dir, pixels, model["expected_sha256"], args.allow_legacy_source_diagnostic
-    )
-    model_bytes = (model_dir / "model.json").read_bytes()
-    if json.loads(model_bytes) != metadata:
-        raise ValueError("Shadow model changed during configuration validation")
-    model_manifest_sha256 = hashlib.sha256(model_bytes).hexdigest()
-    if metadata["contract"]["actor_shape"] != {
-        "action_count": len(request.config.action_offsets_ms),
-        "reference_count": request.config.reference_count,
-    }:
-        raise ValueError("Shadow actor feature counts differ from frozen model")
-    telemetry = UDPTelemetry(root["port"])
-    bindings: dict[str, Any] = {
-        "shadow_config_sha256": hashlib.sha256(raw).hexdigest(),
-        "capture_config_sha256": hashlib.sha256(capture_bytes).hexdigest(),
-        "capture_target": asdict(target),
-        "conditions": conditions,
-        "inference_device": model["device"],
-        "model_manifest_sha256": model_manifest_sha256,
-    }
+    request = configuration.request
     if not args.live:
         print(
             json.dumps(
@@ -129,8 +81,8 @@ def shadow_command(args: argparse.Namespace) -> int:
                     "commands_sent_to_game": False,
                     "weights_loading_and_hash_verification": "performed_by_worker_on_live_start",
                     "configuration": asdict(request.config),
-                    "bindings": bindings,
-                    "training_pixel_contract": trained.metadata(),
+                    "bindings": configuration.bindings,
+                    "training_pixel_contract": configuration.training_pixels.metadata(),
                     "source_compatibility_validated": False,
                     "legacy_source_diagnostic": args.allow_legacy_source_diagnostic,
                 },
@@ -144,12 +96,12 @@ def shadow_command(args: argparse.Namespace) -> int:
 
     environment = ShadowEnvironment(
         request,
-        capture,
-        lambda: WindowsDXGIFrames(target),
-        telemetry,
+        configuration.capture,
+        lambda: WindowsDXGIFrames(configuration.target),
+        configuration.telemetry,
         WindowsDesktop(),
-        task,
-        input_conditions=bindings,
+        configuration.task,
+        input_conditions=configuration.bindings,
         resources=WindowsResources(),
     )
     print("只读影子运行：模型加载与预热后接收；不会连接手柄或发送输入。F8 停止。", flush=True)
@@ -157,12 +109,12 @@ def shadow_command(args: argparse.Namespace) -> int:
         request,
         realtime_environment=environment,
         numeric_actor_factory=lambda: ShadowNumericActor(
-            model_dir,
-            pixels,
-            model["expected_sha256"],
-            model["device"],
+            configuration.model_dir,
+            configuration.capture.pixels,
+            configuration.metadata["weights_sha256"],
+            configuration.device,
             allow_legacy_source_diagnostic=args.allow_legacy_source_diagnostic,
-            expected_manifest_sha256=model_manifest_sha256,
+            expected_manifest_sha256=configuration.model_hash,
         ),
     )
     summary = result.summary["realtime"]

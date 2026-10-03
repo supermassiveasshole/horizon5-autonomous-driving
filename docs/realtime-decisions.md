@@ -20,7 +20,7 @@
 
 ## 有界驾驶命令与条件绑定
 
-`configs/realtime-drive.example.json` 是需填写真实候选目录与 SHA-256 的模板，默认沿用 4K 采集配置。`model.expected_sha256` 是 `actor.pt` 哈希，`model.manifest_sha256` 是完整 `model.json` 哈希；`shadow.manifest_sha256` 是对应只读运行的 `realtime-manifest.json` 文件哈希。路径相对于配置文件。可暂填 `shadow: null` 查看其他缺项。
+只读预测和驾驶共用 `configs/realtime-drive.example.json`，填写一次采集、模型、任务、节拍和端口。模板默认沿用 4K 采集配置，初始 `shadow: null`。`model.expected_sha256` 是 `actor.pt` 哈希，`model.manifest_sha256` 是完整 `model.json` 哈希；路径相对于配置文件。先用这份配置运行下文的 `realtime-shadow`；取得对应实测记录后，仅将 `shadow` 改为 `{"directory":"<影子录制目录>","manifest_sha256":"<realtime-manifest.json 的 SHA-256>"}`，再检查驾驶资格。
 
 ```powershell
 uv run --locked fh5 realtime-drive --config runs/drive-config.json --output runs/numeric-drive-001 --seconds 15
@@ -42,20 +42,24 @@ uv run --locked fh5 realtime-drive --config runs/drive-config.json --output runs
 
 ## 只读命令
 
-仓库示例引用本地忽略的既有模型与局部路线，其他机器需要替换为自己的已核验资产。默认 **4K 游戏客户区 → 480×270 数值 RGB**，保持原车、调校与追尾远档；游戏实际渲染、HUD 等条件仍按配置注明待核验。
+复制并填写上述共用模板为 `runs/drive-config.json`，调整相对路径。模型与局部路线须替换为自己的已核验资产。默认 **4K 游戏客户区 → 480×270 数值 RGB**，保持原车、调校与追尾远档；游戏实际渲染、HUD 等条件仍按配置注明待核验。
 
 ```powershell
-uv run --locked fh5 realtime-shadow --config configs/realtime-shadow.example.json --output runs/shadow-001 --allow-legacy-source-diagnostic
+uv run --locked fh5 realtime-shadow --config runs/drive-config.json --output runs/shadow-001
 ```
 
-此命令只校验配置、模型声明和路线，不打开采集、UDP、CUDA 或手柄。权重文件与内嵌元数据由启动后的冻结模型 worker 再验证。示例旧模型来自 `legacy_offline`；缺少显式诊断参数会拒绝来源差异，尺寸、预处理和历史契约不匹配即使有参数也会拒绝。报告分别保留训练与当前像素契约，不能修改旧模型元数据冒充新来源训练。
+此命令只校验配置、模型清单绑定和路线，不打开采集、UDP、CUDA 或手柄。权重文件与内嵌元数据由启动后的冻结模型 worker 再验证。重新录制影子时不读取配置里的旧 `shadow` 证据；旧证据缺失或失效不会妨碍重新采集，只在驾驶资格检查时使用。
+
+旧的独立影子配置及 `realtime-shadow.example.json` 已退役，不再维护第二套解析。迁移时保留原采集、模型、任务、决策和端口，补入 `model.manifest_sha256` 及 `shadow: null`；旧模型和记录不改写。若模型来自 `legacy_offline`，仍须显式加 `--allow-legacy-source-diagnostic`；尺寸、预处理和历史契约不匹配即使有参数也会拒绝。报告保留训练与当前像素契约，不能修改旧模型元数据冒充新来源训练，也不能据此豁免驾驶资格。
 
 游戏可配合时，在已核验局部起点停稳，然后分别运行：
 
 ```powershell
-uv run --locked fh5 realtime-shadow --config configs/realtime-shadow.example.json --output runs/shadow-10hz --hz 10 --seconds 30 --allow-legacy-source-diagnostic --live
-uv run --locked fh5 realtime-shadow --config configs/realtime-shadow.example.json --output runs/shadow-20hz --hz 20 --seconds 30 --allow-legacy-source-diagnostic --live
+uv run --locked fh5 realtime-shadow --config runs/drive-config.json --output runs/shadow-10hz --hz 10 --seconds 30 --live
+uv run --locked fh5 realtime-shadow --config runs/drive-config.json --output runs/shadow-20hz --hz 20 --seconds 30 --live
 ```
+
+`--hz` 只覆盖本次只读决策频率，不改写配置。选择频率后将 `decision.decision_hz` 设为同一值，才能绑定该频率的记录用于驾驶；不同频率的证据不会互相替代。只读时长不继承驾驶的 30 秒限制。
 
 `--live` 仅启动只读采集与预测，不连接虚拟手柄、不发送任何游戏输入；F8/失焦及原有 15 km/h 等停止条件保持。总运行时间从模型预热后计算，等待合格起点与图像历史也计入。没有接受决策或资源未释放时命令返回非零，不把空跑算通过。示例的实际起点在拱门后的局部区域，并非蓝图起跑网格。资源采样另在线程运行，报告的 GPU 显存是全设备数据，不能归因于截图。
 

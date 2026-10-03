@@ -140,4 +140,4 @@ uv run --locked ruff format --check .
 
 #36 已有[容错数值决策软件切片](docs/realtime-decisions.md)：常驻推理、缺帧跳过、绝对动作租期和独立监督通过故障回放及真实线程测试。`fh5 realtime-shadow` 默认只校验，显式 `--live` 才组合 DXGI、UDP、独立任务几何和冻结 Δt 模型做只读预测；不会连接虚拟手柄。组合通过合成像素与回环 UDP 验证，实际 FH5 的 10/20 Hz 性能和页面交互仍待验收。
 
-当前模型驾驶入口为 `fh5 realtime-drive`，使用数值 Δt BC 与新的驾驶配置，默认只校验，显式 `--live` 才连接控制；用法与所需条件见[数值驾驶说明](docs/realtime-decisions.md#有界驾驶命令与条件绑定)。旧 `policy` 在线入口已退役，旧模型和 JSON 不自动转发；旧录制仍可离线回放，见[迁移说明](docs/policy-driving.md)。
+当前模型驾驶入口为 `fh5 realtime-drive`，使用数值 Δt BC。只读预测与驾驶共用 `configs/realtime-drive.example.json`：先保持 `shadow: null` 运行 `realtime-shadow`，取得对应实测记录后只补入证据引用，再运行 `realtime-drive`。两者默认只校验；影子的 `--live` 只采集和预测，驾驶的 `--live` 才可能连接控制，且仍需通过资格核验。用法与旧影子配置迁移见[数值驾驶说明](docs/realtime-decisions.md#有界驾驶命令与条件绑定)。旧 `policy` 在线入口已退役，旧模型和 JSON 不自动转发；旧录制仍可离线回放，见[迁移说明](docs/policy-driving.md)。
