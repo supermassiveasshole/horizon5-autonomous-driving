@@ -63,7 +63,7 @@ class LearningLoop:
 @dataclass(frozen=True)
 class LearningContinue:
     run_dir: Path
-    expected_state_sha256: str
+    expected_state_sha256: str | None = None
 
 
 class LearningEnvironment(Protocol):
@@ -370,11 +370,12 @@ class _Loop:
     def stopped(self) -> bool:
         return self.stopping_reason() is not None
 
-    def restore(self, expected: str) -> bool:
+    def restore(self, expected: str | None) -> bool:
         path = self.root / "state.json"
-        if _sha(path) != expected:
+        current = _sha(path)
+        if expected is not None and current != expected:
             raise ValueError("Learning continuation state changed")
-        state = read_json(path, expected_sha256=expected)
+        state = read_json(path, expected_sha256=current)
         if (
             state["version"] != 1
             or state["scope"] != "synthetic_development_only"

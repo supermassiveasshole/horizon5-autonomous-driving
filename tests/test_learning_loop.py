@@ -185,7 +185,7 @@ def test_resume_evaluates_the_saved_learner_without_sampling_or_updating_it_twic
 
     backend = SharedBackend(seeded_loop[0])
     result = run_experiment(
-        LearningContinue(request.output_dir, sha(request.output_dir / "state.json")),
+        LearningContinue(request.output_dir),
         learning_environment=backend,
     ).summary["learning_loop"]
     assert result["stop_reason"] == "budget_completed"
@@ -508,16 +508,14 @@ def test_continuation_verifies_sampling_originals_and_external_review(tmp_path, 
         backend = SharedBackend(seeded_loop[0])
         try:
             with pytest.raises(ValueError, match="sampling.*changed"):
-                run_experiment(
-                    LearningContinue(request.output_dir, sha(state)), learning_environment=backend
-                )
+                run_experiment(LearningContinue(request.output_dir), learning_environment=backend)
             assert state.read_bytes() == original_state
             assert not backend.leases and backend.closed
         finally:
             path.write_bytes(raw)
     backend = SharedBackend(seeded_loop[0])
     resumed = run_experiment(
-        LearningContinue(request.output_dir, sha(state)), learning_environment=backend
+        LearningContinue(request.output_dir), learning_environment=backend
     ).summary["learning_loop"]
     assert resumed["stop_reason"] == "budget_completed"
     assert resumed["learner_updates"] == 3

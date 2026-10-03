@@ -101,9 +101,9 @@ def test_remaining_updates_finish_once_and_match_uninterrupted_learning(tmp_path
     }
     (root / "stop.request").unlink()
     backend = SharedBackend(seeded_loop[0])
-    result = run_experiment(
-        LearningContinue(root, sha(root / "state.json")), learning_environment=backend
-    ).summary["learning_loop"]
+    result = run_experiment(LearningContinue(root), learning_environment=backend).summary[
+        "learning_loop"
+    ]
     assert result["stop_reason"] == "budget_completed", result.get("error")
     assert result["rounds_completed"] == 1
     assert result["eligible_transitions"] == result["learner_updates"] == 3
@@ -118,7 +118,7 @@ def test_remaining_updates_finish_once_and_match_uninterrupted_learning(tmp_path
     assert all(path.read_bytes() == raw for path, raw in originals.items())
     completed_backend = SharedBackend(seeded_loop[0])
     completed = run_experiment(
-        LearningContinue(root, sha(root / "state.json")), learning_environment=completed_backend
+        LearningContinue(root), learning_environment=completed_backend
     ).summary["learning_loop"]
     assert completed["stop_reason"] == "budget_completed"
     assert completed["rounds_completed"] == 1 and completed["learner_updates"] == 3
