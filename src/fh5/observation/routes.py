@@ -6,8 +6,12 @@ import hashlib
 import json
 import math
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path
 from typing import Any
+
+from fh5.artifacts.document import read_document_fields
+from fh5.artifacts.io import VerifiedFile, sha256_file
 
 UNLOCATED_ROUTE_STATUSES = frozenset(
     {"ambiguous", "outside_reference", "inactive", "discontinuity"}
@@ -307,22 +311,31 @@ def build_route(request: BuildRoute, samples: list[dict[str, Any]]) -> dict[str,
 
 
 def load_route(path: Path) -> dict[str, Any]:
-    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest = read_document_fields(
+        VerifiedFile(path, sha256_file(path)), {"version", "assets", "evidence", "source"}
+    )
     try:
         if type(manifest["version"]) is not int or manifest["version"] != 1:
             raise ValueError("Unsupported route version")
         if set(manifest["assets"]) != {"reference", "corridor", "checkpoints"}:
             raise ValueError("Missing route assets")
         evidence_paths = set()
-        for asset in [*manifest["assets"].values(), *manifest["evidence"]]:
+        for asset in chain(manifest["assets"].values(), manifest["evidence"]):
             file = (path.parent / asset["path"]).resolve()
             if not file.is_relative_to(path.parent.resolve()):
                 raise ValueError("Route asset outside bundle")
-            if hashlib.sha256(file.read_bytes()).hexdigest() != asset["sha256"]:
+            if sha256_file(file) != asset["sha256"]:
                 raise ValueError("Route asset hash mismatch")
             evidence_paths.add(asset["path"])
+        fields = {
+            "reference": {"version", "points", "review"},
+            "corridor": {"version", "sections"},
+            "checkpoints": {"version", "gates", "review"},
+        }
         data = {
-            name: json.loads((path.parent / asset["path"]).read_text(encoding="utf-8"))
+            name: read_document_fields(
+                VerifiedFile(path.parent / asset["path"], asset["sha256"]), fields[name]
+            )
             for name, asset in manifest["assets"].items()
         }
         if any(type(d["version"]) is not int or d["version"] != 1 for d in data.values()):

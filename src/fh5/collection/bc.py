@@ -8,6 +8,7 @@ import math
 from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass
+from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -81,7 +82,7 @@ def _reference(
     config: dict[str, Any],
     base: Path,
     sources: list[dict[str, Any]],
-) -> tuple[dict[str, bytes], dict[str, Any]]:
+) -> tuple[dict[str, VerifiedFile], dict[str, Any]]:
 
     setting = config.get("reference")
     if setting is None:
@@ -93,20 +94,18 @@ def _reference(
     ):
         raise ValueError("Optional reference requires explicit independent-source evidence")
     path = base / setting["route_file"]
-    raw = read_bounded(path, 4 * 1024**2)
-    manifest = json.loads(raw)
+    source = VerifiedFile(path, sha256_file(path))
+    manifest = read_document_fields(source, {"assets", "evidence", "source"})
     if manifest["source"]["session_sha256"] in {s["session_sha256"] for s in sources}:
         raise ValueError("Collection cannot provide its own future navigation reference")
-    files = {"route.json": raw}
-    for entry in [*manifest["assets"].values(), *manifest["evidence"]]:
-        payload = read_bounded(asset(path.parent, entry["path"]), 32 * 1024**2)
-        if hashlib.sha256(payload).hexdigest() != entry["sha256"]:
+    files = {"route.json": source}
+    for entry in chain(manifest["assets"].values(), manifest["evidence"]):
+        dependency = VerifiedFile(asset(path.parent, entry["path"]), entry["sha256"])
+        if sha256_file(dependency.path) != dependency.sha256:
             raise ValueError("Reference asset differs from frozen hash")
-        if entry["path"] in files and files[entry["path"]] != payload:
+        if entry["path"] in files and files[entry["path"]].sha256 != dependency.sha256:
             raise ValueError("Conflicting reference asset path")
-        files[entry["path"]] = payload
-        if sum(map(len, files.values())) > 64 * 1024**2:
-            raise ValueError("Reference exceeds 64 MiB preparation budget")
+        files[entry["path"]] = dependency
     # Load the copied bundle below, so concurrent changes to the source cannot
     # alter the waypoint inputs after these hashes were recorded.
     return (
@@ -114,7 +113,7 @@ def _reference(
         {
             "status": "loaded",
             "paired_views_identical": False,
-            "route_sha256": hashlib.sha256(raw).hexdigest(),
+            "route_sha256": source.sha256,
             "independence_evidence": setting["independence_evidence"],
             "source": manifest["source"],
         },
@@ -214,10 +213,10 @@ def _export(
     selection = request.output_dir / "selection.json"
     write_replay_document(selection, data)
     digest = sha256_file(selection)
-    for name, payload in reference_files.items():
+    for name, dependency in reference_files.items():
         destination = asset(request.output_dir / "reference", name)
         destination.parent.mkdir(parents=True, exist_ok=True)
-        write_file(destination, payload)
+        dependency.copy_to(destination)
     if reference_files:
         reference = load_route(request.output_dir / "reference/route.json")
     partitions = {
