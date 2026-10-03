@@ -451,7 +451,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     temporal_replay.add_argument("--report", type=Path, required=True)
     temporal_replay.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     numeric_prepare = commands.add_parser(
-        "numeric-prepare", help="Decode legacy BC images once into a numerical offline source"
+        "numeric-prepare", help="Retired: use temporal-prepare for historical training data"
     )
     numeric_prepare.add_argument("--model", type=Path, required=True)
     numeric_prepare.add_argument("--dataset", type=Path, required=True)
@@ -818,7 +818,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return capture_command(args)
         if args.mode in ("temporal-prepare", "temporal-train", "temporal-replay"):
             return _temporal_command(args)
-        if args.mode in ("numeric-prepare", "numeric-infer", "numeric-replay"):
+        if args.mode == "numeric-prepare":
+            raise ValueError(
+                "numeric-prepare is retired. Use temporal-prepare to import historical "
+                "demonstrations for new temporal training, or collection-bc-prepare for new "
+                "numeric recordings. Existing prepared packages remain readable with "
+                "numeric-infer; frozen v1 models remain readable with bc-replay. "
+                "Single-frame data cannot provide temporal training history."
+            )
+        if args.mode in ("numeric-infer", "numeric-replay"):
             return _numeric_command(args)
         if args.mode == "input-devices":
             from fh5.live_demonstration import input_devices
@@ -1292,20 +1300,9 @@ def _temporal_command(args: argparse.Namespace) -> int:
 def _numeric_command(args: argparse.Namespace) -> int:
     from fh5.numeric_actor import FrozenNumericActor
     from fh5.numeric_images import NumericInfer, NumericReplay, PixelContract
-    from fh5.numeric_import import LegacyNumericImport, PreparedNumericSource
+    from fh5.numeric_import import PreparedNumericSource
 
-    if args.mode == "numeric-prepare":
-        result = run_experiment(
-            LegacyNumericImport(
-                args.model,
-                args.dataset,
-                args.output,
-                args.max_decisions,
-                args.view,
-            )
-        )
-        summary = result.summary["numeric_import"]
-    elif args.mode == "numeric-infer":
+    if args.mode == "numeric-infer":
         source = PreparedNumericSource(args.recording)
         actor = FrozenNumericActor(
             args.model, source.contract, args.device, legacy_diagnostic=args.legacy_diagnostic
@@ -1355,10 +1352,7 @@ def _numeric_command(args: argparse.Namespace) -> int:
             or summary.get("replay_errors")
             or summary.get("archive", {}).get("error")
             or not summary.get("source_released", True)
-            or (
-                args.mode != "numeric-prepare"
-                and not any(d.get("status") == "predicted" for d in decisions)
-            )
+            or not any(d.get("status") == "predicted" for d in decisions)
         )
         else 0
     )

@@ -82,7 +82,6 @@ from fh5.numeric_images import (
     NumericReplay,
     run_numeric,
 )
-from fh5.numeric_import import LegacyNumericImport, prepare_legacy
 from fh5.observations import ObservationReplay, build_observations, read_settings
 from fh5.perception import (
     Perception,
@@ -294,7 +293,6 @@ def run_experiment(
     | TemporalBCPrepare
     | TemporalBCTrain
     | TemporalBCReplay
-    | LegacyNumericImport
     | NumericInfer
     | NumericReplay
     | AttemptReplay
@@ -428,8 +426,6 @@ def run_experiment(
         return review_collection_dataset(request)
     if isinstance(request, (TemporalBCTrain, TemporalBCReplay)):
         return run_temporal_bc(request)
-    if isinstance(request, LegacyNumericImport):
-        return prepare_legacy(request)
     if isinstance(request, (NumericInfer, NumericReplay)):
         if numeric_actor is None:
             raise ValueError("Numerical inference requires an explicit frozen actor")

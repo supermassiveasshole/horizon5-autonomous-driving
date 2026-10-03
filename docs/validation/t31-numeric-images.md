@@ -2,6 +2,8 @@
 
 日期：2026-09-30。关联 #33。当前为离线软件与真实历史数据验证；页面交互仍待验收，票保持开放。不启动游戏或创建虚拟手柄。
 
+维护说明（2026-10-03）：以下保留当时的原始验证记录。旧 `numeric-prepare` 创建实现已退役；已有准备包的数值推理与回放继续支持，新历史训练数据改走 `temporal-prepare`，见[当前使用说明](../numeric-images.md)。
+
 ## 已有真实数据端到端
 
 - 原数据：`runs/t27-dataset-reviewed/dataset.json`，SHA-256 `3bdcda186644bbbfc85907e48880a32ebc23dd62290424cebca17dad9f098cbb`。

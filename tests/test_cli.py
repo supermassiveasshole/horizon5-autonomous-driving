@@ -17,9 +17,14 @@ from fh5.cli import main
 @pytest.mark.parametrize(
     ("command", "replacement", "flags"),
     [
-        ("policy", "realtime-drive", ["--live"]),
-        ("collection-dataset", "collection-bc-prepare", []),
-        ("bc-train", "temporal-prepare", []),
+        ("policy", "realtime-drive", ["--config", "old-config.json", "--live"]),
+        ("collection-dataset", "collection-bc-prepare", ["--config", "old-config.json"]),
+        ("bc-train", "temporal-prepare", ["--config", "old-config.json"]),
+        (
+            "numeric-prepare",
+            "temporal-prepare",
+            ["--model", "old-model", "--dataset", "old-dataset.json"],
+        ),
     ],
 )
 def test_retired_command_explains_migration_before_reading_old_assets(
@@ -29,8 +34,6 @@ def test_retired_command_explains_migration_before_reading_old_assets(
     result = main(
         [
             command,
-            "--config",
-            str(tmp_path / "old-config.json"),
             "--output",
             str(output),
             *flags,

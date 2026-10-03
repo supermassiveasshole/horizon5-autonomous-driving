@@ -304,14 +304,10 @@ def test_invalid_snapshot_never_produces_a_candidate(tmp_path, fault):
     assert not (tmp_path / "model").exists()
 
 
-def test_legacy_preparation_reselects_only_available_frames_and_trains_without_codecs(
-    tmp_path, monkeypatch
-):
-    from PIL import Image
+def legacy_preparation(tmp_path):
     from test_demonstrations import dataset_fixture
 
     from fh5.demonstration_dataset import DemonstrationDataset
-    from fh5.temporal_bc import TemporalBCTrain
     from fh5.temporal_import import TemporalBCPrepare
 
     run_experiment(
@@ -333,7 +329,27 @@ def test_legacy_preparation_reselects_only_available_frames_and_trains_without_c
             }
         )
     )
-    result = run_experiment(TemporalBCPrepare(config, tmp_path / "prepared"))
+    return TemporalBCPrepare(config, tmp_path / "prepared")
+
+
+@pytest.mark.parametrize("filename", ["vision.jsonl", "demonstration-session.json"])
+def test_temporal_preparation_rejects_changed_bound_source_evidence(tmp_path, filename):
+    request = legacy_preparation(tmp_path)
+    with (tmp_path / "train" / filename).open("ab") as stream:
+        stream.write(b"\n")
+    with pytest.raises(ValueError):
+        run_experiment(request)
+    assert not request.output_dir.exists()
+
+
+def test_legacy_preparation_reselects_only_available_frames_and_trains_without_codecs(
+    tmp_path, monkeypatch
+):
+    from PIL import Image
+
+    from fh5.temporal_bc import TemporalBCTrain
+
+    result = run_experiment(legacy_preparation(tmp_path))
     summary = result.summary["temporal_import"]
     assert summary["decoded_unique_frames"] > 0
     assert summary["jitter_variants"] > 0

@@ -1,20 +1,19 @@
 # 数值输入与精确回放
 
-T31 / GitHub #33 增加离线数值路径：准备 → 冻结策略 → 异步存档 → 精确回放。统一通过 `run_experiment`，不创建虚拟手柄、不启动 FH5。当前旧 BC 权重只用于显式兼容诊断；DXGI、显式 Δt 模型和容错实机决策分别由 #34、#35、#36 接续。
+本文说明数值输入契约及已有 T31 / #33 离线包的读取。`numeric-prepare` / `LegacyNumericImport` 的旧模型绑定导入实现已退役；新历史训练数据统一用 [temporal-prepare](temporal-bc.md)，新数值采集用 [collection-bc-prepare](collection-datasets.md)。二者均不要求先创建一个旧 BC 模型。
+
+已有 `prepared.json` 包继续通过 `numeric-infer` 读取，已有 `numeric-run.json` 继续精确回放。原始数据和旧权重不改写；仅有原始单帧数据时仍可用 [bc-replay](bc.md) 诊断旧模型，不能承诺转换为 Δt 训练历史。这不是旧导入的同格式替换，不再创建新的单视图、模型绑定诊断包。
 
 ## 命令
 
-需要 `uv sync --locked --extra learning`。以下使用已有本地资产，输出目录/报告名必须未存在。
+需要 `uv sync --locked --extra learning`。以下读取已经保存的准备包，输出目录/报告名必须未存在。
 
 ```powershell
-uv run --locked fh5 numeric-prepare --model runs/t28-bc-initial --dataset runs/t27-dataset-reviewed/dataset.json --output runs/numeric-prepared --max-decisions 200
 uv run --locked fh5 numeric-infer runs/numeric-prepared --model runs/t28-bc-initial --output runs/numeric-inference --legacy-diagnostic --archive-capacity 256 --archive-mib 256
 uv run --locked fh5 numeric-replay runs/numeric-inference --model runs/t28-bc-initial --report runs/numeric-replayed.html --legacy-diagnostic
 ```
 
-准备阶段核对模型绑定的数据集、原遥测、观测与压缩图像依据；每个选中的源图像只解码一次并缩放，生成 RGB 数值资产。原文件不改动。可用 `--view reference_assisted` 检查有参考视图，默认 `no_reference`。
-
-准备前还核对数据集绑定的示范 manifest 及其全部源文件哈希，重新从遥测和已绑定日志计算历史边界，拒绝被修改的时间/布局或边界。示范中的当前动作、标签时间和未来监督项单独保存为 `supervision` 证据，可与预测比较；它们从不传入 actor。
+包中已固定视图、源时间和数值资产。示范中的当前动作、标签时间和未来监督项作为 `supervision` 证据保存，从不传入 actor。读取时继续核对像素哈希及时间/布局契约；原有数据的准备过程与核验证据见 [T31 历史记录](validation/t31-numeric-images.md)。
 
 `numeric-infer` 默认 CPU，可选 `--device cuda`。加载权重和准备 manifest 发生在执行前；源工作线程预读数值资产，决策线程只接收拥有独立存储的数值帧并调用模型。旧 JPEG 不进入这个阶段。`--legacy-diagnostic` 必须显式给出；这不表示权重适用于新 DXGI 分布，也不证明实时性能。
 
@@ -25,7 +24,7 @@ uv run --locked fh5 numeric-replay runs/numeric-inference --model runs/t28-bc-in
 - 每帧保存 `frame_id`、`epoch`、源时间、时间质量与不确定性、接收时间、预处理可用时间、预处理版本及源布局。三个时刻使用同一单调时钟域且依次不减；可用时间不得晚于决策。相邻帧源时间严格前进，禁止重复图像、跨 epoch 或混合布局。
 - 生产者负责在暂停、倒带、重开、相机/HUD 或尺寸语义变化时递增 epoch。接口检查提交的边界，不从像素猜测游戏状态。现有离线导入沿用原观测的前向片段边界。
 - 历史数据保留 `capture_start_proxy` 与未知不确定性；`legacy_encoded_delivery_proxy` 表示历史编码交付时刻。它不是实测数值预处理延迟，更不是 DXGI 呈现时间。
-- 模型继续使用原 BC 的本车、因果动作、图像年龄及可选航点特征。显式帧间 Δt 待 #35；不得把旧模型年龄特征等同于已实现的新 Δt 方案。
+- v1 模型使用本车、因果动作、图像年龄及可选航点特征。当前 v2 模型的显式帧间 Δt 见[时间契约](temporal-bc.md#时间和模型契约)；旧模型的年龄特征不等同于 Δt 模型。
 
 ## 记录和资源
 
@@ -43,4 +42,4 @@ uv run --locked fh5 numeric-replay runs/numeric-inference --model runs/t28-bc-in
 
 回放逐项检查数值资产哈希、元数据与汇总一致性、像素契约、输入特征和预测容差（默认 `1e-6`）。展示图缺失/改变不影响数值预测；数值资产缺失、被篡改或越过记录目录会产生 `replay_errors`。这是完整性核对，不是防恶意重写全部 manifest 的签名方案。
 
-旧 `record/replay`、`vision/observe`、BC 工具及旧 `policy` 后端继续保留。**旧 `policy --live` 尚未切换到数值管线**，不能据本票的离线结果直接恢复实机驾驶。验证证据见 [T31 记录](validation/t31-numeric-images.md)。
+当前在线入口是 [realtime-drive](realtime-decisions.md)，旧 `policy` 在线实现已退役。离线数值结果不构成实机驾驶资格；历史证据见 [T31 记录](validation/t31-numeric-images.md)。

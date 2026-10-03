@@ -136,7 +136,7 @@ uv run --locked ruff format --check .
 
 新 BC 训练统一走下述数值 Δt 路径；旧 `bc-train` 已退役，旧模型仍可通过 `fh5 bc-replay` 离线诊断。历史数据可在满足时间契约后导入并重新训练，不转换旧权重或改写原件，见[迁移说明](docs/bc.md)。首轮旧模型结果保留在 [T27 验证](docs/validation/t27-bc.md)。
 
-#35 新增 `fh5 temporal-prepare`、`temporal-train`、`temporal-replay`：历史画面仅在导入时解码，训练与推理使用数值像素和明确的帧间 Δt。支持实际/固定时间对照及冻结输入/预测核验，见[数值 Δt BC](docs/temporal-bc.md)和[离线验证](docs/validation/t33-temporal-bc.md)。数值 Δt BC 已接入实时驾驶软件路径；首轮结果未证明 Δt 收益或起步能力，实机驾驶仍待验收。
+#35 的 `fh5 temporal-prepare`、`temporal-train`、`temporal-replay` 负责历史训练数据导入、数值 Δt BC 与冻结重载。历史画面只在导入时解码，不需要先有旧模型；重复的 `numeric-prepare` 创建路径已退役，已有数值包仍可离线读取。时间对照及迁移限制见[数值 Δt BC](docs/temporal-bc.md)，历史结果见[离线验证](docs/validation/t33-temporal-bc.md)。数值 Δt BC 已接入实时驾驶软件路径；首轮结果未证明 Δt 收益或起步能力，实机驾驶仍待验收。
 
 #34 已有 [DXGI 数值采集基础入口](docs/dxgi-capture.md)，`fh5 capture-dxgi` 默认只校验配置。独立采集/预处理、最新待处理槽和带 QPC 时间的历史支持软件验证；原生动态采集、性能对照与页面交互仍待验收，不构成实时驾驶通过。
 

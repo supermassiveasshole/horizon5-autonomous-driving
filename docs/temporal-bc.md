@@ -2,6 +2,8 @@
 
 对应 #35。`temporal-prepare` → `temporal-train` → `temporal-replay` 经实验入口完成离线准备、训练和冻结重载，不启动游戏或连接虚拟手柄。当前先使用历史示范；DXGI 原生时间与新采集分布仍需 #34/#37/#38。
 
+历史训练数据只保留此导入入口，不需要旧模型。旧 `numeric-prepare` 已退役，已有准备包及数值推理记录仍可[离线读取](numeric-images.md)；这里输出训练用 `dataset.json`，不替换旧单视图 `prepared.json` 或转换旧权重。Δt 模型至少需要两帧有效历史，无法从单帧补造。
+
 ## 准备与训练
 
 ```powershell
