@@ -130,14 +130,18 @@ def test_native_loop_requires_explicit_live_opt_in_before_opening_devices(tmp_pa
                 "recording": "record.json",
                 "task": "task.json",
                 "reward": "reward.json",
-                "rounds": 2,
+                # These explicit budgets exceed the old arbitrary parser caps;
+                # validation must reach live opt-in without opening any device.
+                "rounds": 11,
                 "sampling": {
                     "runtime": {**asdict(runtime), "pixels": runtime.pixels.metadata()},
-                    "seconds": 1.5,
-                    "max_updates": 2,
+                    "seconds": 601,
+                    "max_updates": 1001,
                 },
                 "evaluation_seconds": 5,
                 "seed": 191,
+                "acquisition_retry": {"max_retries": 4, "delay_seconds": 6},
+                "sampling_retry": {"max_retries": 4},
             }
         )
     )

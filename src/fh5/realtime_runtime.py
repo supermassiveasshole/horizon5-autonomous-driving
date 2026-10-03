@@ -40,6 +40,7 @@ def run_realtime(
     archive = NumericArchive(request.output_dir, 8, 32 * 1024**2)
     archive_bytes = 0
     done = threading.Event()
+    supervisor_wakeup = threading.Event()
     lock = threading.Lock()
     state = DecisionState(
         request.config,
@@ -48,7 +49,7 @@ def run_realtime(
         executed_history=environment.source_kind != "shadow",
         notify=journal.submit,
     )
-    worker = InferenceWorker(factory, request.config)
+    worker = InferenceWorker(factory, request.config, notify=supervisor_wakeup.set)
     latest: RealtimeObservation | None = None
 
     def collect_result() -> None:
@@ -90,6 +91,9 @@ def run_realtime(
     def supervise() -> None:
         try:
             while not done.is_set():
+                # Clear before inspecting the queue, so publication during this
+                # pass cannot be lost between queue inspection and the wait.
+                supervisor_wakeup.clear()
                 focused, stop = environment.signals()
                 with lock:
                     if state.safety:
@@ -103,7 +107,7 @@ def run_realtime(
                         state.stop(time.perf_counter_ns(), "inference_worker_error")
                     if state.stop_reason:
                         done.set()
-                done.wait(0.005)
+                supervisor_wakeup.wait(0.005)
         except Exception as error:
             with lock:
                 state.stop(time.perf_counter_ns(), f"supervisor_error: {error}")
@@ -192,6 +196,7 @@ def run_realtime(
             state.stop(time.perf_counter_ns(), "time_limit")
         ended = time.perf_counter_ns()
         done.set()
+        supervisor_wakeup.set()
         for thread in threads:
             thread.join(timeout=0.5)
         inference = worker.close()

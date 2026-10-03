@@ -333,12 +333,12 @@ def test_capacity_loss_during_retry_prevents_a_second_acquisition(tmp_path, seed
 @pytest.mark.parametrize(
     "retry",
     [
-        {"max_retries": 1_000_000, "delay_seconds": 0},
+        {"max_retries": -1, "delay_seconds": 0},
         {"max_retries": 1, "delay_seconds": float("inf")},
         {"max_retries": True, "delay_seconds": 0},
     ],
 )
-def test_unbounded_or_ambiguous_retry_policy_is_rejected_before_opening(tmp_path, retry):
+def test_invalid_or_ambiguous_retry_policy_is_rejected_before_opening(tmp_path, retry):
     config = {
         "version": 1,
         "store": {"directory": "unused", "revision": "unused"},

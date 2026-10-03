@@ -28,8 +28,15 @@ class WorkerResult:
 
 
 class InferenceWorker:
-    def __init__(self, factory: Callable[[], DecisionActor], config: RealtimeConfig) -> None:
+    def __init__(
+        self,
+        factory: Callable[[], DecisionActor],
+        config: RealtimeConfig,
+        *,
+        notify: Callable[[], None] | None = None,
+    ) -> None:
         self.factory, self.config = factory, config
+        self.notify = notify
         self.requests: Queue[Work] = Queue(1)
         self.results: Queue[WorkerResult] = Queue(1)
         self.ready, self.done = threading.Event(), threading.Event()
@@ -168,10 +175,14 @@ class InferenceWorker:
                 self.results.put_nowait(
                     WorkerResult(work, started, time.perf_counter_ns(), features, prediction, error)
                 )
+                if self.notify is not None:
+                    self.notify()
         except Exception as failure:
             self.error = f"{type(failure).__name__}: {failure}"
         finally:
             self.ready.set()
+            if self.notify is not None:
+                self.notify()
 
     def close(self) -> dict[str, Any]:
         self.done.set()
