@@ -2,14 +2,14 @@
 
 import hashlib
 import json
+from dataclasses import replace
 
 import pytest
-from test_bc import setup_bc
+from test_bc import legacy_model
 from test_collection_dataset import dataset_inputs
 from test_numeric_images import actor_state
 from test_temporal_bc import temporal_fixture
 
-from fh5.bc import BCReplay
 from fh5.collection_bc import CollectionBCPrepare
 from fh5.experiment import run_experiment
 from fh5.numeric_images import (
@@ -104,30 +104,22 @@ def test_temporal_bc_learns_and_replays_real_rgb_beyond_old_dimension_bounds(tmp
 
 
 @pytest.mark.parametrize("size", DIMENSIONS)
-def test_legacy_bc_learns_at_explicit_resize_shape_and_replays_exactly(tmp_path, size):
-    request = setup_bc(tmp_path)
-    settings = json.loads(request.config_file.read_bytes())
-    settings.update(image_size=list(size), steps=1, batch_size=2)
-    request.config_file.write_text(json.dumps(settings), encoding="utf-8")
-    trained = run_experiment(request).summary["bc"]
-    assert trained["training"]["steps_completed"] == 1
-    assert trained["training"]["visual_gradient_l1"] > 0
-    assert trained["training"]["visual_parameter_change_l1"] > 0
-    assert trained["contract"]["image_size"] == list(size)
-    assert trained["preprocessing"]["size"] == list(size)
-    assert (
-        trained["training"]["train_examples_by_view"]["no_reference"]
-        == trained["training"]["train_examples_by_view"]["reference_assisted"]
-    )
-    assert trained["visual_intervention"]["mean_action_change"] > 0
-    original_weights = (request.output_dir / "actor.pt").read_bytes()
-    assert trained["weights_sha256"] == hashlib.sha256(original_weights).hexdigest()
-    replayed = run_experiment(
-        BCReplay(request.output_dir, tmp_path / "data/dataset.json", tmp_path / "replayed.html")
-    ).summary["bc"]
-    assert replayed["predictions"] == trained["predictions"]
-    assert replayed["training"]["reload_max_abs_error"] == 0
-    assert (request.output_dir / "actor.pt").read_bytes() == original_weights
+def test_legacy_bc_replays_the_saved_resize_shape_without_training(tmp_path, size):
+    request = legacy_model(tmp_path, image_size=size)
+    original_weights = (request.model_dir / "actor.pt").read_bytes()
+    original_manifest = (request.model_dir / "model.json").read_bytes()
+    baseline = run_experiment(request).summary["bc"]
+    assert baseline["training"]["steps_completed"] == 0
+    assert baseline["contract"]["image_size"] == list(size)
+    assert baseline["preprocessing"]["size"] == list(size)
+    assert baseline["weights_sha256"] == hashlib.sha256(original_weights).hexdigest()
+    replayed = run_experiment(replace(request, report_path=tmp_path / "replayed.html")).summary[
+        "bc"
+    ]
+    assert replayed["predictions"] == baseline["predictions"]
+    assert replayed["training"]["steps_completed"] == 0
+    assert (request.model_dir / "actor.pt").read_bytes() == original_weights
+    assert (request.model_dir / "model.json").read_bytes() == original_manifest
 
 
 @pytest.mark.parametrize("size", ((641, 32), (1, 1)))
@@ -181,20 +173,13 @@ def test_collection_prepares_original_rgb_shape_then_learns_and_replays(tmp_path
     verify_temporal_roundtrip(train_config, dataset, tmp_path / "model", size, expected_ids)
 
 
-@pytest.mark.parametrize("kind", ("temporal", "legacy"))
 @pytest.mark.parametrize("size", ([0, 32], [-1, 32], [True, 32], [32], [32, 1.5]))
-def test_bc_rejects_nonpositive_noninteger_or_incomplete_dimensions(tmp_path, kind, size):
-    if kind == "temporal":
-        config, dataset = temporal_fixture(tmp_path)
-        document = json.loads(dataset.read_bytes())
-        document["pixel_contract"]["size"] = size
-        bind_dataset(config, dataset, document)
-        request = TemporalBCTrain(config, tmp_path / "model")
-    else:
-        request = setup_bc(tmp_path)
-        settings = json.loads(request.config_file.read_bytes())
-        settings["image_size"] = size
-        request.config_file.write_text(json.dumps(settings), encoding="utf-8")
+def test_bc_rejects_nonpositive_noninteger_or_incomplete_dimensions(tmp_path, size):
+    config, dataset = temporal_fixture(tmp_path)
+    document = json.loads(dataset.read_bytes())
+    document["pixel_contract"]["size"] = size
+    bind_dataset(config, dataset, document)
+    request = TemporalBCTrain(config, tmp_path / "model")
     with pytest.raises(ValueError, match="dimensions|image size"):
         run_experiment(request)
     assert not request.output_dir.exists()

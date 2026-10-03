@@ -8,7 +8,6 @@ import pytest
 from test_bc_loss_resources import loss_values
 from test_temporal_bc import temporal_fixture
 
-from fh5.bc import BCTrain
 from fh5.experiment import run_experiment
 from fh5.temporal_bc import TemporalBCReplay, TemporalBCTrain
 
@@ -109,18 +108,12 @@ def test_explicit_large_bc_batch_consumes_all_129_observations_and_replays_exact
 
 
 @pytest.mark.parametrize("batch_size", [0, True, 259])
-@pytest.mark.parametrize("kind", ["temporal", "legacy"])
-def test_bc_rejects_nonpositive_noninteger_and_unpaired_batches(tmp_path, batch_size, kind):
+def test_bc_rejects_nonpositive_noninteger_and_unpaired_batches(tmp_path, batch_size):
     config, _ = temporal_fixture(tmp_path)
     settings = json.loads(config.read_bytes())
     settings["batch_size"] = batch_size
-    if kind == "legacy":
-        settings.pop("time_mode")
-        settings.pop("dataset_sha256")
-        settings["image_size"] = [64, 36]
     config.write_text(json.dumps(settings), encoding="utf-8")
     output = tmp_path / "model"
-    request = TemporalBCTrain(config, output) if kind == "temporal" else BCTrain(config, output)
     with pytest.raises(ValueError, match="[Bb]atch"):
-        run_experiment(request)
+        run_experiment(TemporalBCTrain(config, output))
     assert not output.exists()

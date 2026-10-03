@@ -1,4 +1,4 @@
-"""Bounded offline BC training, frozen prediction and transparent diagnostics."""
+"""Archived BC replay and shared observation/configuration helpers."""
 
 from __future__ import annotations
 
@@ -8,14 +8,11 @@ import json
 import math
 import os
 import tempfile
-import time
-from collections import Counter
-from contextlib import ExitStack
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fh5.bc import BCReplay, BCTrain
-from fh5.bc_losses import BCLossHistory, read_bc_manifest
+from fh5.bc import BCReplay
+from fh5.bc_losses import read_bc_manifest
 from fh5.bc_network import make_actor
 from fh5.learning_runtime import preserve_torch_state
 
@@ -326,11 +323,6 @@ def _report(path: Path, summary: dict[str, Any]) -> Path:
     return path
 
 
-def _config(path: Path) -> dict[str, Any]:
-    value: dict[str, Any] = _json(path)
-    return _checked_config(value)
-
-
 def _checked_config(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError("BC config must be an object")
@@ -374,53 +366,43 @@ def _checked_config(value: Any) -> dict[str, Any]:
     return dict(value)
 
 
-def run_offline(request: BCTrain | BCReplay) -> RunResult:
+def run_offline(request: BCReplay) -> RunResult:
     torch = importlib.import_module("torch")
-    with preserve_torch_state(torch), ExitStack() as resources:
-        return _run_offline(request, torch, resources)
+    with preserve_torch_state(torch):
+        return _run_offline(request, torch)
 
 
-def _run_offline(request: BCTrain | BCReplay, torch: Any, resources: ExitStack) -> RunResult:
+def _run_offline(request: BCReplay, torch: Any) -> RunResult:
     from fh5.experiment import RunResult
 
-    training = isinstance(request, BCTrain)
-    if isinstance(request, BCTrain):
-        if request.output_dir.exists():
-            raise FileExistsError(request.output_dir)
-        config = _config(request.config_file)
-        dataset_path = request.config_file.parent / config["dataset"]
-        output = request.output_dir
-        report = output / "report.html"
-        device = config["device"]
-    else:
-        output = request.model_dir
-        manifest, _ = read_bc_manifest(output / "model.json")
-        if (
-            not {
-                "version",
-                "architecture",
-                "weights_sha256",
-                "contract",
-                "config",
-                "preprocessing",
-                "future_supervision",
-                "training",
-            }
-            <= manifest.keys()
-        ):
-            raise ValueError("Incomplete model manifest")
-        if (
-            manifest["architecture"] != ARCHITECTURE
-            or _hash(output / "actor.pt") != manifest["weights_sha256"]
-        ):
-            raise ValueError("Bad model artifact")
-        config = _checked_config(manifest["config"])
-        dataset_path, report, device = request.dataset_file, request.report_path, request.device
+    output = request.model_dir
+    manifest, _ = read_bc_manifest(output / "model.json")
+    if (
+        not {
+            "version",
+            "architecture",
+            "weights_sha256",
+            "contract",
+            "config",
+            "preprocessing",
+            "future_supervision",
+            "training",
+        }
+        <= manifest.keys()
+    ):
+        raise ValueError("Incomplete model manifest")
+    if (
+        manifest["architecture"] != ARCHITECTURE
+        or _hash(output / "actor.pt") != manifest["weights_sha256"]
+    ):
+        raise ValueError("Bad model artifact")
+    config = _checked_config(manifest["config"])
+    dataset_path, report, device = request.dataset_file, request.report_path, request.device
     if device not in ("cpu", "cuda") or (device == "cuda" and not torch.cuda.is_available()):
         raise ValueError("Requested BC device unavailable")
     data, contract = _read_dataset(dataset_path)
     contract["image_size"] = config["image_size"]
-    if not training and contract != manifest["contract"]:
+    if contract != manifest["contract"]:
         raise ValueError("Model observation/action contract mismatch")
     rows = _rows(data, config["image_size"], torch)
     torch.set_num_threads(2)
@@ -429,95 +411,6 @@ def _run_offline(request: BCTrain | BCReplay, torch: Any, resources: ExitStack) 
     torch.use_deterministic_algorithms(True)
     torch.backends.cudnn.benchmark = False
     model = make_actor(contract).to(device)
-    if isinstance(request, BCTrain):
-        eligible = [
-            r
-            for r in rows
-            if r["example"]["split"] == "train"
-            and r["example"]["bc_eligible"]
-            and r["rgb"] is not None
-        ]
-        if not eligible or not any(
-            r["example"]["split"] == "holdout" and r["example"]["bc_eligible"] for r in rows
-        ):
-            raise ValueError("BC requires eligible independent train and holdout runs")
-        optimizer = torch.optim.Adam(model.parameters(), lr=config["learning_rate"])
-        initial = [p.detach().clone() for p in model.encoder.parameters()]
-        losses = BCLossHistory()
-        resources.callback(losses.close)
-        completed, visual_gradient = 0, 0.0
-        started = time.monotonic()
-        for step in range(config["steps"]):
-            indices = torch.randperm(len(eligible) // 2)[: config["batch_size"] // 2].tolist()
-            batch = [eligible[i * 2 + v] for i in indices for v in (0, 1)]
-            rgb = torch.stack([torch.stack(r["rgb"]) for r in batch]).to(device).float() / 255
-            state = torch.stack([r["state"] for r in batch]).to(device)
-            targets = torch.tensor(
-                [r["example"]["supervision"]["action"] for r in batch], device=device
-            )
-            model.train()
-            optimizer.zero_grad()
-            loss = torch.nn.functional.mse_loss(model(rgb, state), targets)
-            if not torch.isfinite(loss):
-                raise ValueError("Non-finite BC loss")
-            loss.backward()
-            if step == 0:
-                visual_gradient = sum(
-                    p.grad.abs().sum().item()
-                    for p in model.encoder.parameters()
-                    if p.grad is not None
-                )
-            optimizer.step()
-            completed = step + 1
-            losses.record(completed, loss)
-        stats = {
-            "steps_completed": completed,
-            "duration_s": time.monotonic() - started,
-            "visual_gradient_l1": visual_gradient,
-            "visual_parameter_change_l1": sum(
-                (p.detach() - i).abs().sum().item()
-                for p, i in zip(model.encoder.parameters(), initial)
-            ),
-            "train_examples_by_view": dict(Counter(r["view"] for r in eligible)),
-            "selection": "fixed final step; holdout never selects weights or preprocessing",
-        }
-        before = _predict(model, rows, torch, device)
-        output.mkdir(parents=True)
-        manifest = {
-            "version": 1,
-            "architecture": ARCHITECTURE,
-            "contract": contract,
-            "config": config,
-            "dataset_sha256": _hash(dataset_path),
-            "initialization": {
-                "source": "PyTorch random initialization; no external weights",
-                "license": "no third-party pretrained weight license",
-            },
-            "preprocessing": {
-                "version": 1,
-                "rgb": "full frame bilinear resize, float32 / 255; no crop",
-                "size": config["image_size"],
-            },
-            "reference_curriculum": "paired views 50% no_reference / 50% reference_assisted, shuffled each update",
-            "torch_version": str(torch.__version__),
-            "device": device,
-            "device_name": torch.cuda.get_device_name() if device == "cuda" else "CPU",
-            "parameter_count": sum(p.numel() for p in model.parameters()),
-            "training": stats,
-            "future_supervision": {"enabled": False, "weight": 0},
-            "critic_trained": False,
-            "closed_loop_validated": False,
-        }
-        torch.save(
-            {
-                "actor": model.state_dict(),
-                "metadata": {k: manifest[k] for k in MODEL_METADATA_KEYS},
-            },
-            output / "actor.pt",
-        )
-        manifest["weights_sha256"] = _hash(output / "actor.pt")
-        stats["loss_history"] = losses.publish(output)
-        model = make_actor(contract).to(device)
     try:
         saved = torch.load(output / "actor.pt", map_location=device, weights_only=True)
         if (
@@ -531,17 +424,6 @@ def _run_offline(request: BCTrain | BCReplay, torch: Any, resources: ExitStack) 
     except Exception as error:
         raise ValueError("Bad model weights") from error
     predictions = _predict(model, rows, torch, device)
-    if training:
-        manifest["training"]["reload_max_abs_error"] = max(
-            (
-                abs(a - b)
-                for x, y in zip(before, predictions)
-                if x is not None
-                for a, b in zip(x, y)
-            ),
-            default=0,
-        )
-        _write(output / "model.json", manifest)
     records, metrics = _diagnostics(rows, predictions)
     zeros = _predict(model, rows, torch, device, intervention=True)
     change = [abs(a - b) for x, y in zip(predictions, zeros) if x is not None for a, b in zip(x, y)]

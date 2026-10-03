@@ -152,23 +152,23 @@ def test_existing_frozen_bc_uses_prepared_numbers_without_image_io_or_codecs(tmp
 
     pytest.importorskip("torch")
     from PIL import Image
-    from test_bc import setup_bc
+    from test_bc import legacy_model
 
     from fh5.numeric_actor import FrozenNumericActor
     from fh5.numeric_import import LegacyNumericImport, PreparedNumericSource
 
-    request = setup_bc(tmp_path)
+    request = legacy_model(tmp_path)
     baseline = run_experiment(request)
     prepared = run_experiment(
         LegacyNumericImport(
-            request.output_dir,
+            request.model_dir,
             tmp_path / "data/dataset.json",
             tmp_path / "prepared",
             max_decisions=2,
         )
     )
     contract = PixelContract(size=(64, 36), origin="legacy_offline", history_offsets_ms=(0,))
-    model = FrozenNumericActor(request.output_dir, contract, legacy_diagnostic=True)
+    model = FrozenNumericActor(request.model_dir, contract, legacy_diagnostic=True)
     source = PreparedNumericSource(tmp_path / "prepared")
     read_bytes, open_path, digest = Path.read_bytes, Path.open, hashlib.sha256
 
@@ -491,11 +491,11 @@ def test_legacy_preparation_rejects_changed_metadata_evidence(tmp_path, fault):
     from pathlib import Path
 
     pytest.importorskip("torch")
-    from test_bc import setup_bc
+    from test_bc import legacy_model
 
     from fh5.numeric_import import LegacyNumericImport
 
-    request = setup_bc(tmp_path)
+    request = legacy_model(tmp_path)
     run_experiment(request)
     dataset_path = tmp_path / "data/dataset.json"
     dataset = json.loads(dataset_path.read_text())
@@ -515,7 +515,7 @@ def test_legacy_preparation_rejects_changed_metadata_evidence(tmp_path, fault):
         else:
             path.write_bytes(path.read_bytes() + b"\n")
     with pytest.raises(ValueError):
-        run_experiment(LegacyNumericImport(request.output_dir, dataset_path, tmp_path / "prepared"))
+        run_experiment(LegacyNumericImport(request.model_dir, dataset_path, tmp_path / "prepared"))
 
 
 def test_current_and_future_demonstration_evidence_never_enters_actor(tmp_path):

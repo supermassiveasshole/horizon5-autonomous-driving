@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fh5.attempts import AttemptReplay, review_attempts
-from fh5.bc import BCReplay, BCTrain, run_bc
+from fh5.bc import BCReplay
+from fh5.bc_learning import run_offline
 from fh5.candidate_archive import (
     CandidateArchive,
     CandidateRestore,
@@ -314,7 +315,6 @@ def run_experiment(
     | RewardAudit
     | RecoveryReplay
     | TrackingDrive
-    | BCTrain
     | BCReplay
     | DemonstrationRecord
     | DemonstrationDataset
@@ -468,8 +468,8 @@ def run_experiment(
         if environment is None:
             raise ValueError("TrackingDrive requires an external game environment")
         return run_tracking(request, environment)
-    if isinstance(request, (BCTrain, BCReplay)):
-        return run_bc(request)
+    if isinstance(request, BCReplay):
+        return run_offline(request)
     if isinstance(request, DemonstrationDataset):
         return export_demonstrations(request)
     if isinstance(request, DemonstrationReplay):

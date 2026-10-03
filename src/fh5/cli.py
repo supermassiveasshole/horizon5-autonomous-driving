@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fh5.attempts import AttemptReplay
-from fh5.bc import BCReplay, BCTrain
+from fh5.bc import BCReplay
 from fh5.control import Control, validate_control_file
 from fh5.demonstration_dataset import DemonstrationDataset
 from fh5.demonstrations import DemonstrationRecord, DemonstrationReplay
@@ -430,7 +430,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     recovery.add_argument("--config", type=Path, required=True)
     recovery.add_argument("--trace", type=Path, required=True)
     recovery.add_argument("--output", type=Path, required=True)
-    bc = commands.add_parser("bc-train", help="Train a bounded offline multimodal BC actor")
+    bc = commands.add_parser("bc-train", help="Retired: import history and use temporal-train")
     bc.add_argument("--config", type=Path, required=True)
     bc.add_argument("--output", type=Path, required=True)
     bc_replay = commands.add_parser("bc-replay", help="Replay a frozen BC actor; no game input")
@@ -827,7 +827,13 @@ def main(argv: Sequence[str] | None = None) -> int:
                 "are not interchangeable. Existing recordings remain readable with replay."
             )
         elif args.mode == "bc-train":
-            result = run_experiment(BCTrain(args.config, args.output))
+            raise ValueError(
+                "The legacy bc-train command is retired. Use temporal-prepare to import "
+                "compatible historical demonstrations, then temporal-train; use "
+                "collection-bc-prepare and collection-bc-train for new numeric collection. "
+                "This requires retraining, not converting old weights. Existing v1 models "
+                "remain readable with bc-replay. See docs/bc.md."
+            )
         elif args.mode == "bc-replay":
             result = run_experiment(BCReplay(args.model, args.dataset, args.report, args.device))
         elif args.mode == "demonstration-replay":

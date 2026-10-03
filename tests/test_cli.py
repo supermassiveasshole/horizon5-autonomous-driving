@@ -16,7 +16,11 @@ from fh5.cli import main
 
 @pytest.mark.parametrize(
     ("command", "replacement", "flags"),
-    [("policy", "realtime-drive", ["--live"]), ("collection-dataset", "collection-bc-prepare", [])],
+    [
+        ("policy", "realtime-drive", ["--live"]),
+        ("collection-dataset", "collection-bc-prepare", []),
+        ("bc-train", "temporal-prepare", []),
+    ],
 )
 def test_retired_command_explains_migration_before_reading_old_assets(
     tmp_path, capsys, command, replacement, flags
