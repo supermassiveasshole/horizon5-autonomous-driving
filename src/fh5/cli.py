@@ -57,16 +57,17 @@ def _sac(args: argparse.Namespace) -> int:
         if not isinstance(options, dict) or options.pop("version", None) != 1:
             raise ValueError("SAC training requires a version 1 configuration")
         try:
+            warmup = args.config.parent / options.pop("warmup")
+            replay = (
+                args.config.parent / options.pop("replay")
+                if "replay" in options
+                else warmup / "experience/replay.json"
+            )
             if options.get("imitation_protocol_batch") is not None:
                 options["imitation_protocol_batch"] = (
                     args.config.parent / options["imitation_protocol_batch"]
                 )
-            request = SACTrain(
-                args.config.parent / options.pop("warmup"),
-                args.config.parent / options.pop("replay"),
-                args.output,
-                **options,
-            )
+            request = SACTrain(warmup, replay, args.output, **options)
         except (KeyError, TypeError) as error:
             raise ValueError("Invalid SAC training fields") from error
         summary = run_experiment(request).summary["sac_learning"]
