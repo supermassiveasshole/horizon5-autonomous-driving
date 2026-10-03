@@ -14,6 +14,7 @@ from fh5.numeric_images import DecisionActor, NumericDecision, NumericFrame, dec
 from fh5.numeric_recording import numeric_features
 from fh5.realtime import RealtimeConfig, RealtimeObservation, SafetyState
 from fh5.realtime_state import DecisionState, Work
+from fh5.sac_context import PROPOSAL_CONTEXT, SEND_CONTEXT, proposal_context
 
 
 @dataclass(frozen=True)
@@ -91,7 +92,16 @@ class InferenceWorker:
         if work is None:
             raise ValueError("Cannot construct bounded numerical warmup")
         context = None
-        if actor.manifest.get("command_context"):
+        if actor.manifest.get("command_context") == PROPOSAL_CONTEXT:
+            context = proposal_context(
+                {
+                    "proposal_index": 0,
+                    "proposed_ns": now - 50_000_000,
+                    "proposal": {"steer_i16": 0, "throttle_u8": 0, "brake_u8": 0},
+                    "owner": "warmup",
+                }
+            )
+        elif actor.manifest.get("command_context"):
             context = {
                 "version": 1,
                 "command_index": 0,
@@ -113,7 +123,7 @@ class InferenceWorker:
             ):
                 raise ValueError("Frozen actor and real-time numerical contracts differ")
             if actor.manifest.get("command_context") and (
-                actor.manifest["command_context"] != "successful-send-return-proxy-v1"
+                actor.manifest["command_context"] not in (SEND_CONTEXT, PROPOSAL_CONTEXT)
                 or self.config.action_offsets_ms != (200, 100, 0)
                 or any(
                     actor.manifest.get("bounds", {}).get(key) != getattr(self.config, key)

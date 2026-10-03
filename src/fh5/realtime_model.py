@@ -8,8 +8,35 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from fh5.artifact_io import read_json
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import NumericFrame, PixelContract
+
+
+def sac_shadow_contract(
+    directory: Path, source: PixelContract, expected_sha256: str | None = None
+) -> tuple[dict[str, Any], str]:
+    """Bind the SAC policy and its BC pixel metadata before creating native resources."""
+    raw = (directory / "policy.json").read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if expected_sha256 is not None and digest != expected_sha256:
+        raise ValueError("Frozen SAC policy manifest changed")
+    policy = json.loads(raw)
+    if (
+        policy.get("version") not in (2, 3, 4)
+        or policy.get("architecture") != "conditional-temporal-sac-v1"
+        or policy.get("stage") != "sac_updates"
+    ):
+        raise ValueError("Shadow requires a sealed SAC policy checkpoint")
+    metadata: dict[str, Any] = read_json(
+        directory / "bc/model.json", expected_sha256=policy["bc_manifest_sha256"]
+    )
+    if (
+        metadata.get("version") != 2
+        or PixelContract.from_metadata(metadata["numeric_contract"]) != source
+    ):
+        raise ValueError("SAC shadow requires its exact numerical pixel contract")
+    return metadata, digest
 
 
 def shadow_model_contract(

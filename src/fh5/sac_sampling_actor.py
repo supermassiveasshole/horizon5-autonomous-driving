@@ -23,11 +23,12 @@ class SACSamplingActor(SACEvaluationActor):
         expected_sha256: str,
         *,
         exploration_seed: int,
+        counterfactual: bool = False,
     ) -> None:
         if type(exploration_seed) is not int or not 0 <= exploration_seed < 2**64:
             raise ValueError("SAC exploration seed must be an unsigned 64-bit integer")
         self._exploration_seed = exploration_seed
-        super().__init__(directory, pixels, expected_sha256)
+        super().__init__(directory, pixels, expected_sha256, counterfactual=counterfactual)
         self.device = self.frozen.bc.device
         self.manifest.update(
             inference_device=self.device,

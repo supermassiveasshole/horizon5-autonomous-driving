@@ -13,19 +13,38 @@ from fh5.realtime import RealtimeNumericReplay
 from fh5.realtime_model import ShadowNumericActor
 from fh5.realtime_numeric_replay import read_realtime_recording
 from fh5.realtime_shadow import ShadowEnvironment
+from fh5.sac_context import PROPOSAL_CONTEXT, SEND_CONTEXT
 
 
 def replay_command(args: argparse.Namespace) -> int:
     from fh5.experiment import run_experiment
     from fh5.sac_evaluation_actor import SACEvaluationActor
+    from fh5.sac_sampling_actor import SACSamplingActor
 
     recording = read_realtime_recording(args.recording)
     actor: DecisionActor
     pixels = PixelContract.from_metadata(recording["configuration"]["pixels"])
-    if recording["actor_kind"] == SACEvaluationActor.kind:
+    if recording["actor_kind"] in (SACEvaluationActor.kind, SACSamplingActor.kind):
         if args.device != "cpu" or args.allow_legacy_source_diagnostic:
             raise ValueError("SAC replay requires CPU and its exact numerical source contract")
-        actor = SACEvaluationActor(args.model, pixels, recording["model"]["sac_manifest_sha256"])
+        context_kind = recording["model"]["command_context"]
+        if context_kind not in (SEND_CONTEXT, PROPOSAL_CONTEXT):
+            raise ValueError("Unsupported recorded SAC command context")
+        if recording["actor_kind"] == SACSamplingActor.kind:
+            actor = SACSamplingActor(
+                args.model,
+                pixels,
+                recording["model"]["sac_manifest_sha256"],
+                exploration_seed=recording["model"]["noise"]["seed"],
+                counterfactual=context_kind == PROPOSAL_CONTEXT,
+            )
+        else:
+            actor = SACEvaluationActor(
+                args.model,
+                pixels,
+                recording["model"]["sac_manifest_sha256"],
+                counterfactual=context_kind == PROPOSAL_CONTEXT,
+            )
     elif recording["actor_kind"] == ShadowNumericActor.kind:
         actor = ShadowNumericActor(
             args.model,
@@ -95,14 +114,7 @@ def shadow_command(args: argparse.Namespace) -> int:
     result = run_experiment(
         request,
         realtime_environment=environment,
-        numeric_actor_factory=lambda: ShadowNumericActor(
-            configuration.model_dir,
-            configuration.capture.pixels,
-            configuration.metadata["weights_sha256"],
-            configuration.device,
-            allow_legacy_source_diagnostic=args.allow_legacy_source_diagnostic,
-            expected_manifest_sha256=configuration.model_hash,
-        ),
+        numeric_actor_factory=configuration.actor,
     )
     summary = result.summary["realtime"]
     print(

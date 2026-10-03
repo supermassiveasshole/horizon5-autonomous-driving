@@ -11,8 +11,9 @@ from typing import Any, Literal
 from fh5.artifact_io import sha256_file
 from fh5.capture_config import parse_capture_config
 from fh5.numeric_actor import FrozenNumericActor
+from fh5.numeric_images import DecisionActor
 from fh5.realtime import RealtimeConfig, RealtimeRun
-from fh5.realtime_model import ShadowNumericActor, shadow_model_contract
+from fh5.realtime_model import ShadowNumericActor, sac_shadow_contract, shadow_model_contract
 from fh5.realtime_numeric_replay import (
     read_realtime_decision,
     read_realtime_journal,
@@ -35,6 +36,7 @@ class NumericDriveConfiguration:
         mode: Literal["drive", "shadow", "legacy-shadow"] = "drive",
         hz: int | None = None,
     ) -> None:
+        self.mode = mode
         raw = config_file.read_bytes()
         root = json.loads(raw)
         if (
@@ -72,22 +74,43 @@ class NumericDriveConfiguration:
         self.task = LocalTask(**task)
         self.task.load()
         model = root["model"]
+        self.model_kind = model.get("kind", "bc")
+        allowed = {"directory", "device", "expected_sha256", "manifest_sha256"}
+        if self.model_kind == "sac":
+            allowed.update(("kind", "exploration_seed"))
         if (
-            not {"directory", "device"}
-            <= set(model)
-            <= {"directory", "device", "expected_sha256", "manifest_sha256"}
-            or not all(isinstance(value, str) for value in model.values())
+            not {"directory", "device"} <= set(model) <= allowed
+            or not all(
+                isinstance(value, str) for key, value in model.items() if key != "exploration_seed"
+            )
             or model["device"] not in ("cpu", "cuda")
         ):
             raise ValueError("Driving requires model directory/device and optional string hashes")
         self.model_dir = base / model["directory"]
-        self.metadata, self.training_pixels, self.model_hash = shadow_model_contract(
-            self.model_dir,
-            self.capture.pixels,
-            model.get("expected_sha256"),
-            allow_legacy_source_diagnostic=mode == "legacy-shadow",
-            expected_manifest_sha256=model.get("manifest_sha256"),
-        )
+        self.exploration_seed = model.get("exploration_seed")
+        if self.model_kind == "sac":
+            if mode != "shadow" or model["device"] != "cpu":
+                raise ValueError(
+                    "SAC requires read-only shadow on CPU with its exact source contract"
+                )
+            if "exploration_seed" in model and (
+                type(self.exploration_seed) is not int or not 0 <= self.exploration_seed < 2**64
+            ):
+                raise ValueError("SAC exploration seed must be an unsigned 64-bit integer")
+            self.metadata, self.model_hash = sac_shadow_contract(
+                self.model_dir, self.capture.pixels, model.get("expected_sha256")
+            )
+            if "manifest_sha256" in model and model["manifest_sha256"] != self.model_hash:
+                raise ValueError("Frozen SAC policy manifest changed")
+            self.training_pixels = self.capture.pixels
+        else:
+            self.metadata, self.training_pixels, self.model_hash = shadow_model_contract(
+                self.model_dir,
+                self.capture.pixels,
+                model.get("expected_sha256"),
+                allow_legacy_source_diagnostic=mode == "legacy-shadow",
+                expected_manifest_sha256=model.get("manifest_sha256"),
+            )
         cfg = self.request.config
         if self.metadata["contract"]["actor_shape"] != {
             "action_count": len(cfg.action_offsets_ms),
@@ -246,7 +269,31 @@ class NumericDriveConfiguration:
             "reasons": reasons,
         }, reasons
 
-    def actor(self) -> FrozenNumericActor:
+    def actor(self) -> DecisionActor:
+        if self.model_kind == "sac":
+            from fh5.sac_evaluation_actor import SACEvaluationActor
+            from fh5.sac_sampling_actor import SACSamplingActor
+
+            if self.exploration_seed is not None:
+                return SACSamplingActor(
+                    self.model_dir,
+                    self.capture.pixels,
+                    self.model_hash,
+                    exploration_seed=self.exploration_seed,
+                    counterfactual=True,
+                )
+            return SACEvaluationActor(
+                self.model_dir, self.capture.pixels, self.model_hash, counterfactual=True
+            )
+        if self.mode != "drive":
+            return ShadowNumericActor(
+                self.model_dir,
+                self.capture.pixels,
+                self.metadata["weights_sha256"],
+                self.device,
+                allow_legacy_source_diagnostic=self.mode == "legacy-shadow",
+                expected_manifest_sha256=self.model_hash,
+            )
         return FrozenNumericActor(
             self.model_dir,
             self.capture.pixels,

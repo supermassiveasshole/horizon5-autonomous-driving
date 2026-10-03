@@ -69,6 +69,42 @@ uv run --locked fh5 realtime-shadow --config runs/drive-config.json --output run
 
 停止先锁止并解除动作，再按既有 0.5 秒界限关闭推理 worker。若在该关闭窗口内收到最后一份真实结果，收尾流程补记其特征、预测和 `discard_stopped`，供独立数值重放核对；停止后不会下发该结果。仍未返回的推理继续标为 `abandoned_inference` 并隔离记录，不延长等待或补造预测。
 
+## SAC 只读接入（#11）
+
+SAC 复用上述配置和 `realtime-shadow` / `realtime-replay`，仅替换 `model`：
+
+```json
+"model": {
+  "kind": "sac",
+  "directory": "../runs/sac-candidate",
+  "device": "cpu"
+}
+```
+
+目录应含已保存的 `policy.json` 和 `policy.pt`；配置自动绑定清单，worker 加载时核对权重。
+`expected_sha256` 与 `manifest_sha256` 若显式提供，均须匹配 SAC 的 `policy.json`。
+像素、历史槽位及动作幅度须与检查点一致。默认确定性预测；可选 `model.exploration_seed`
+使用既有按决策标识生成的探索噪声，精确回放沿用保存的种子。
+当前 SAC 推理支持 CPU；`--allow-legacy-source-diagnostic` 不适用于 SAC。
+
+SAC 的动作变化率区间需要前一次命令。只读运行将其明确记录为假设提议
+`counterfactual-proposal-v1`，初始为中立；随后提议及其时刻仅用于下一次预测的动作区间。
+它们保存在 `proposals`，不写入实际 `commands`，也不填充编码器的真实动作历史。
+报告分别统计源帧到提议的延迟与实际发送延迟；后者没有样本。
+重放核对数值像素、时间特征、提议上下文与模型预测。只读记录不能作为训练转移或晋升证据。
+
+该接入用于核对模型和实时观测能否一起工作；游戏尚未执行这些提议，观测也不代表执行后的反馈。
+`realtime-drive` 仍不接受 SAC，原生采样与响应校验另行接入。
+
+2026-10-03 软件验证：先在原入口复现配置拒绝 SAC，再通过真实 CPU checkpoint、
+原始 BGRA 设备替身、生产预处理/线程及回环 UDP 完成只读运行。
+确定性与固定种子探索分别接受并精确重放 10、9 次预测，误差均为零；父模型未改变，
+没有创建控制器，实际命令列表为空。修改提议并同步重算日志/报告摘要后，重放仍识别其
+与原始预测不符。配置检查、BC 回归、SAC 成功发送上下文和异步学习循环共 90 项通过
+（`runs/sac-shadow-regression.xml`）；期限/解除输入及数值驾驶适配器另 44 项通过
+（`runs/sac-shadow-runtime.xml`）。Ruff、格式和严格 mypy 通过。
+这批证据没有启动 FH5/Steam，不验证真实 4K 时效、游戏反馈或驾驶能力；#11 保持开放。
+
 ## 期限与恢复
 
 默认决策 20 Hz，也可配置 10 Hz；推理截止 80 ms、动作绝对有效期为决策时刻加 150 ms，独立监督器约每 5 ms 检查。最新图像/遥测上限分别 100 ms；历史按源时间计算 age 与相邻 Δt。发送前再核对旧输入年龄、最新安全状态和采集 epoch。重复旧源帧不续租，迟到、跨 epoch 或租期已过的结果不发送。

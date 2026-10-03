@@ -17,6 +17,7 @@ from fh5.realtime_report import write_realtime_result
 from fh5.realtime_state import DecisionState
 from fh5.realtime_worker import InferenceWorker
 from fh5.sac_actions import ActionBounds
+from fh5.sac_context import PROPOSAL_CONTEXT, SEND_CONTEXT
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -133,9 +134,17 @@ def run_realtime(
                     raise ValueError("Native driving requires qualified input and shadow bindings")
                 authorize(request, worker.manifest, worker.inference_device)
             state.require_command_context = bool(worker.manifest.get("command_context"))
+            state.counterfactual_context = (
+                worker.manifest.get("command_context") == PROPOSAL_CONTEXT
+            )
             if state.require_command_context:
                 state.command_bounds = ActionBounds(**worker.manifest["bounds"])
-            if state.require_command_context and environment.source_kind != "synthetic":
+            if state.counterfactual_context and environment.source_kind != "shadow":
+                raise ValueError("Counterfactual proposals require a read-only shadow environment")
+            if (
+                worker.manifest.get("command_context") == SEND_CONTEXT
+                and environment.source_kind != "synthetic"
+            ):
                 raise ValueError(
                     "Command-conditioned evaluation currently requires synthetic sends"
                 )
@@ -221,6 +230,7 @@ def run_realtime(
         "game_application": "unverified",
         "decisions": state.decisions,
         "commands": state.commands,
+        **({"proposals": state.proposals} if state.counterfactual_context else {}),
         "stop_reason": state.stop_reason,
         "inference": inference,
         "model": worker.manifest,

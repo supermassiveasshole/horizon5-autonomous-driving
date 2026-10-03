@@ -6,6 +6,7 @@ import hashlib
 import html
 import json
 import math
+from bisect import bisect_left
 from copy import deepcopy
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -22,6 +23,7 @@ from fh5.numeric_images import (
 from fh5.numeric_recording import numeric_features, read_numeric_frame
 from fh5.realtime import RealtimeNumericReplay
 from fh5.sac_actions import ActionBounds, ActionSupportUnavailable
+from fh5.sac_context import PROPOSAL_CONTEXT, SEND_CONTEXT, context_action, proposal_context
 from fh5.sac_replay import command_action
 
 if TYPE_CHECKING:
@@ -72,6 +74,7 @@ def read_realtime_journal(
     events: dict[str, list[dict[str, Any]]] = {}
     sequences: set[int] = set()
     commands = []
+    proposals = []
     packets = []
     stops = []
     with path.open("rb") as stream:
@@ -96,6 +99,8 @@ def read_realtime_journal(
                 events.setdefault(row["decision_id"], []).append(event)
             elif event["kind"] == "command":
                 commands.append((sequence, row))
+            elif event["kind"] == "proposal":
+                proposals.append((sequence, row))
             elif event["kind"] == "packet":
                 packets.append((sequence, row))
             elif event["kind"] == "stop":
@@ -119,6 +124,8 @@ def read_realtime_journal(
         raise ValueError("Recorded time-limit duration is shorter than its request")
     if [r for _, r in sorted(commands)] != report["commands"]:
         raise ValueError("Recorded commands differ from journal")
+    if [r for _, r in sorted(proposals)] != report.get("proposals", []):
+        raise ValueError("Recorded counterfactual proposals differ from journal")
     ids = [d["decision_id"] for d in report["decisions"]]
     if len(ids) != len(set(ids)) or set(ids) != set(events):
         raise ValueError("Missing or duplicated decision outcomes")
@@ -166,10 +173,77 @@ def _valid_prediction(value: Any) -> bool:
     )
 
 
+def _verify_shadow_proposals(report: dict[str, Any]) -> None:
+    """Bind every hypothetical context to the earlier proposal, never to a send."""
+    if report["evidence_kind"] != "shadow" or report["commands"]:
+        raise ValueError("Counterfactual proposals are not execution evidence")
+    proposals = report["proposals"]
+    accepted = {d["decision_id"]: d for d in report["decisions"] if d["status"] == "accepted"}
+    neutral = {"steer_i16": 0, "throttle_u8": 0, "brake_u8": 0}
+    keys = {"proposal_index", "proposed_ns", "owner", "decision_id", "valid_until_ns", "proposal"}
+    times: list[int] = []
+    seen = set()
+    cfg = report["configuration"]
+    for index, proposal in enumerate(proposals):
+        if (
+            set(proposal) != keys
+            or type(proposal["proposal_index"]) is not int
+            or proposal["proposal_index"] != index
+            or type(proposal["proposed_ns"]) is not int
+            or not report["started_ns"] <= proposal["proposed_ns"] <= report["ended_ns"]
+            or (times and proposal["proposed_ns"] < times[-1])
+        ):
+            raise ValueError("Invalid counterfactual proposal sequence or time")
+        times.append(proposal["proposed_ns"])
+        command_action(proposal["proposal"])
+        if proposal["owner"] != "policy":
+            if (
+                proposal["owner"] not in ("initial_neutral", "lease_expiry", "hard_stop")
+                or proposal["decision_id"] is not None
+                or proposal["proposal"] != neutral
+                or proposal["valid_until_ns"] != proposal["proposed_ns"]
+            ):
+                raise ValueError("Invalid neutral counterfactual proposal")
+            continue
+        identity = proposal["decision_id"]
+        if identity not in accepted or identity in seen:
+            raise ValueError("Counterfactual proposal lacks a unique accepted prediction")
+        seen.add(identity)
+        row = accepted[identity]
+        steer, longitudinal = row["prediction"]
+        expected = {
+            "steer_i16": round(max(-cfg["max_steer"], min(cfg["max_steer"], steer)) * 32767),
+            "throttle_u8": round(max(0, min(cfg["max_throttle"], longitudinal)) * 255),
+            "brake_u8": round(max(0, min(cfg["max_brake"], -longitudinal)) * 255),
+        }
+        if (
+            proposal["proposal"] != expected
+            or proposal["proposed_ns"] != row["inference_returned_ns"]
+            or proposal["valid_until_ns"] != row["valid_until_ns"]
+        ):
+            raise ValueError("Counterfactual proposal differs from its recorded prediction")
+    if not proposals or proposals[0]["owner"] != "initial_neutral" or seen != accepted.keys():
+        raise ValueError("Incomplete counterfactual proposal history")
+    for row in report["decisions"]:
+        if "command_context" in row:
+            index = bisect_left(times, row["decision_ns"]) - 1
+            if index < 0 or row["command_context"] != proposal_context(proposals[index]):
+                raise ValueError("Counterfactual context differs from the previous proposal")
+            context_action(row["command_context"], PROPOSAL_CONTEXT, row["decision_ns"])
+        if "actor" in row and (
+            "command_context" not in row
+            or any(row["actor"]["action_mask"])
+            or any(value is not None for value in row["actor"]["actions"])
+            or any(value is not None for value in row["actor"]["action_age_ms"])
+        ):
+            raise ValueError("Shadow proposals cannot become executed action history")
+
+
 def _verify_action_wait(row: dict[str, Any], report: dict[str, Any]) -> None:
-    """Recompute a supervisor wait from the frozen bounds and actual send history."""
+    """Recompute a wait using the recorded context's explicit time basis."""
+    kind = report["model"].get("command_context")
     if (
-        report["model"].get("command_context") != "successful-send-return-proxy-v1"
+        kind not in (SEND_CONTEXT, PROPOSAL_CONTEXT)
         or row.get("prediction") is not None
         or any(
             key in row for key in ("actor", "error", "inference_returned_ns", "worker_started_ns")
@@ -177,25 +251,28 @@ def _verify_action_wait(row: dict[str, Any], report: dict[str, Any]) -> None:
         or any(c.get("decision_id") == row["decision_id"] for c in report["commands"])
     ):
         raise ValueError("Invalid action support wait outcome")
-    prior = [
-        (i, c)
-        for i, c in enumerate(report["commands"])
-        if c["status"] == "sent" and c["returned_ns"] < row["decision_ns"]
-    ]
-    if not prior:
-        raise ValueError("Action support wait lacks prior command context")
-    index, command = prior[-1]
-    context = {
-        "version": 1,
-        "command_index": index,
-        **{key: command[key] for key in ("sent", "issued_ns", "returned_ns", "owner")},
-    }
-    if (
-        row.get("command_context") != context
-        or command["owner"] not in ("initial_neutral", "policy", "lease_expiry")
-        or not 0 <= command["issued_ns"] <= command["returned_ns"]
-    ):
+    if kind == PROPOSAL_CONTEXT:
+        earlier = [p for p in report["proposals"] if p["proposed_ns"] < row["decision_ns"]]
+        if not earlier:
+            raise ValueError("Action support wait lacks a prior counterfactual proposal")
+        context = proposal_context(earlier[-1])
+    else:
+        prior = [
+            (i, c)
+            for i, c in enumerate(report["commands"])
+            if c["status"] == "sent" and c["returned_ns"] < row["decision_ns"]
+        ]
+        if not prior:
+            raise ValueError("Action support wait lacks prior command context")
+        index, command = prior[-1]
+        context = {
+            "version": 1,
+            "command_index": index,
+            **{key: command[key] for key in ("sent", "issued_ns", "returned_ns", "owner")},
+        }
+    if row.get("command_context") != context or context["owner"] == "warmup":
         raise ValueError("Action support wait differs from successful command context")
+    previous, at = context_action(context, kind, row["decision_ns"])
     bounds = ActionBounds(**report["model"]["bounds"])
     if any(
         getattr(bounds, key) != report["configuration"][key]
@@ -203,9 +280,7 @@ def _verify_action_wait(row: dict[str, Any], report: dict[str, Any]) -> None:
     ):
         raise ValueError("Action support wait bounds differ from execution contract")
     try:
-        bounds.interval(
-            command_action(command["sent"]), (row["decision_ns"] - command["returned_ns"]) / 1e9
-        )
+        bounds.interval(previous, (row["decision_ns"] - at) / 1e9)
     except ActionSupportUnavailable:
         return
     raise ValueError("Action support wait has executable policy support")
@@ -321,6 +396,9 @@ def replay_realtime_numeric(request: RealtimeNumericReplay, actor: DecisionActor
         ):
             raise ValueError("Recording is incomplete or quarantined")
         read_realtime_journal(request.recording_dir, report)
+        if report["model"].get("command_context") == PROPOSAL_CONTEXT:
+            _verify_shadow_proposals(report)
+            summary["proposals"] = report["proposals"]
         contract = PixelContract.from_metadata(report["configuration"]["pixels"])
         if actor.manifest.get("numeric_contract", contract.metadata()) != contract.metadata():
             raise ValueError("Frozen replay pixel contract differs")
