@@ -106,10 +106,12 @@ def _config(path: Path) -> dict[str, Any]:
             raise ValueError("Evaluation binding is incomplete: " + name)
     if config["version"] == 2 and config["model"]["kind"] != "sac":
         raise ValueError("Evaluation version 2 requires an explicit SAC model")
-    if config["version"] == 3 and (
-        config["model"]["kind"] != "bc" or config["model"]["device"] not in ("cpu", "cuda")
+    if config["version"] == 3 and (config["model"]["kind"], config["model"]["device"]) not in (
+        ("bc", "cpu"),
+        ("bc", "cuda"),
+        ("sac", "cpu"),
     ):
-        raise ValueError("Native evaluation requires BC and a declared inference device")
+        raise ValueError("Native evaluation requires BC on CPU/CUDA or SAC on CPU")
     conditions = config["conditions"]
     if not isinstance(conditions, dict) or set(conditions) != {
         "snapshot",

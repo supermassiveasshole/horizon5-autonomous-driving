@@ -185,6 +185,13 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
         reason = None
         if previous["returned_ns"] >= row["decision_ns"]:
             reason = "previous_command_not_available"
+        elif (
+            report["actor_kind"] == "frozen-numeric-temporal-bc-v2"
+            and previous["owner"] != "policy"
+        ):
+            # BC does not wait for SAC's executable action support after release.
+            # Resume experience with the next policy-to-policy interval.
+            reason = "supervisor_boundary"
         elif current is None:
             reason = "missing_current_observation"
         elif not terminal and after is None:

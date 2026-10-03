@@ -27,11 +27,17 @@ from fh5.sac_learning import SACResume, SACTrain
 from fh5.sac_realtime_experience import SACRealtimePrepare
 
 
-def test_bc_execution_bootstraps_value_learning_without_a_previous_sac_policy(tmp_path, sac_policy):
+@pytest.mark.parametrize("observation_gap", [False, True])
+def test_bc_execution_bootstraps_value_learning_without_a_previous_sac_policy(
+    tmp_path, sac_policy, observation_gap
+):
     bc = sac_policy / "bc"
     original = (bc / "actor.pt").read_bytes()
     execution, recording, report, factory = recorded_attempt(
-        tmp_path, sac_policy, actor_factory=lambda: FrozenNumericActor(bc)
+        tmp_path,
+        sac_policy,
+        actor_factory=lambda: FrozenNumericActor(bc),
+        observation_gap=observation_gap,
     )
     assert report["actor_kind"] == "frozen-numeric-temporal-bc-v2"
     assert not report["model"].get("command_context")
@@ -55,6 +61,21 @@ def test_bc_execution_bootstraps_value_learning_without_a_previous_sac_policy(tm
         e["execution_command_index"] == 0 and e["reason"] == "missing_previous_command"
         for e in data["excluded"]
     )
+    if observation_gap:
+        resumed = {
+            index
+            for index, command in enumerate(report["commands"])
+            if index > 0
+            and command["owner"] == "policy"
+            and report["commands"][index - 1]["owner"] != "policy"
+        }
+        assert resumed
+        assert resumed.isdisjoint(row["execution_command_index"] for row in data["transitions"])
+        assert resumed <= {
+            row["execution_command_index"]
+            for row in data["excluded"]
+            if row["reason"] == "supervisor_boundary"
+        }
     for row in data["transitions"]:
         index = row["execution_command_index"]
         assert index > 0

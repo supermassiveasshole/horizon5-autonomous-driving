@@ -1,6 +1,6 @@
 # 冻结评估与全部尝试统计（T09 / #10）
 
-当前提供局部任务的离线评估协议、批次回放和重复执行入口。版本 1 冻结数值 Δt BC，版本 2 显式冻结 SAC，版本 3 为原生 BC 执行额外绑定数值采集条件和推理设备；均固定权重、视觉编码器、预处理和历史契约，复用独立的[尝试有效性判定](attempts.md)保留全部结果。`evaluation-prepare` / `evaluation-review` 不采集、不操作游戏、不训练策略。
+当前提供局部任务的离线评估协议、批次回放和重复执行入口。版本 1 冻结数值 Δt BC，版本 2 显式冻结 SAC，版本 3 为原生 BC/SAC 执行额外绑定数值采集条件和推理设备；均固定权重、视觉编码器、预处理和历史契约，复用独立的[尝试有效性判定](attempts.md)保留全部结果。`evaluation-prepare` / `evaluation-review` 不采集、不操作游戏、不训练策略。
 
 ## 准备批次
 
@@ -56,7 +56,7 @@ uv run --locked fh5 evaluation-review --batch runs/evaluation-001 --ledger runs/
 }
 ```
 
-当前接受实时 v2 的合成、只读影子或版本 3 批次绑定的原生 BC 记录，使用冻结模型独立重载数值输入和预测；兼容标准数值 Δt actor 及匹配像素契约的适配器。原生记录须与冻结数值条件和实际 worker 推理设备一致。回放不会重新发送动作，也不把影子输出升级为实际驾驶证据。
+当前接受实时 v2 的合成、只读影子或版本 3 批次绑定的原生 BC/SAC 记录，使用冻结模型独立重载数值输入和预测；兼容标准数值 Δt actor 及匹配像素契约的适配器。原生记录须与冻结数值条件和实际 worker 推理设备一致。回放不会重新发送动作，也不把影子输出升级为实际驾驶证据。
 
 核验配置、模型、图像和时序存档、日志完整性，以及整个原始遥测包流与该录制完全一致。逐决策核对本车状态、遥测年龄、安全状态和游戏时钟；实际参考掩码必须符合计划模式。合成及原生动作历史按冻结偏移和实时 v2 的 200 ms 查找容差，从成功发送日志重建；影子记录保持未知动作历史，不把未发往游戏的建议当成先前动作。成功命令须与重放预测、幅度包络、期限相符，worker 执行、结果返回和发送必须顺序因果，最后必须有解除输入记录。此机制检查保存证据的一致性，不证明传感器、标注或声明来源本身真实。
 
@@ -94,9 +94,11 @@ uv run --locked fh5 evaluation-review --batch runs/evaluation-001 --ledger runs/
 
 显式自动起跑任务现在可绑定并独立重算准备证据，见下文；旧 `manual_placement` 任务仍保留原语义。参考辅助运行、游戏响应凭据、实机起点交接及完成页重开编排仍需后续实现或验收。用途登记见下文，训练入口的自动登记及完整来源覆盖仍需接入。#4/#9 的实机门槛保留；不阻塞这些独立软件工作。
 
-## 原生 BC 重复评估入口
+## 原生 BC/SAC 重复评估入口
 
 版本 3 沿用完整评估配置，把 `model` 写为 `{"directory":"…","manifest_sha256":"…","kind":"bc","device":"cuda"}`（也支持 `cpu`），并将模型来源中的 `provenance.input_conditions` 原样放入 `conditions.numeric_input_conditions`。它绑定 4K/其他源尺寸、HUD、相机和数值像素等实际采集条件；不能把旧诊断模型改标签作为资格证明。任务必须为版本 2 的自动起跑任务，计划限 1–10 次无参考运行，每次最多 30 秒。
+
+SAC 使用 `kind: "sac"`、`device: "cpu"` 和当前 `policy.json` 的摘要。候选须来自 `native` 或 `mixed` 经验，父 BC 必须非诊断、训练过无参考条件，采集条件取自父 BC；混合来源保持 `mixed`，不改标为纯原生。冻结时同时核对策略权重绑定、父 BC、像素与动作历史以及执行幅度。仅合成经验的 SAC 仍使用版本 2 诊断批次，不能作为版本 3 原生候选。
 
 先用 `evaluation-prepare` 冻结版本 3 批次，再检查：
 
@@ -104,11 +106,11 @@ uv run --locked fh5 evaluation-review --batch runs/evaluation-001 --ledger runs/
 uv run --locked fh5 evaluation-run --batch runs/evaluation-001 --batch-sha256 <batch.json的SHA256> --event-config configs/event.local.json --driving-config configs/numeric-drive.local.json --output runs/evaluation-run-001 --seconds 15
 ```
 
-默认只验证文件，不打开设备、不创建运行目录。`--driving-config` 使用 [realtime-drive](realtime-decisions.md) 的已绑定配置，必须包含该模型及同一推理设备的原生 DXGI 只读时效证据；模型、运行参数、车辆、路线和采集条件须与批次一致。准备批次和离线检查不需要 CUDA 可用；实际 worker 必须使用冻结设备。首次已在赛事中的停车状态可声明 `--initial-operation restart_ready`，默认 `start_ready` 对应赛前开始菜单。
+默认只验证文件，不打开设备、不创建运行目录。`--driving-config` 使用 [realtime-drive](realtime-decisions.md) 的已绑定配置，必须包含该模型及同一推理设备的原生 DXGI 只读时效证据；模型、运行参数、车辆、路线和采集条件须与批次一致。SAC 必须绑定当前候选自己的确定性影子记录，不能借用父 BC 或探索模式的记录；配置中存在 `exploration_seed` 会在取得菜单设备前拒绝。准备批次和离线检查不需要 CUDA 可用；实际 worker 必须使用冻结设备。首次已在赛事中的停车状态可声明 `--initial-operation restart_ready`，默认 `start_ready` 对应赛前开始菜单。
 
 在实机准备完成且运行已获授权时，追加 `--live` 才执行。菜单阶段直接将 DXGI BGRA 数值像素在内存中缩小为灰度模板输入，使用源帧时间并拒绝重复帧和窗口边界变化，没有 JPEG 热路径。事件环境先释放控制器、采集器和 UDP，再创建数值驾驶适配器；采集线程未退出、关闭出错或设备取得后的清理状态不明，均停止交接并报告释放未确认。沿用 F8、失焦、断流、动作有效期及起点交接检查。每次重新核对原配置，改变条件则停止，不在批次内换模型。
 
-保存全部已启动尝试、未启动槽位、菜单/驾驶输入统计和资源释放结果。版本 3 的候选比较也包含推理设备，CPU 与 CUDA 条件不能混作同一批次对照。退出码 0 仅表示计划执行完且保存证据通过核验，不表示有效完赛；报告仍为诊断结果，不自动晋升候选。`completed_evaluation` 的学习循环恢复目前仍限合成协议，原生批次尚未接入 #15 的恢复路径；原生 SAC 采样/评估另由 #11 推进。
+保存全部已启动尝试、未启动槽位、菜单/驾驶输入统计和资源释放结果。版本 3 的候选比较也包含推理设备，CPU 与 CUDA 条件不能混作同一批次对照。退出码 0 仅表示计划执行完且保存证据通过核验，不表示有效完赛；报告仍为诊断结果，不自动晋升候选。`completed_evaluation` 的学习循环恢复目前仍限合成协议，原生批次尚未接入 #15 的恢复路径；原生 SAC 自动采样与学习循环也未由此接通。
 
 版本 3 不接受旧合成执行入口或合成来源的执行证据，避免把默认 CPU 运行绑定为声明的 CUDA 条件；版本 1/2 仍用于合成验证。本入口当前仅有模拟外部设备的软件证据，详见 [验证记录](validation/t09-native-evaluation.md)。实际 DXGI 菜单匹配、资源切换耗时、游戏响应和真实重复驾驶均未据此验收。
 
@@ -132,7 +134,7 @@ uv run --locked fh5 evaluation-run --batch runs/evaluation-001 --batch-sha256 <b
 
 报告 `starts` 和 `verified_starts` 区分 `not_required`、`verified`、`quarantined`。其中 `first_policy_command_ns` 指首条成功非零策略命令；初始中立命令不结束检查窗口，只有中立命令的记录不认证自动起跑。通过仅移除对应首次尝试的 `automatic_start_unverified` 缺口；墙壁、捷径、接管、条件和几何证据仍各自检查。缺失、改写、错槽或超时的准备记录不能得到有效自动起跑，尝试不从分母消失。单独 `attempt-review` 没有完整批次/执行绑定，自动起跑仍待核验。
 
-自动起跑使用 `local-validity-v3`，人工置位继续使用 v2；旧结果不追认。`valid_complete` 和 `record_eligible` 仍只表示局部审核结果，`unattended`、`closed_loop_validated`、自动晋升及全程完赛能力不由此放行。当前运行适配器仅为合成来源，实际验证与局限见[自动起跑记录](validation/t09-automatic-start.md)。
+自动起跑使用 `local-validity-v3`，人工置位继续使用 v2；旧结果不追认。`valid_complete` 和 `record_eligible` 仍只表示局部审核结果，`unattended`、`closed_loop_validated`、自动晋升及全程完赛能力不由此放行。合成与原生适配器复用同一准备和独立审核流程，原生软件证据见上节；自动起跑的验证边界见[自动起跑记录](validation/t09-automatic-start.md)。
 
 ## 最终批次预登记与已知数据复用
 
