@@ -90,20 +90,7 @@ def shadow_command(args: argparse.Namespace) -> int:
             )
         )
         return 0
-    from fh5.capture_resources import WindowsResources
-    from fh5.dxgi_windows import WindowsDXGIFrames
-    from fh5.live import WindowsDesktop
-
-    environment = ShadowEnvironment(
-        request,
-        configuration.capture,
-        lambda: WindowsDXGIFrames(configuration.target),
-        configuration.telemetry,
-        WindowsDesktop(),
-        configuration.task,
-        input_conditions=configuration.bindings,
-        resources=WindowsResources(),
-    )
+    environment = ShadowEnvironment.from_native(configuration)
     print("只读影子运行：模型加载与预热后接收；不会连接手柄或发送输入。F8 停止。", flush=True)
     result = run_experiment(
         request,

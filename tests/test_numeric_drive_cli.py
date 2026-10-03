@@ -16,6 +16,7 @@ from test_temporal_bc import temporal_fixture
 from fh5.cli import main
 from fh5.experiment import run_experiment
 from fh5.numeric_actor import FrozenNumericActor
+from fh5.numeric_drive_cli import native_driving_environment
 from fh5.numeric_drive_config import NumericDriveConfiguration
 from fh5.realtime_driving import NumericDrivingEnvironment
 from fh5.realtime_model import ShadowNumericActor
@@ -206,7 +207,7 @@ def test_shadow_evidence_does_not_transfer_to_different_runtime(
 
 @pytest.mark.parametrize("explicit_hashes", [False, True])
 def test_qualified_file_fixture_reaches_guarded_native_adapter(
-    tmp_path, eligible_model, explicit_hashes
+    tmp_path, eligible_model, explicit_hashes, monkeypatch
 ):
     config = drive_config(tmp_path, eligible_model)
     synthetic_shadow(tmp_path, eligible_model, config, native_file_fixture=True)
@@ -225,6 +226,12 @@ def test_qualified_file_fixture_reaches_guarded_native_adapter(
         ).hexdigest()
         config.write_text(json.dumps(root))
     original = config.read_bytes()
+    capture, telemetry, controller = Capture(), Telemetry(), Controller()
+    monkeypatch.setattr("fh5.dxgi_windows.WindowsDXGIFrames", lambda target: capture)
+    monkeypatch.setattr("fh5.numeric_drive_config.UDPTelemetry", lambda port: telemetry)
+    monkeypatch.setattr("fh5.live.WindowsDesktop", Desktop)
+    monkeypatch.setattr("fh5.live.XboxController", lambda: controller)
+    monkeypatch.setattr("fh5.capture_resources.WindowsResources", lambda: None)
     plan = NumericDriveConfiguration(config, tmp_path / "drive", 1.5, True)
     shadow = plan.qualification["shadow"]
     assert (
@@ -234,17 +241,7 @@ def test_qualified_file_fixture_reaches_guarded_native_adapter(
     assert (
         plan.model_hash == hashlib.sha256((eligible_model / "model.json").read_bytes()).hexdigest()
     )
-    capture, telemetry, controller = Capture(), Telemetry(), Controller()
-    observations = ShadowEnvironment(
-        plan.request,
-        plan.capture,
-        lambda: capture,
-        telemetry,
-        Desktop(),
-        plan.task,
-        input_conditions=plan.bindings,
-    )
-    env = NumericDrivingEnvironment(observations, lambda: controller, configuration=plan)
+    env = native_driving_environment(plan)
     r = run_experiment(
         plan.request, realtime_environment=env, numeric_actor_factory=plan.actor
     ).summary["realtime"]

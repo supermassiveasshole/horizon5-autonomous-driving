@@ -21,6 +21,7 @@ from fh5.routes import load_route, locate_route
 if TYPE_CHECKING:
     from fh5.control import Command
     from fh5.experiment import Packet
+    from fh5.numeric_drive_config import NumericDriveConfiguration
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,24 @@ class LocalTask:
 
 class ShadowEnvironment:
     source_kind: Literal["shadow"] = "shadow"
+
+    @classmethod
+    def from_native(cls, configuration: NumericDriveConfiguration) -> ShadowEnvironment:
+        """Share native observations; defer capture until read and never create a controller."""
+        from fh5.capture_resources import WindowsResources
+        from fh5.dxgi_windows import WindowsDXGIFrames
+        from fh5.live import WindowsDesktop
+
+        return cls(
+            configuration.request,
+            configuration.capture,
+            lambda: WindowsDXGIFrames(configuration.target),
+            configuration.telemetry,
+            WindowsDesktop(),
+            configuration.task,
+            input_conditions=configuration.bindings,
+            resources=WindowsResources(),
+        )
 
     def __init__(
         self,

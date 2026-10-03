@@ -12,22 +12,11 @@ from fh5.realtime import RealtimeEnvironment
 def native_driving_environment(configuration: NumericDriveConfiguration) -> RealtimeEnvironment:
     """Construct adapters only after qualification; actual capture starts on read."""
     configuration.require_eligible()
-    from fh5.capture_resources import WindowsResources
-    from fh5.dxgi_windows import WindowsDXGIFrames
-    from fh5.live import WindowsDesktop, XboxController
+    from fh5.live import XboxController
     from fh5.realtime_driving import NumericDrivingEnvironment
     from fh5.realtime_shadow import ShadowEnvironment
 
-    observations = ShadowEnvironment(
-        configuration.request,
-        configuration.capture,
-        lambda: WindowsDXGIFrames(configuration.target),
-        configuration.telemetry,
-        WindowsDesktop(),
-        configuration.task,
-        input_conditions=configuration.bindings,
-        resources=WindowsResources(),
-    )
+    observations = ShadowEnvironment.from_native(configuration)
     return NumericDrivingEnvironment(observations, XboxController, configuration=configuration)
 
 
