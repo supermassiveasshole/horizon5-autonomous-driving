@@ -4,9 +4,11 @@ import hashlib
 import json
 import socket
 import threading
+import tracemalloc
 from pathlib import Path
 
 import pytest
+from test_bc_manifest_resources import add_loss_history
 from test_realtime_shadow import Capture, Desktop, Telemetry
 from test_route_check import route
 from test_sac_evaluation import sac_policy as sac_policy
@@ -259,3 +261,31 @@ def test_sac_configuration_checks_before_opening_devices(
     else:
         assert json.loads(output.err)["status"] == "error"
     assert not root.exists()
+
+
+def test_sac_shadow_checks_growing_bc_history_without_loading_it_all(
+    tmp_path, sac_policy, capsys, record_property
+):
+    checkpoint = tmp_path / "checkpoint"
+    (checkpoint / "bc").mkdir(parents=True)
+    bc_manifest = checkpoint / "bc/model.json"
+    bc_manifest.write_bytes((sac_policy / "bc/model.json").read_bytes())
+    history_bytes = add_loss_history(checkpoint / "bc")
+    policy = json.loads((sac_policy / "policy.json").read_bytes())
+    policy["bc_manifest_sha256"] = sha(bc_manifest)
+    (checkpoint / "policy.json").write_text(json.dumps(policy))
+    config = shadow_config(tmp_path, checkpoint, 5300)
+    output = tmp_path / "not-created"
+    tracemalloc.start()
+    try:
+        code = main(["realtime-shadow", "--config", str(config), "--output", str(output)])
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    captured = capsys.readouterr()
+    assert code == 0, captured.out + captured.err
+    assert json.loads(captured.out)["status"] == "validated_only"
+    assert peak < history_bytes, "Configuration materialized the archived BC diagnostic history"
+    assert not output.exists()
+    record_property("bc_history_bytes", history_bytes)
+    record_property("peak_python_bytes", peak)

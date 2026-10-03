@@ -8,9 +8,10 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
-from fh5.artifact_io import read_json
+from fh5.artifact_io import VerifiedFile
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import NumericFrame, PixelContract
+from fh5.replay_document import read_document_fields
 
 
 def sac_shadow_contract(
@@ -28,8 +29,9 @@ def sac_shadow_contract(
         or policy.get("stage") != "sac_updates"
     ):
         raise ValueError("Shadow requires a sealed SAC policy checkpoint")
-    metadata: dict[str, Any] = read_json(
-        directory / "bc/model.json", expected_sha256=policy["bc_manifest_sha256"]
+    metadata = read_document_fields(
+        VerifiedFile(directory / "bc/model.json", policy["bc_manifest_sha256"]),
+        {"version", "numeric_contract", "contract"},
     )
     if (
         metadata.get("version") != 2
