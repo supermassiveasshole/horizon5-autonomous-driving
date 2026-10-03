@@ -298,10 +298,6 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
                     raise ValueError("Captured frame identity changed between source blocks")
                 if key not in identities:
                     total_bytes += frame.pixels.nbytes
-                    if total_bytes > 512 * 1024**2:
-                        raise ValueError(
-                            "Selected histories exceed 512 MiB BC frame budget; reduce selection"
-                        )
                     identities[key] = item
                 if pixel_hash not in copied:
                     write_file(request.output_dir / item["path"], bytes(frame.pixels))

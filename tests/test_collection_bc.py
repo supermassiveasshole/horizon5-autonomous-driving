@@ -2,6 +2,8 @@
 
 import hashlib
 import json
+import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -156,6 +158,68 @@ def test_collection_export_rejects_changed_pixels_before_publishing(tmp_path):
     with pytest.raises(ValueError):
         run_experiment(CollectionBCPrepare(config, tmp_path / "numeric"))
     assert not (tmp_path / "numeric").exists()
+
+
+def test_collection_export_accepts_histories_beyond_old_frame_quota(tmp_path):
+    from test_collection import Stream, input_at, request
+
+    from fh5.collection_bc import CollectionBCPrepare
+    from fh5.collection_dataset import CollectionDatasetReview
+    from fh5.numeric_images import PixelContract
+
+    config = dataset_inputs(tmp_path)
+    options = json.loads(config.read_bytes())
+    options["rules"]["max_samples_per_attempt"] = 500
+    size = (480, 270)
+    pixels = bytes([51, 17, 34]) * (480 * 270)
+
+    def points(index):
+        for sequence in range(500):
+            point = input_at(250 + index * 100_000 + sequence * 50)
+            # Pace the external source so this export test does not test writer overload.
+            time.sleep(0.005)
+            yield replace(
+                point,
+                frames=tuple(
+                    replace(frame, size=size, pixels=memoryview(pixels)) for frame in point.frames
+                ),
+            )
+
+    for index, source in enumerate(options["sources"]):
+        folder = tmp_path / f"long-source-{index}"
+        folder.mkdir()
+        req = request(folder, pixels=PixelContract(size=size), block_rows=250)
+        recorded = run_experiment(req, collection_environment=Stream(points(index)))
+        assert recorded.summary["collection"]["written_rows"] == 500
+        review_path = Path(source["review"])
+        review = json.loads(review_path.read_bytes())
+        review["session_sha256"] = hashlib.sha256(
+            (req.output_dir / "session.json").read_bytes()
+        ).hexdigest()
+        review["attempts"][0]["end_sequence"] = 500
+        review["attempts"][0]["intervals"][0]["end_sequence"] = 500
+        review_path.write_text(json.dumps(review))
+        source["recording"] = str(req.output_dir)
+    config.write_text(json.dumps(options))
+
+    output = tmp_path / "numeric"
+    prepared = run_experiment(CollectionBCPrepare(config, output)).summary["collection_bc"]
+    train = json.loads((output / "dataset.json").read_bytes())
+    final = json.loads((output / "evaluation.json").read_bytes())
+    assert len(train["decisions"]) == 990
+    assert len(final["decisions"]) == 495
+    assert prepared["decoded_frame_budget_bytes"] > 512 * 1024**2
+    # Distinct timestamped frames may share pixels; this is not resident-memory usage.
+    assert len(list((output / "pixels").iterdir())) == 1
+    assert next((output / "pixels").iterdir()).read_bytes() == pixels
+    assert {r["group"] for r in train["decisions"]} == {"group-0", "group-1"}
+    assert {r["group"] for r in final["decisions"]} == {"group-2"}
+    assert train["decisions"][-1]["source_sequence"] == 498
+    assert train["decisions"][-1]["views"]["no_reference"]["image_age_ms"] == [200, 100, 0]
+    verified = run_experiment(
+        CollectionDatasetReview(output / "selection.json", tmp_path / "verified.html")
+    )
+    assert verified.summary["collection_dataset"]["verified"]
 
 
 def test_old_prepare_config_requests_migration_before_reading_selection(tmp_path):
