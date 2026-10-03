@@ -11,11 +11,10 @@ from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
-from fh5.collection_review import _references
+from fh5.collection_review import _references, sealed_block_rows
 from fh5.collection_store import read_bounded
 from fh5.demonstrations import _mapped
-from fh5.numeric_images import PixelContract, asset, validate_frame_history
-from fh5.numeric_recording import read_numeric_frame
+from fh5.numeric_images import PixelContract, asset
 
 
 def sealed_rows(
@@ -40,19 +39,7 @@ def sealed_rows(
             or manifest["row_count"] != ref["rows"]
         ):
             raise ValueError("Frozen sealed block reference changed")
-        payload = read_bounded(block / "rows.jsonl", 256 * 1024**2)
-        if hashlib.sha256(payload).hexdigest() != manifest["rows_sha256"]:
-            raise ValueError("Frozen sealed rows changed")
-        lines = payload.splitlines()
-        if len(lines) != ref["rows"]:
-            raise ValueError("Frozen sealed row count differs")
-        rows = [json.loads(line) for line in lines]
-        if (
-            rows[0]["sequence"] != manifest["first_sequence"]
-            or rows[-1]["sequence"] != manifest["last_sequence"]
-        ):
-            raise ValueError("Sealed sequence bounds differ")
-        for row in rows:
+        for row in sealed_block_rows(block, manifest, contract):
             seq, tick = row["sequence"], row["at_ns"]
             if (
                 type(seq) is not int
@@ -62,14 +49,6 @@ def sealed_rows(
             ):
                 raise ValueError("Frozen source clocks and sequence must advance")
             previous, previous_ns = seq, tick
-            if row["frames"]:
-                frames = tuple(
-                    read_numeric_frame(block, f, byte_limit=contract.size[0] * contract.size[1] * 3)
-                    for f in row["frames"]
-                )
-                reason = validate_frame_history(row["capture_epoch"], tick, frames, contract)
-                if reason or any(f.source_time_ns < row["segment_start_ns"] for f in frames):
-                    raise ValueError("Frozen image history is unavailable or crosses a segment")
             yield relative, row
 
 

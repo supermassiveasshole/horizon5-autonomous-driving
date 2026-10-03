@@ -6,9 +6,11 @@ import hashlib
 import html
 import json
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fh5.artifact_io import VerifiedFile
 from fh5.collection import CollectionReview
 from fh5.collection_store import atomic_json, collection_complete, read_bounded, write_file
 from fh5.numeric_images import PixelContract, validate_frame_history
@@ -65,6 +67,40 @@ def _references(document: dict[str, Any], binding: str) -> dict[str, dict[str, A
             raise ValueError("Invalid or repeated sealed block reference")
         result[path] = ref
     return result
+
+
+def sealed_block_rows(
+    block: Path, manifest: dict[str, Any], contract: PixelContract
+) -> Iterator[dict[str, Any]]:
+    """Read verified bytes one row at a time; exhaust before accepting the block."""
+    expected = manifest["row_count"]
+    if type(expected) is not int or expected < 1:
+        raise ValueError("Sealed row count mismatch")
+    rows = VerifiedFile(block / "rows.jsonl", manifest["rows_sha256"])
+    with rows.snapshot() as stream:
+        count = 0
+        for line in stream:
+            row = json.loads(line)
+            count += 1
+            if count > expected:
+                raise ValueError("Sealed row count mismatch")
+            if (count == 1 and row["sequence"] != manifest["first_sequence"]) or (
+                count == expected and row["sequence"] != manifest["last_sequence"]
+            ):
+                raise ValueError("Sealed sequence bounds differ")
+            if row["frames"]:
+                frames = tuple(
+                    read_numeric_frame(block, f, byte_limit=contract.size[0] * contract.size[1] * 3)
+                    for f in row["frames"]
+                )
+                reason = validate_frame_history(
+                    row["capture_epoch"], row["at_ns"], frames, contract
+                )
+                if reason or any(f.source_time_ns < row["segment_start_ns"] for f in frames):
+                    raise ValueError("Archived history crosses a segment or violates contract")
+            yield row
+        if count != expected:
+            raise ValueError("Sealed row count mismatch")
 
 
 def review_collection(request: CollectionReview) -> RunResult:
@@ -154,48 +190,23 @@ def review_collection(request: CollectionReview) -> RunResult:
                 or manifest["index"] != int(block.name)
             ):
                 raise ValueError("Sealed block belongs to another session or index")
-            rows_raw = read_bounded(block / "rows.jsonl", 256 * 1024**2)
-            if hashlib.sha256(rows_raw).hexdigest() != manifest["rows_sha256"]:
-                raise ValueError("Sealed rows hash mismatch")
-            rows = rows_raw.splitlines()
-            if len(rows) != manifest["row_count"] or not 1 <= len(rows) <= 4096:
-                raise ValueError("Sealed row count mismatch")
-            first = last = -1
-            block_previous, missing = previous, 0
-            for line in rows:
-                row = json.loads(line)
+            block_previous, missing, count = previous, 0, 0
+            for row in sealed_block_rows(block, manifest, contract):
                 sequence = row["sequence"]
                 if type(sequence) is not int or sequence <= block_previous:
                     raise ValueError("Collection sequence repeated or moved backwards")
                 missing += sequence - block_previous - 1
-                block_previous = last = sequence
-                if first == -1:
-                    first = sequence
-                if row["frames"]:
-                    if len(row["frames"]) != len(contract.history_offsets_ms):
-                        raise ValueError("Incomplete archived frame history")
-                    frames = tuple(
-                        read_numeric_frame(
-                            block, f, byte_limit=contract.size[0] * contract.size[1] * 3
-                        )
-                        for f in row["frames"]
-                    )
-                    reason = validate_frame_history(
-                        row["capture_epoch"], row["at_ns"], frames, contract
-                    )
-                    if reason or any(f.source_time_ns < row["segment_start_ns"] for f in frames):
-                        raise ValueError("Archived history crosses a segment or violates contract")
-            if first != manifest["first_sequence"] or last != manifest["last_sequence"]:
-                raise ValueError("Sealed sequence bounds differ")
+                block_previous = sequence
+                count += 1
             previous = block_previous
             result["missing_rows"] += missing
-            result["rows"] += len(rows)
+            result["rows"] += count
             result["verified_blocks"] += 1
             result["blocks"].append(
                 {
                     "path": "blocks/" + block.name,
                     "manifest_sha256": digest,
-                    "rows": len(rows),
+                    "rows": count,
                 }
             )
         except (OSError, ValueError, KeyError, TypeError) as error:

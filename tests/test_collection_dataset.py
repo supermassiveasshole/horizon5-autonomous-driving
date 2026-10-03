@@ -11,12 +11,15 @@ from pathlib import Path
 import pytest
 from test_collection import Stream, input_at, request
 
+from fh5.collection import CollectionReview
 from fh5.collection_bc import CollectionBCPrepare
 from fh5.collection_dataset import CollectionDatasetReview
 from fh5.experiment import run_experiment
 
 
-def dataset_inputs(tmp_path, invalid_packet=False, vary_action=False, overlap=False, size=(2, 1)):
+def dataset_inputs(
+    tmp_path, invalid_packet=False, vary_action=False, overlap=False, size=(2, 1), block_rows=3
+):
     from fh5.numeric_images import PixelContract
 
     sources = []
@@ -25,7 +28,9 @@ def dataset_inputs(tmp_path, invalid_packet=False, vary_action=False, overlap=Fa
         folder.mkdir()
         req = request(folder)
         req = replace(req, input_conditions={"camera": "chase_far", "blueprint": "105657219"})
-        req = replace(req, config=replace(req.config, pixels=PixelContract(size=size)))
+        req = replace(
+            req, config=replace(req.config, pixels=PixelContract(size=size), block_rows=block_rows)
+        )
         points = [input_at(ms + (0 if overlap else index * 10000)) for ms in range(250, 951, 50)]
         points = [
             replace(
@@ -127,6 +132,76 @@ def test_freeze_binds_sealed_sources_reviews_and_independent_groups(tmp_path):
     )
     assert verified.summary["collection_dataset"]["verified"]
     assert (output / "selection.json").read_bytes() == before
+
+
+def rebind_sealed_rows(root, block):
+    manifest_path = block / "manifest.json"
+    manifest = json.loads(manifest_path.read_bytes())
+    with (block / "rows.jsonl").open("rb") as stream:
+        manifest["rows_sha256"] = hashlib.file_digest(stream, "sha256").hexdigest()
+    manifest["bytes"] = (block / "rows.jsonl").stat().st_size + sum(
+        path.stat().st_size for path in (block / "pixels").iterdir()
+    )
+    manifest_path.write_text(json.dumps(manifest))
+    digest = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
+    for name in ("index.json", "final.json"):
+        path = root / name
+        value = json.loads(path.read_bytes())
+        ref = next(ref for ref in value["blocks"] if ref["path"] == f"blocks/{block.name}")
+        ref["sha256"] = digest
+        if name == "final.json":
+            value["disk_bytes"] = sum(
+                path.stat().st_size for path in (root / "blocks").rglob("*") if path.is_file()
+            )
+        path.write_text(json.dumps(value))
+
+
+def test_large_sealed_block_keeps_review_and_training_selection_available(tmp_path):
+    config = dataset_inputs(tmp_path, block_rows=15)
+    original = tmp_path / "original"
+    run_experiment(CollectionBCPrepare(config, original))
+    expected = json.loads((original / "dataset.json").read_bytes())["decisions"]
+    root = Path(json.loads(config.read_bytes())["sources"][0]["recording"])
+    block = root / "blocks/000000"
+    rows_file = block / "rows.jsonl"
+    lines = rows_file.read_bytes().splitlines()
+    # Preserve every observation, adding legal JSON whitespace to cross the old
+    # whole-block 256 MiB rejection. Construct the file without retaining its bytes.
+    padding = b" " * 1024**2
+    with rows_file.open("wb") as stream:
+        for line in lines:
+            for _ in range(18):
+                stream.write(padding)
+            stream.write(line + b"\n")
+    assert rows_file.stat().st_size > 256 * 1024**2
+    rebind_sealed_rows(root, block)
+    reviewed = run_experiment(CollectionReview(root, tmp_path / "review.html"))
+    summary = reviewed.summary["collection"]
+    assert summary["complete"] and summary["rows"] == 15, summary["errors"]
+    assert not summary["commands_sent"]
+    prepared = tmp_path / "prepared"
+    run_experiment(CollectionBCPrepare(config, prepared))
+    assert json.loads((prepared / "dataset.json").read_bytes())["decisions"] == expected
+
+
+def test_incomplete_sealed_tail_cannot_publish_partial_training_selection(tmp_path):
+    config = dataset_inputs(tmp_path)
+    root = Path(json.loads(config.read_bytes())["sources"][0]["recording"])
+    block = root / "blocks/000004"
+    path = block / "rows.jsonl"
+    path.write_bytes(b"\n".join(path.read_bytes().splitlines()[:-1]) + b"\n")
+    # Integrity agrees with the bytes, but the promised final row is absent.
+    rebind_sealed_rows(root, block)
+    reviewed = run_experiment(CollectionReview(root, tmp_path / "review.html"))
+    summary = reviewed.summary["collection"]
+    assert not summary["complete"]
+    assert summary["verified_blocks"] == 4 and summary["rows"] == 12
+    assert summary["missing_rows"] == 3
+    assert any("row count" in error["error"].lower() for error in summary["errors"])
+    output = tmp_path / "not-published"
+    with pytest.raises(ValueError, match="row count"):
+        run_experiment(CollectionBCPrepare(config, output))
+    assert not output.exists()
 
 
 @pytest.mark.parametrize(
