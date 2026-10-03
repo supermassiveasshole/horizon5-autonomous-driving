@@ -51,4 +51,6 @@ Standards 初审：0 项硬性违反、1 项非阻塞重复发布逻辑建议，
 
 最终相关组合 **40 passed / 175.29 秒**（`runs/native-store-reviewed.xml`），包含原生/合成版本库、原生 SAC 评估及只读观测模型，采用上述计时与线程条件。不是整仓回归。独立 Standards 复审随后指出候选录制 fixture 的单线程状态仍依赖其他模块；已在 fixture 内明确设置，并在结束时恢复先前线程数，使 CLI 单独运行也使用同一条件。此修正只改变测试准备，不改变生产来源、资格或重放容差。
 
+修正后独立执行候选库文件 **12 passed / 57.66 秒**（`runs/native-store-isolated.xml`）；没有依赖先运行原生模块。最终 Ruff lint、429 文件格式及 diff-check 通过，生产代码 strict mypy 148 文件通过。固定 `c34cf26...e46a0ce` 复审：Standards 0 项遗留、Spec 0 项遗留。未重跑整仓套件。
+
 没有启动 FH5、Steam、真实 DXGI、手柄或 CUDA。`default_changed`、`real_driving_validated` 保持 false；#14 实机验收和 #15 原生连续调度仍未完成。
