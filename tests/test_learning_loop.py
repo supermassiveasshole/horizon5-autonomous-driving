@@ -165,17 +165,40 @@ def test_stop_during_sampling_closes_the_lease_without_updating_or_evaluating(
 
 
 def test_resume_evaluates_the_saved_learner_without_sampling_or_updating_it_twice(
-    tmp_path, seeded_loop
+    tmp_path, seeded_loop, monkeypatch
 ):
+    from pathlib import Path
+
     request = loop_request(tmp_path, seeded_loop)
 
     class UnavailableEvaluation(SharedBackend):
         def evaluation(self, identity):
             raise OSError("synthetic evaluation receiver unavailable")
 
-    failed = run_experiment(
-        request, learning_environment=UnavailableEvaluation(seeded_loop[0])
-    ).summary["learning_loop"]
+    backend = UnavailableEvaluation(seeded_loop[0])
+    original_open = Path.open
+
+    def unavailable_display(path, mode="r", *args, **kwargs):
+        if (
+            path.parent == request.output_dir
+            and path.name in ("summary.tmp", "summary.json", "report.html")
+            and any(flag in mode for flag in "wax")
+        ):
+            assert backend.closed
+            assert (request.output_dir / "state.json").is_file()
+            raise OSError("loop display unavailable")
+        return original_open(path, mode, *args, **kwargs)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(Path, "open", unavailable_display)
+        stopped = run_experiment(request, learning_environment=backend)
+    failed = stopped.summary["learning_loop"]
+    assert stopped.report_path == request.output_dir / "state.json"
+    assert failed["presentation"]["status"] == "unavailable"
+    assert json.loads(stopped.report_path.read_bytes()) == {
+        key: value for key, value in failed.items() if key != "presentation"
+    }
+    assert not (request.output_dir / "summary.json").exists()
     assert failed["stop_reason"] == "interface_error"
     assert failed["latest_learner"]["total_steps"] == 33
     assert failed["explorer"]["total_steps"] == 30
@@ -183,11 +206,20 @@ def test_resume_evaluates_the_saved_learner_without_sampling_or_updating_it_twic
     saved = failed["latest_learner"]["sha256"]
     from fh5.learning_loop import LearningContinue
 
+    # Older runs may still contain a display copy. It is neither recovery input
+    # nor a publication target; retain its original bytes during continuation.
+    historical_summary = request.output_dir / "summary.json"
+    historical_summary.write_bytes(b'{"historical_display": true}\n')
     backend = SharedBackend(seeded_loop[0])
-    result = run_experiment(
+    continued = run_experiment(
         LearningContinue(request.output_dir),
         learning_environment=backend,
-    ).summary["learning_loop"]
+    )
+    result = continued.summary["learning_loop"]
+    assert continued.report_path == request.output_dir / "report.html"
+    assert continued.report_path.is_file()
+    assert historical_summary.read_bytes() == b'{"historical_display": true}\n'
+    assert json.loads((request.output_dir / "state.json").read_bytes()) == result
     assert result["stop_reason"] == "budget_completed"
     assert result["rounds_completed"] == 2
     assert result["learner_updates"] == 6

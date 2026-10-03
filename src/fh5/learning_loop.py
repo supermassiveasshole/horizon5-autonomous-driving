@@ -1244,11 +1244,10 @@ def run_learning_loop(
                 loop.save("stopped", final=True)
         finally:
             loop.stages.close()
-    atomic_json(root / "summary.json", loop.state)
     report = optional_report(
         root / "report.html",
         "合成自主学习循环（循环运行不等于驾驶能力提升）",
         loop.state,
-        fallback=root / "summary.json",
+        fallback=root / "state.json",
     )
     return RunResult({}, [], [], {"learning_loop": loop.state}, report)
