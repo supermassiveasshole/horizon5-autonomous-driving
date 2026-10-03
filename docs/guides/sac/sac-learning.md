@@ -1,0 +1,76 @@
+# SAC 数值转移、预热与离线策略更新
+
+本页说明数值转移准备、冻结 BC 的双 Q 预热，以及实际更新 actor、双 Q、温度和共享编码器的离线 SAC 训练。下面的 `sac-prepare` 示例限定同步合成经验；原生异步记录经[采样与经验准备](sac-cycle.md)进入相同学习管线。离线训练入口不连接设备，原生短段采样和评估由[连续学习循环](learning-loop.md)串联；实机闭环和驾驶改善仍待验收，#11 保持开放。
+
+## 输入与边界
+
+`run_experiment(SACReplayPrepare(...))` 将录制、独立局部任务及有效性证据、奖励配置和合成动作记录关联起来。记录格式为 `synthetic-synchronous-action-trace-v1`：明确声明动作在起始遥测时刻同步生效。它只接受 `source_kind=synthetic` 的录制，不能把原生下发返回时间解释成游戏实际执行时间。
+
+记录含起始命令、下发时刻、动作所属 epoch、每段起止包号、发送状态、实际整数命令和数值观测。油门/刹车互斥；转向使用 `steer_i16 / 32767`，纵向使用 `(throttle_u8 - brake_u8) / 255`。观测含 RGB 原始字节及摘要、采集/就绪时间、因果本车状态和动作历史。当前适配器固定动作历史偏移为 200/100/0 ms；同一决策的新命令不能进入自己的历史。测试中的 `tests/test_sac.py::experience` 是完整合成格式示例。
+
+构造器核验数值帧、遥测、实际发送值与合成响应的一致性，复用独立奖励结算。缺图、未发送、归属不符和跨恢复边界会保留排除原因，不填帧或拼接重开后的状态。真实任务失败保留负奖励和终止；外部录制结束仅在真实末观测存在时继续 bootstrap，不能自动当成零价值终止。
+
+恢复后的完整历史同样受独立前向片段约束：epoch 必须更新，帧来源和动作历史不得早于恢复边界。刚恢复时历史不足的决策跳过；凑齐恢复后的真实历史即可继续构造转移，不必丢弃整段。
+
+奖励按物理时间累计：多步转移使用 `r1 + d1*r2 + ...` 和折扣乘积。游戏物理时长、主机动作保持时长、图像实际帧间 Δt 分别保存。任务最远进度、起点、下一检查点和剩余时间送入 critic；BC actor 的输入契约不变。
+
+## 预热与重载
+
+`SACCriticWarmup` 加载数值 Δt BC，冻结整个图像编码器、状态编码器、动作层及状态缓冲，只更新两套 Q 头。目标采用受幅度、上一发送命令和实际时间限制的确定性 BC 动作，并量化至实际命令网格。超出支持区间的 replay 动作拒绝训练，不能裁剪标签后继续使用。
+
+默认 100 次 CPU 更新、batch 32、学习率 0.0001、种子 7、目标软更新率 0.005。命令幅度默认转向 0.5、油门 0.35、刹车 0.4，两轴变化率各 4/s；可用 `--bounds` 提供对应 `ActionBounds` 字段的 JSON。配置是软件候选，不是已校准的实机策略。
+
+动作边界先按连续坐标计算，再沿用发送器的四舍六入五成双量化（Python `round`）；例如转向上限 0.5 实际发送 16384，对应约 0.5000153。replay 支持范围使用同一实际整数端点，不能因半格量化差异拒绝真实 BC 命令。连续或量化区间退化时显式拒绝，不构造不存在的分布。
+
+原始数值帧始终保存；预热缓存特征只属于当前冻结编码器。每次只读取一个观测的图像历史，编码后释放原始图像与 actor 输入缓存，不再以累计解码 512 MiB 拒绝预热。新预热快照版本 2 封存 replay、数值帧、BC、critic、optimizer、RNG 和训练历史，支持[停止后完成剩余预热预算](critic-resume.md)。`SACCriticReplay` 只加载核验，不继续训练。封存 BC 和经验副本后、首次更新前逐条重读并比较预测，保持抽样 RNG 不变；更新后核对所有原始模型状态和封存 BC 文件摘要，防止预热改变驾驶输出。
+
+检查点封存及候选核验逐帧读取、校验，使用临时 SQLite 去重路径并检查同路径摘要冲突，移除独立的帧总量 512 MiB 门槛。索引使用系统临时位置（可通过 `TMP` / `TEMP` 配置）。来源、经验合并、观测与冻结特征均已磁盘索引化，critic 只构造选中批次张量。优化器执行前的批次读取资源故障会保留已完成更新及抽样 RNG，详见[critic 接续](critic-resume.md)。封存必要状态失败仍不能发布完整新版本。
+
+`critic.json` 只保存检查点清单；逐步 loss、目标和预测写入可选 JSONL，`training-report.json` 保存固定大小的描述及进度。暂停/恢复入口的独立终止调整归入最后一个可用转移；新的 epoch 或独立前向片段不继承旧命令约束。
+
+## 命令
+
+先安装 `learning` 可选依赖。路径替换为实际合成输入；输出目录必须是新目录。
+
+```powershell
+uv run --locked fh5 sac-prepare --recording runs/synthetic/recording --trace runs/synthetic/trace.json --task runs/synthetic/task.json --reward runs/synthetic/reward.json --evidence runs/synthetic/evidence.json --output runs/sac-replay
+uv run --locked fh5 sac-warmup --model runs/temporal-bc --replay runs/sac-replay/replay.json --output runs/critic-first --steps 100
+uv run --locked fh5 sac-warmup-resume --checkpoint runs/critic-first --output runs/critic-continued
+uv run --locked fh5 sac-critic-replay --checkpoint runs/critic-first --report runs/critic-reloaded.html
+uv run --locked fh5 sac-train --config configs/sac-learning.example.json --output runs/sac-candidate
+uv run --locked fh5 sac-resume --checkpoint runs/sac-candidate --output runs/sac-continued --steps 100
+uv run --locked fh5 sac-policy-replay --checkpoint runs/sac-candidate --report runs/sac-policy.html
+```
+
+`sac-prepare` 无可用转移时返回 4；输入错误返回 2；成功返回 0。报告展示资格、排除原因、Q 更新量与 BC 不变检查。loss 或 Q 变化不等于驾驶进步。
+
+`sac-warmup` 自动计算并绑定选中经验的摘要，可用 `--replay-sha256` 断言预期原件。两种冻结回放默认使用检查点内的 `experience/replay.json`，仍按保存的摘要核验；可用 `--replay` 显式指定原经验。指定原件缺失或摘要不符时直接报错，不回退到其他文件。未封存经验的旧检查点须显式给出原经验；Python 请求参数及检查点格式保持不变。
+
+## 策略、温度与共享编码器更新
+
+`sac-train` 配置只需指定 `warmup` 和训练参数；省略 `replay` 时使用该预热检查点已封存的经验，仍按检查点摘要核验，不需要原始 BC 或经验目录。旧配置中的显式 `replay` 继续生效，路径相对配置文件解析；缺失、损坏或摘要不符时直接拒绝，不回退到另一份经验。没有封存经验的旧版预热仍需显式指定原经验文件。Python 的 `SACTrain` 参数保持不变。
+
+`SACTrain` 从已保存的 BC/双 Q 预热检查点出发，采用固定经验和有限 CPU 更新预算。版本 2 预热必须完成原阶段预算后才允许交接；其历史清单与报告继续保留在 SAC 快照中。`steps=0` 可单独核对交接，不执行优化。新策略版本 `conditional-temporal-sac-v1` 保留原数值 Δt 输入，并向策略提供上一实际命令、实际间隔和可执行区间；任务进度/计时上下文仍只提供给 critic。
+
+策略把 BC 的受限动作转换为有限逆 tanh 均值，新增动作上下文均值修正和 log 标准差。初始修正为零，默认 log 标准差 −3，范围 [−5, −1]，以较窄高斯开始探索；饱和边界的均值留在同一整数命令格内。保存前报告所用经验上的 BC 交接整数命令误差。此检查不证明所有未知状态或实机驾驶相同。
+
+采样 `z = mean + std * noise`，连续动作 `a = center + scale * tanh(z)`。log 密度包含正态项、tanh Jacobian 和 `log(scale)`；命令坐标下目标熵为归一化目标熵（默认 −2）加两轴 `log(scale)` 之和。温度优化使用相同坐标。真实终止的目标只含结算奖励；非终止采用 `r + discount * (min(target Q) - alpha * log_probability)`。
+
+最终发送契约仍是整数命令。Q 前向及 replay 使用量化后的值；actor 对量化使用**直通梯度近似**，熵密度定义在量化前的连续动作上。这是版本化的连续松弛，不把整数命令的概率质量冒充连续密度，也不宣称是精确离散 SAC。后续若改变近似或坐标，须更换契约并重新对照。
+
+critic 优化器独占图像/状态编码器和双 Q；actor 优化器只持有策略头及上下文/方差层，actor 在共享特征处停止梯度；目标网络有单独的目标编码器。每次 critic 更新后重新编码 actor 输入，训练不缓存旧 latent。默认每两次 critic 更新一次 actor/温度，编码器默认学习率 1e−5，actor 3e−5，critic/温度 1e−4，目标软更新率 0.005。报告检查双方不越权修改参数。固定经验上的更新次数不等于在线采样更新比；新经验与更新预算由[采样循环](sac-cycle.md)及[连续学习循环](learning-loop.md)管理。
+
+`batch_size` 与 `actor_interval` 来自实验配置，均要求正整数，不叠加最多 256 与最多 10 的旧门槛。
+批次按既有小池规则缩小；更新间隔按累计步数判定，续训沿用保存值而不重新起算。
+批次资源由实际形状和可用内存决定；必要输入分配/读取的可恢复失败按[资源审计](../../validation/resource-limit-audit.md)
+记录，不能把移除配置上限说成任意配置均有足够容量。原生 Torch 分配失败和优化器中途失败仍待专项处理。
+
+`policy.json` 与 `policy.pt` 相互绑定配置、动作语义、BC、经验和权重摘要，保存两套优化器、温度优化器、目标网络、RNG 和步数。新版本 2 封存数值经验与训练历史，可在新的输出目录[停止后继续训练](sac-resume.md)，不重跑初始化；旧版本 1 保持冻结回放契约。独立输出保留初始化 BC，原检查点不会覆盖。原始 uint8 热缓存按内容共享；新训练默认禁用保留，显式预算可开启，放不下的帧按需使用而不拒绝，见[缓存说明](learning-storage.md)。单次浮点图像 batch 的旧 256 MiB 限制尚待清理。当前仅验证 CPU；GPU/游戏共同运行预算未验证。
+
+`SACPolicyReplay` 只接受新的 `.html` 输出路径，既有文件和符号链接在计算前拒绝，最终独占创建报告；不能用回放报告覆盖候选权重、经验、数值图像或已有报告。实际更新与保存重载的证据见[本次验证](../../validation/t10-sac-updates.md)。
+
+## 后续工作
+
+SAC 更新明细和前后预测现按行写入[可选诊断日志](training-diagnostics.md)，摘要不物化这些数组；预测数值另有独立流式摘要用于模型重载核对，展示文件不可用不跳过核对。单次和累计 SAC 更新次数不再叠加任意数字上限。配置明确指定更新预算，日志资源故障不丢弃已经完成的训练。critic 预热的逐步明细及预测同样拆为可选日志，预热预算移除额外次数门槛；全排列抽样、采集入口等按[资源审计](../../validation/resource-limit-audit.md)继续处理。
+
+[有界合成采样/学习交替](sac-cycle.md)、尝试边界换版和[完整示范转移混合](sac-mixture.md)已有软件实现。[临时 BC 约束](sac-imitation.md)可在合成开发评估达标后逐级退出，版本 4 保存该阶段及其证据。原生动作时序和数据用途绑定的当前接口见[数值驾驶](../runtime/realtime-decisions.md)、[连续学习](learning-loop.md)及[冻结评估](../evaluation/evaluation.md)。这些接口已有软件实现；GPU 与 4K 游戏共存、真实自动采样和驾驶比较仍待实机验收。

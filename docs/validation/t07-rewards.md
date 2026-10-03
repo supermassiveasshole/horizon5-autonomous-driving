@@ -1,6 +1,6 @@
 # T07 / #8 奖励结算验证
 
-2026-09-30。已完成离线实现、历史数据重算及双轴代码审查，未启动 FH5/Steam、未发送控制、未进行 RL 更新。奖励版本 `local-physical-reward-v1`，配置 `configs/reward-local-v1.json`；相关使用方法见[奖励说明](../rewards.md)。实现提交 `d3b1793`，边界修复 `c996b08`。
+2026-09-30。已完成离线实现、历史数据重算及双轴代码审查，未启动 FH5/Steam、未发送控制、未进行 RL 更新。奖励版本 `local-physical-reward-v1`，配置 `configs/reward-local-v1.json`；相关使用方法见[奖励说明](../guides/evaluation/rewards.md)。实现提交 `d3b1793`，边界修复 `c996b08`。
 
 ## 完整反例
 

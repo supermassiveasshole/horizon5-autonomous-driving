@@ -6,14 +6,18 @@ This repository uses a single context: root `CONTEXT.md` and `docs/adr/`.
 
 Read [CONTEXT.md](../../CONTEXT.md), then the accepted ADRs relevant to the work in [docs/adr/](../adr/). If a domain document is absent, proceed silently; `domain-modeling` creates it when terminology or decisions are resolved.
 
-Read [PRD.md](../PRD.md) before changing scope or acceptance criteria, and [driving-learning-design.md](../driving-learning-design.md) before implementation changes. [scope-decisions.md](../scope-decisions.md) records the user's decisions; historical research remains supporting evidence rather than the current product baseline.
+Read [PRD.md](../design/PRD.md) before changing scope or acceptance criteria, and [driving-learning-design.md](../design/driving-learning-design.md) before implementation changes. [scope-decisions.md](../archive/scope-decisions.md) records the user's decisions; historical research remains supporting evidence rather than the current product baseline.
 
 ## File Layout
 
 ```text
 CONTEXT.md
 docs/
-  PRD.md
+  README.md
+  design/
+    PRD.md
+  archive/
+    scope-decisions.md
   adr/
     0001-known-route-first.md
     0002-separate-driving-and-recovery.md

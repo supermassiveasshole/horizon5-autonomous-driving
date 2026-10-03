@@ -4,7 +4,7 @@
 
 ## 方法与数据
 
-方法为 `segformer-cityscapes-b0-v1`，固定 NVIDIA 权重及预处理配置；来源、许可、复现步骤和评估协议见 [像素道路估计](../perception.md)，版本清单见 `configs/perception-t23.json`。协议及阈值在首轮预测前写入；独立审查后进一步明确未知候选不进入高分决策分母，在这之前没有收到或查看人工留出标签。模型、置信阈值和像素映射没有依照留出标签调整。
+方法为 `segformer-cityscapes-b0-v1`，固定 NVIDIA 权重及预处理配置；来源、许可、复现步骤和评估协议见 [像素道路估计](../guides/runtime/perception.md)，版本清单见 `configs/perception-t23.json`。协议及阈值在首轮预测前写入；独立审查后进一步明确未知候选不进入高分决策分母，在这之前没有收到或查看人工留出标签。模型、置信阈值和像素映射没有依照留出标签调整。
 
 使用 [数据集示例](../../configs/perception-dataset.example.json) 的五段连续记录，共 300 帧、960×540：
 

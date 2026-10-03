@@ -1,6 +1,6 @@
 # T11：恢复监督的合成回放
 
-2026-09-30。实现范围为 [恢复监督回放](../recovery.md)，跟踪 [Issue #12](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/12)。**开发中，Issue 保持开放；FH5 与 Steam 未启动，没有新实机证据。**
+2026-09-30。实现范围为 [恢复监督回放](../guides/runtime/recovery.md)，跟踪 [Issue #12](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/12)。**开发中，Issue 保持开放；FH5 与 Steam 未启动，没有新实机证据。**
 
 ## 已验证的软件行为
 

@@ -7,11 +7,11 @@ import sys
 from pathlib import Path
 
 import pytest
-from test_control import control_config
-from test_experiment import config_file, sample_packet
-from test_tracking import tracking_config
 
 from fh5.cli import main
+from tests.driving.test_control import control_config
+from tests.driving.test_tracking import tracking_config
+from tests.telemetry.test_experiment import config_file, sample_packet
 
 
 @pytest.mark.parametrize(
@@ -178,7 +178,7 @@ def test_control_cli_defaults_to_validation_without_a_driver(tmp_path: Path) -> 
 
 
 def test_event_cli_defaults_to_validation_without_capture_or_input(tmp_path):
-    from test_event_run import verified_config
+    from tests.driving.test_event_run import verified_config
 
     output = tmp_path / "no-device"
     result = subprocess.run(

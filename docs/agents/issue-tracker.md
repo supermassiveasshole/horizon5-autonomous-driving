@@ -1,6 +1,6 @@
 # Issue Tracker: GitHub
 
-Issues and task specifications live in [GitHub Issues](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues). The product baseline remains in `docs/PRD.md`.
+Issues and task specifications live in [GitHub Issues](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues). The product baseline remains in [PRD](../design/PRD.md).
 
 ## Repository and CLI
 

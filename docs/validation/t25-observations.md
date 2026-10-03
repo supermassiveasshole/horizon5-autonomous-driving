@@ -1,6 +1,6 @@
 # T25 因果多模态观测验证
 
-日期：2026-09-29。对应 [#26](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/26)，命令/字段契约见[观测说明](../observations.md)。本切片不发送驾驶命令，不产生示范动作真值，不训练 BC/SAC。
+日期：2026-09-29。对应 [#26](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/26)，命令/字段契约见[观测说明](../guides/capture/observations.md)。本切片不发送驾驶命令，不产生示范动作真值，不训练 BC/SAC。
 
 ## 冻结实录回放
 

@@ -1,6 +1,6 @@
 # T13 持久候选版本验证
 
-2026-10-01。实现提交 `38c9a3c`，审查修复 `434846c`。通过已约定的 `run_experiment` 与 CLI 入口验证，说明见[持久版本使用方法](../candidate-store.md)。#14 继续开放，实际 FH5 激活与独立驾驶资格尚未通过。
+2026-10-01。实现提交 `38c9a3c`，审查修复 `434846c`。通过已约定的 `run_experiment` 与 CLI 入口验证，说明见[持久版本使用方法](../guides/evaluation/candidates.md#candidate-store)。#14 继续开放，实际 FH5 激活与独立驾驶资格尚未通过。
 
 ## 完成的软件行为
 
