@@ -948,25 +948,13 @@ class _Loop:
                 row["evaluation_completion_sha256"] = _sha(completion)
         row["evaluation_run"] = execution
         self.state["child_resources_released"] &= execution["resources_released"]
-        publication = row.get("review_publication")
-        if publication is not None and (
-            not isinstance(publication, dict)
-            or set(publication) != {"sequence", "directory"}
-            or type(publication["sequence"]) is not int
-            or publication["sequence"] < 0
-            or not isinstance(publication["directory"], str)
-        ):
-            raise ValueError("Invalid parent review publication")
-        attempt = 0 if publication is None else publication["sequence"]
-        review_output = root / ("reviewed" if attempt == 0 else f"reviewed-{attempt:03d}")
-        if publication is not None and Path(publication["directory"]) != review_output:
-            raise ValueError("Parent review publication directory changed")
+        attempt = 0
+        review_output = root / "reviewed"
         while review_output.exists() or review_output.is_symlink() or review_output.is_junction():
             attempt += 1
             review_output = root / f"reviewed-{attempt:03d}"
-        # Older directories remain independently readable on disk. Preserve a
-        # legacy list if present, but never grow it with later publications.
-        row["review_publication"] = {"directory": str(review_output), "sequence": attempt}
+        # Derived reports need no parent allocation state. Retain occupied paths
+        # and leave old publication metadata untouched, without consulting it.
         self.save("reviewing_evaluation")
         ledger_file = self.review_ledger(root, row)
         # Never derive legality from the model or a successful execution summary.

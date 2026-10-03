@@ -25,9 +25,14 @@ def test_retained_review_directories_cannot_exhaust_continuation(
     state = root / "state.json"
     prior = json.loads(state.read_bytes())
     if legacy:
-        prior["rounds"][0].pop("review_publication", None)
+        prior["rounds"][0]["review_publication"] = {
+            "directory": str(root / "round-000/reviewed"),
+            "sequence": 999,
+        }
         prior["rounds"][0]["review_directories"] = [str(root / "round-000/reviewed")]
         state.write_text(json.dumps(prior))
+    else:
+        assert "review_publication" not in prior["rounds"][0]
     # Retained partial publications, not eleven new driving evaluations.
     for index in range(1, 11):
         directory = root / f"round-000/reviewed-{index:03d}"
@@ -60,10 +65,10 @@ def test_retained_review_directories_cannot_exhaust_continuation(
     assert not backend.leases and backend.closed and result["resources_released"]
     row = result["rounds"][0]
     sequence = 12 if dangling_link else 11
-    assert row["review_publication"] == {
-        "directory": str(root / f"round-000/reviewed-{sequence:03d}"),
-        "sequence": sequence,
-    }
+    if legacy:
+        assert row["review_publication"] == prior["rounds"][0]["review_publication"]
+    else:
+        assert "review_publication" not in row
     assert (root / f"round-000/reviewed-{sequence:03d}/batch-report.json").is_file()
     assert row.get("review_directories", []) == prior["rounds"][0].get("review_directories", [])
     assert all(sha(path) == digest for path, digest in originals.items())
