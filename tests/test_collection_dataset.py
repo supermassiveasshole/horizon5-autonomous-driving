@@ -376,6 +376,15 @@ def test_reservoir_is_reproducible_and_does_not_change_event_counts(tmp_path):
     ).read_bytes()
     data = json.loads((tmp_path / "first/selection.json").read_bytes())
     assert len(data["samples"]) == 6
+    # Frozen result from the pre-index reservoir, seed 7 and two samples per attempt.
+    assert [(s["attempt"], s["sequence"]) for s in data["samples"]] == [
+        ("attempt-0", 10),
+        ("attempt-0", 13),
+        ("attempt-1", 11),
+        ("attempt-1", 12),
+        ("attempt-2", 10),
+        ("attempt-2", 11),
+    ]
     assert all(
         c["trusted_events"]["left"] == 1
         for c in first.summary["collection_dataset"]["development_coverage"]

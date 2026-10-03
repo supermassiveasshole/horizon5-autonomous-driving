@@ -53,7 +53,7 @@ uv run --locked fh5 temporal-replay --model runs/temporal-model --dataset runs/n
 
 训练配置的 `dataset` 指向准备结果；路径相对配置文件，数据摘要自动绑定。`temporal-replay` 使用训练时同一数据集复核冻结结果；独立最终留出 `evaluation.json` 使用 `collection-bc-assess`，不能混用。示例步数、批量和抽样数是待选择的实验参数，不代表数据或训练已足够。
 
-准备器逐条读取图像、按内容去重保存，不再用累计帧字节量拒绝导出；样本数与元数据大小等历史限制仍待清理，已知边界见[数据准备](docs/collection-datasets.md)与[资源策略](docs/resource-policy.md)。需要边采集边训练时，用[采集优先调度](docs/learning-schedule.md)的单份 `collection-learning.example.json`；CPU 停止后的接续见[BC 恢复](docs/bc-resume.md)。
+准备器逐条读取图像、按内容去重保存，用临时磁盘索引承载累计样本和导出记录；不再用累计帧字节量、50,000 条样本或 128 MiB 导出清单门槛拒绝。来源/核验元数据的其他历史限制仍待清理，已知边界见[数据准备](docs/collection-datasets.md)与[资源策略](docs/resource-policy.md)。需要边采集边训练时，用[采集优先调度](docs/learning-schedule.md)的单份 `collection-learning.example.json`；CPU 停止后的接续见[BC 恢复](docs/bc-resume.md)。
 
 ## 3. 冻结候选进入只读检查与驾驶
 

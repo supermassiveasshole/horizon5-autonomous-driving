@@ -7,16 +7,22 @@ import json
 import math
 import random
 import re
+import sqlite3
 from collections import Counter
+from collections.abc import Iterator
+from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
+from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.collection_review import _references
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.demonstrations import _profile
 from fh5.numeric_images import PixelContract
 from fh5.presentation import optional_report
+from fh5.replay_document import ReplayArray, replay_document
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -26,6 +32,68 @@ if TYPE_CHECKING:
 class CollectionDatasetReview:
     dataset_file: Path
     report_path: Path
+
+
+class _CollectionIndex:
+    """Run-owned selection and export rows; no persistent format or recovery state."""
+
+    def __init__(self, database: sqlite3.Connection) -> None:
+        self.database = database
+        self.counts: Counter[str] = Counter()
+        self.unique_frames = 0
+        database.execute(
+            "CREATE TABLE records (section TEXT, position INTEGER, data TEXT NOT NULL, "
+            "source TEXT, sequence INTEGER, PRIMARY KEY (section, position), "
+            "UNIQUE (source, sequence))"
+        )
+        database.execute(
+            "CREATE TABLE identities (kind TEXT, identity TEXT, data TEXT, "
+            "PRIMARY KEY (kind, identity)) WITHOUT ROWID"
+        )
+
+    def append(self, section: str, row: dict[str, Any]) -> None:
+        self.database.execute(
+            "INSERT INTO records VALUES (?, ?, ?, ?, ?)",
+            (
+                section,
+                self.counts[section],
+                encode(row).decode(),
+                row["source_sha256"] if section == "samples" else None,
+                row["sequence"] if section == "samples" else None,
+            ),
+        )
+        self.counts[section] += 1
+
+    def array(self, section: str) -> ReplayArray:
+        return ReplayArray(self.database, section, self.counts[section])
+
+    def sample(self, source: str, sequence: int) -> dict[str, Any] | None:
+        found = self.database.execute(
+            "SELECT data FROM records WHERE source = ? AND sequence = ?", (source, sequence)
+        ).fetchone()
+        return None if found is None else json.loads(found[0])
+
+    def frame_is_new(self, frame: dict[str, Any]) -> bool:
+        key = json.dumps([frame["epoch"], frame["frame_id"]])
+        prior = self.database.execute(
+            "SELECT data FROM identities WHERE kind = 'frame' AND identity = ?", (key,)
+        ).fetchone()
+        if prior is not None:
+            if json.loads(prior[0]) != frame:
+                raise ValueError("Captured frame identity changed between source blocks")
+            return False
+        self.database.execute(
+            "INSERT INTO identities VALUES ('frame', ?, ?)", (key, encode(frame).decode())
+        )
+        self.unique_frames += 1
+        return True
+
+    def pixel_is_new(self, digest: str) -> bool:
+        return bool(
+            self.database.execute(
+                "INSERT OR IGNORE INTO identities VALUES ('pixel', ?, 'true')", (digest,)
+            ).rowcount
+        )
 
 
 def _evidence(value: Any) -> bool:
@@ -111,10 +179,7 @@ def _config(value: dict[str, Any]) -> None:
         "max_label_delay_ms",
     }:
         raise ValueError("Unsupported collection dataset selection rules")
-    if (
-        type(rules["max_samples_per_attempt"]) is not int
-        or not 1 <= rules["max_samples_per_attempt"] <= 5000
-    ):
+    if type(rules["max_samples_per_attempt"]) is not int or rules["max_samples_per_attempt"] < 1:
         raise ValueError("Invalid per-attempt reservoir size")
     speed = rules["speed_range_mps"]
     if not isinstance(speed, list) or len(speed) != 2:
@@ -185,14 +250,29 @@ def _groups(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return sorted(groups.values(), key=lambda g: g["id"])
 
 
-def build_snapshot(config: dict[str, Any], sources: list[dict[str, Any]]) -> dict[str, Any]:
+@contextmanager
+def build_snapshot(
+    config: dict[str, Any], sources: list[dict[str, Any]]
+) -> Iterator[tuple[dict[str, Any], _CollectionIndex]]:
+    with TemporaryDirectory(prefix="fh5-collection-dataset-") as temporary:
+        try:
+            with closing(sqlite3.connect(Path(temporary) / "dataset.sqlite3")) as database:
+                index = _CollectionIndex(database)
+                yield _snapshot(config, sources, index), index
+        except sqlite3.Error as error:
+            raise OSError("Cannot index collection dataset: " + str(error)) from error
+
+
+def _snapshot(
+    config: dict[str, Any], sources: list[dict[str, Any]], index: _CollectionIndex
+) -> dict[str, Any]:
     from fh5.collection_selection import select_source
 
     _config(config)
     groups = _groups(sources)
     seen = set()
     compatibility = None
-    samples, details = [], []
+    details = []
     windows: list[tuple[int, int]] = []
     diagnostic = False
     for number, source in enumerate(sources):
@@ -230,18 +310,15 @@ def build_snapshot(config: dict[str, Any], sources: list[dict[str, Any]]) -> dic
             session["source_kind"] != "live_passive"
             or session["software_snapshot"].get("verified") is not True
         )
-        rows, stats = select_source(
-            source, session, config["rules"], random.Random(config["seed"] + number)
+        stats = select_source(
+            source, session, config["rules"], random.Random(config["seed"] + number), index
         )
         for detail in stats:
             first, last = detail["first_ns"], detail["last_ns"]
             if any(first <= end and begin <= last for begin, end in windows):
                 raise ValueError("Overlapping source windows cannot establish independent attempts")
         windows.extend((d["first_ns"], d["last_ns"]) for d in stats)
-        samples.extend(rows)
         details.extend(stats)
-        if len(samples) > 50_000:
-            raise ValueError("Snapshot exceeds 50000 selected observations; use smaller reservoirs")
     assert compatibility is not None
     return {
         "version": 1,
@@ -249,7 +326,7 @@ def build_snapshot(config: dict[str, Any], sources: list[dict[str, Any]]) -> dic
         "config": config,
         "sources": sources,
         "groups": groups,
-        "samples": samples,
+        "samples": index.array("samples"),
         "coverage": details,
         "pixel_contract": compatibility[0],
         "action_contract": compatibility[1],
@@ -299,13 +376,23 @@ def review_collection_dataset(request: CollectionDatasetReview) -> RunResult:
     from fh5.experiment import RunResult
 
     path, report = request.dataset_file, request.report_path
-    data = json.loads(read_bounded(path, 128 * 1024**2))
-    if data.get("kind") != "collection-dataset-snapshot-v1" or data.get("version") != 1:
-        raise ValueError("Unsupported collection dataset snapshot")
-    _report_destination(report, data["sources"])
-    if build_snapshot(data["config"], data["sources"]) != data:
-        raise ValueError("Dataset differs from canonical frozen source reconstruction")
-    summary = _summary(data, hashlib.sha256(read_bounded(path, 128 * 1024**2)).hexdigest())
+    digest = sha256_file(path)
+    with replay_document(VerifiedFile(path, digest)) as data:
+        if data.get("kind") != "collection-dataset-snapshot-v1" or data.get("version") != 1:
+            raise ValueError("Unsupported collection dataset snapshot")
+        _report_destination(report, data["sources"])
+        with build_snapshot(data["config"], list(data["sources"])) as (expected, _):
+            if data.keys() != expected.keys():
+                raise ValueError("Dataset differs from canonical frozen source reconstruction")
+            for key, value in expected.items():
+                actual = data[key]
+                if isinstance(value, (list, ReplayArray)) and isinstance(actual, ReplayArray):
+                    same = len(value) == len(actual) and all(a == b for a, b in zip(value, actual))
+                else:
+                    same = value == actual
+                if not same:
+                    raise ValueError("Dataset differs from canonical frozen source reconstruction")
+        summary = _summary(data, digest)
     write_file(report.with_suffix(".json"), encode(summary))
     report = optional_report(
         report,

@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import sqlite3
 import time
 from dataclasses import replace
 from pathlib import Path
@@ -170,6 +171,43 @@ def test_collection_export_rejects_changed_pixels_before_publishing(tmp_path):
     with pytest.raises(ValueError):
         run_experiment(CollectionBCPrepare(config, tmp_path / "numeric"))
     assert not (tmp_path / "numeric").exists()
+
+
+def test_preparation_accepts_the_configured_reservoir_budget(tmp_path):
+    from fh5.collection_bc import CollectionBCPrepare
+
+    config = prepare_inputs(tmp_path)
+    run_experiment(CollectionBCPrepare(config, tmp_path / "original"))
+    settings = json.loads(config.read_bytes())
+    settings["rules"]["max_samples_per_attempt"] = 5001
+    config.write_text(json.dumps(settings))
+    run_experiment(CollectionBCPrepare(config, tmp_path / "larger-budget"))
+    for name in ("dataset.json", "evaluation.json"):
+        original = json.loads((tmp_path / "original" / name).read_bytes())
+        current = json.loads((tmp_path / "larger-budget" / name).read_bytes())
+        assert current["decisions"] == original["decisions"]
+        assert current["provenance"]["envelope"]["max_samples_per_attempt"] == 5001
+
+
+def test_unavailable_preparation_index_preserves_sources_for_retry(tmp_path, monkeypatch):
+    from fh5.collection_bc import CollectionBCPrepare
+
+    config = prepare_inputs(tmp_path)
+    output = tmp_path / "prepared"
+    attempted = []
+
+    def unavailable_storage(path, *args, **kwargs):
+        attempted.append(Path(path))
+        raise sqlite3.OperationalError("disk I/O error")
+
+    with monkeypatch.context() as fault:
+        fault.setattr(sqlite3, "connect", unavailable_storage)
+        with pytest.raises(OSError, match="Cannot index collection dataset"):
+            run_experiment(CollectionBCPrepare(config, output))
+    assert attempted and all(not path.parent.exists() for path in attempted)
+    assert not output.exists()
+    result = run_experiment(CollectionBCPrepare(config, output))
+    assert result.summary["collection_dataset"]["ready_for_software_training"]
 
 
 def test_collection_export_accepts_histories_beyond_old_frame_quota(tmp_path):

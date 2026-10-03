@@ -25,10 +25,11 @@ from fh5.collection_store import encode, read_bounded, write_file
 from fh5.numeric_images import NumericDecision, PixelContract, asset, validate_decision
 from fh5.numeric_recording import read_numeric_frame
 from fh5.presentation import optional_report
-from fh5.replay_document import read_document_fields
+from fh5.replay_document import read_document_fields, write_replay_document
 from fh5.temporal_features import actor_shape
 
 if TYPE_CHECKING:
+    from fh5.collection_dataset import _CollectionIndex
     from fh5.experiment import RunResult
 
 
@@ -167,10 +168,6 @@ def _actor(
 
 
 def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
-    from fh5.experiment import RunResult
-    from fh5.observations import _preview
-    from fh5.routes import load_route, locate_route
-
     if request.output_dir.exists():
         raise FileExistsError(request.output_dir)
     config = read_document_fields(
@@ -194,9 +191,20 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
     _config(selection_config)
     sources = [_freeze_source(s, request.config_file.parent) for s in config["sources"]]
     _report_destination(request.output_dir / "report.html", sources)
-    data = build_snapshot(selection_config, sources)
-    raw = encode(data)
-    digest = hashlib.sha256(raw).hexdigest()
+    with build_snapshot(selection_config, sources) as (data, index):
+        return _export(request, config, data, index)
+
+
+def _export(
+    request: CollectionBCPrepare,
+    config: dict[str, Any],
+    data: dict[str, Any],
+    index: _CollectionIndex,
+) -> RunResult:
+    from fh5.experiment import RunResult
+    from fh5.observations import _preview
+    from fh5.routes import load_route, locate_route
+
     contract = PixelContract.from_metadata(data["pixel_contract"])
     reference_files, reference_info = _reference(
         config, request.config_file.parent, data["sources"]
@@ -204,16 +212,19 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
     reference = None
     request.output_dir.mkdir(parents=True)
     (request.output_dir / "pixels").mkdir()
-    write_file(request.output_dir / "selection.json", raw)
+    selection = request.output_dir / "selection.json"
+    write_replay_document(selection, data)
+    digest = sha256_file(selection)
     for name, payload in reference_files.items():
         destination = asset(request.output_dir / "reference", name)
         destination.parent.mkdir(parents=True, exist_ok=True)
         write_file(destination, payload)
     if reference_files:
         reference = load_route(request.output_dir / "reference/route.json")
-    identities: dict[tuple[str, str], dict[str, Any]] = {}
-    copied: set[str] = set()
-    decisions, excluded = [], []
+    partitions = {
+        g["id"]: "evaluation" if g["split"] == "evaluation" else "development"
+        for g in data["groups"]
+    }
     total_bytes = 0
     for source in data["sources"]:
         binding, root = source["session_sha256"], Path(source["recording"])
@@ -221,7 +232,6 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
         if hashlib.sha256(session_bytes).hexdigest() != binding:
             raise ValueError("Collection session changed during preparation")
         session = json.loads(session_bytes)
-        selected = {s["sequence"]: s for s in data["samples"] if s["source_sha256"] == binding}
         history: deque[dict[str, Any]] = deque(maxlen=8192)
         latest = None
         previous = None
@@ -250,9 +260,10 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
             )
             while history and history[0]["available_ns"] < earliest:
                 history.popleft()
-            if row["sequence"] not in selected:
+            sample = index.sample(binding, row["sequence"])
+            if sample is None:
                 continue
-            sample = selected[row["sequence"]]
+            partition = partitions[sample["group"]]
             if (
                 latest is None
                 or latest["motion"] is None
@@ -263,8 +274,9 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
                     <= session["configuration"]["max_age_ms"] * 1e6
                 )
             ):
-                excluded.append(
-                    {"id": sample["id"], "group": sample["group"], "reason": "unavailable_ego"}
+                index.append(
+                    "excluded:" + partition,
+                    {"id": sample["id"], "group": sample["group"], "reason": "unavailable_ego"},
                 )
                 continue
             actor = _actor(row, sample, latest, history, config)
@@ -293,17 +305,13 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
                     "path": f"pixels/{pixel_hash}.rgb",
                     "sha256": pixel_hash,
                 }
-                key = item["epoch"], item["frame_id"]
-                if key in identities and identities[key] != item:
-                    raise ValueError("Captured frame identity changed between source blocks")
-                if key not in identities:
+                if index.frame_is_new(item):
                     total_bytes += frame.pixels.nbytes
-                    identities[key] = item
-                if pixel_hash not in copied:
+                if index.pixel_is_new(pixel_hash):
                     write_file(request.output_dir / item["path"], bytes(frame.pixels))
-                    copied.add(pixel_hash)
                 metadata.append(item)
-            decisions.append(
+            index.append(
+                "decisions:" + partition,
                 {
                     "decision_id": sample["id"],
                     "group": sample["group"],
@@ -324,7 +332,7 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
                         "label_available_ns": sample["label_available_ns"],
                         "label_delay_ms": (sample["label_poll_ns"] - row["at_ns"]) / 1e6,
                     },
-                }
+                },
             )
     coverage = {entry["attempt"]: entry for entry in data["coverage"]}
     groups = [
@@ -369,6 +377,7 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
     # Bind the final file in training provenance before any candidate is trained.
     # This prevents rehashing a different holdout after seeing the model's results.
     for filename, evaluation in (("evaluation.json", True), ("dataset.json", False)):
+        partition = "evaluation" if evaluation else "development"
         group_ids = {g["id"] for g in groups if (g["split"] == "evaluation") == evaluation}
         snapshot: dict[str, Any] = {
             "version": 1,
@@ -376,19 +385,16 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
             "pixel_contract": contract.metadata(),
             "action_contract": "xinput-lx-rt-lt-v1",
             "groups": [g for g in groups if g["id"] in group_ids],
-            "decisions": [d for d in decisions if d["group"] in group_ids],
-            "provenance": dict(provenance, partition="evaluation" if evaluation else "development"),
-            "excluded": [e for e in excluded if e["group"] in group_ids],
+            "decisions": index.array("decisions:" + partition),
+            "provenance": dict(provenance, partition=partition),
+            "excluded": index.array("excluded:" + partition),
         }
         if not evaluation:
             snapshot["provenance"]["final_dataset_sha256"] = hashes["evaluation.json"]
-        payload = encode(snapshot)
-        if len(payload) > 128 * 1024**2:
-            raise ValueError("Numeric dataset exceeds 128 MiB metadata budget")
         temporary = request.output_dir / (filename + ".tmp")
-        write_file(temporary, payload)
+        write_replay_document(temporary, snapshot)
         temporary.rename(request.output_dir / filename)
-        hashes[filename] = hashlib.sha256(payload).hexdigest()
+        hashes[filename] = sha256_file(request.output_dir / filename)
     selection_summary = _summary(data, digest)
     summary = {
         "version": 1,
@@ -397,7 +403,7 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
         "snapshot_sha256": hashes,
         "commands_sent": False,
         "diagnostic_only": data["diagnostic_only"],
-        "unique_frames": len(identities),
+        "unique_frames": index.unique_frames,
         "decoded_frame_budget_bytes": total_bytes,
         "reference": provenance["reference"],
         "closed_loop_validated": False,
