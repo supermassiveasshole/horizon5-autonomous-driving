@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fh5.attempts import AttemptReplay, review_attempts
-from fh5.bc import BCReplay, BCTrain, run_bc
+from fh5.bc import BCReplay
+from fh5.bc_learning import run_offline
 from fh5.candidate_archive import (
     CandidateArchive,
     CandidateRestore,
@@ -36,9 +37,8 @@ from fh5.collection import CollectionControl, CollectionEnvironment, CollectionR
 from fh5.collection_assessment import CollectionBCAssess, assess_collection_bc
 from fh5.collection_bc import CollectionBCPrepare, prepare_collection_bc
 from fh5.collection_dataset import (
-    CollectionDataset,
     CollectionDatasetReview,
-    run_collection_dataset,
+    review_collection_dataset,
 )
 from fh5.collection_process import (
     CollectionInstaller,
@@ -82,7 +82,6 @@ from fh5.numeric_images import (
     NumericReplay,
     run_numeric,
 )
-from fh5.numeric_import import LegacyNumericImport, prepare_legacy
 from fh5.observations import ObservationReplay, build_observations, read_settings
 from fh5.perception import (
     Perception,
@@ -91,7 +90,7 @@ from fh5.perception import (
     replay_perception,
     run_perception,
 )
-from fh5.policy import PolicyActor, PolicyDrive, PolicyEnvironment, read_policy, run_policy
+from fh5.policy_recording import read_policy
 from fh5.realtime import RealtimeEnvironment, RealtimeNumericReplay, RealtimeReplay, RealtimeRun
 from fh5.realtime_numeric_replay import replay_realtime_numeric
 from fh5.realtime_replay import replay_realtime
@@ -286,7 +285,6 @@ def run_experiment(
     | CaptureReplay
     | CaptureRun
     | CaptureTraceReview
-    | CollectionDataset
     | CollectionDatasetReview
     | CollectionBCPrepare
     | CollectionBCAssess
@@ -295,10 +293,8 @@ def run_experiment(
     | TemporalBCPrepare
     | TemporalBCTrain
     | TemporalBCReplay
-    | LegacyNumericImport
     | NumericInfer
     | NumericReplay
-    | PolicyDrive
     | AttemptReplay
     | RewardReplay
     | SACReplayPrepare
@@ -317,7 +313,6 @@ def run_experiment(
     | RewardAudit
     | RecoveryReplay
     | TrackingDrive
-    | BCTrain
     | BCReplay
     | DemonstrationRecord
     | DemonstrationDataset
@@ -338,8 +333,6 @@ def run_experiment(
     event_environment: EventEnvironment | None = None,
     vision_environment: VisionEnvironment | None = None,
     road_model: RoadModel | None = None,
-    policy_environment: PolicyEnvironment | None = None,
-    policy_actor: PolicyActor | None = None,
     numeric_inputs: Iterable[NumericDecision] | None = None,
     numeric_actor: DecisionActor | None = None,
     capture_source_factory: Callable[[], CaptureSource] | None = None,
@@ -429,22 +422,16 @@ def run_experiment(
         return assess_collection_bc(request)
     if isinstance(request, (ScheduledBCTrain, ScheduledBCResume)):
         return run_scheduled_bc(request, learning_resources)
-    if isinstance(request, (CollectionDataset, CollectionDatasetReview)):
-        return run_collection_dataset(request)
+    if isinstance(request, CollectionDatasetReview):
+        return review_collection_dataset(request)
     if isinstance(request, (TemporalBCTrain, TemporalBCReplay)):
         return run_temporal_bc(request)
-    if isinstance(request, LegacyNumericImport):
-        return prepare_legacy(request)
     if isinstance(request, (NumericInfer, NumericReplay)):
         if numeric_actor is None:
             raise ValueError("Numerical inference requires an explicit frozen actor")
         if isinstance(numeric_actor, ContextualNumericActor):
             raise ValueError("Contextual actors require the real-time decision interface")
         return run_numeric(request, numeric_actor, numeric_inputs)
-    if isinstance(request, PolicyDrive):
-        if policy_environment is None:
-            raise ValueError("Policy execution requires an explicit game environment")
-        return run_policy(request, policy_environment, policy_actor)
     if isinstance(request, AttemptReplay):
         return review_attempts(request)
     if isinstance(request, RewardReplay):
@@ -477,8 +464,8 @@ def run_experiment(
         if environment is None:
             raise ValueError("TrackingDrive requires an external game environment")
         return run_tracking(request, environment)
-    if isinstance(request, (BCTrain, BCReplay)):
-        return run_bc(request)
+    if isinstance(request, BCReplay):
+        return run_offline(request)
     if isinstance(request, DemonstrationDataset):
         return export_demonstrations(request)
     if isinstance(request, DemonstrationReplay):

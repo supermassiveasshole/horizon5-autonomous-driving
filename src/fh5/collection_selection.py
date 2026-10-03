@@ -9,13 +9,15 @@ from bisect import bisect_right
 from collections import Counter
 from collections.abc import Iterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
-from fh5.collection_review import _references
+from fh5.collection_review import _references, sealed_block_rows
 from fh5.collection_store import read_bounded
 from fh5.demonstrations import _mapped
-from fh5.numeric_images import PixelContract, asset, validate_frame_history
-from fh5.numeric_recording import read_numeric_frame
+from fh5.numeric_images import PixelContract, asset
+
+if TYPE_CHECKING:
+    from fh5.collection_dataset import _CollectionIndex
 
 
 def sealed_rows(
@@ -40,19 +42,7 @@ def sealed_rows(
             or manifest["row_count"] != ref["rows"]
         ):
             raise ValueError("Frozen sealed block reference changed")
-        payload = read_bounded(block / "rows.jsonl", 256 * 1024**2)
-        if hashlib.sha256(payload).hexdigest() != manifest["rows_sha256"]:
-            raise ValueError("Frozen sealed rows changed")
-        lines = payload.splitlines()
-        if len(lines) != ref["rows"]:
-            raise ValueError("Frozen sealed row count differs")
-        rows = [json.loads(line) for line in lines]
-        if (
-            rows[0]["sequence"] != manifest["first_sequence"]
-            or rows[-1]["sequence"] != manifest["last_sequence"]
-        ):
-            raise ValueError("Sealed sequence bounds differ")
-        for row in rows:
+        for row in sealed_block_rows(block, manifest, contract):
             seq, tick = row["sequence"], row["at_ns"]
             if (
                 type(seq) is not int
@@ -62,14 +52,6 @@ def sealed_rows(
             ):
                 raise ValueError("Frozen source clocks and sequence must advance")
             previous, previous_ns = seq, tick
-            if row["frames"]:
-                frames = tuple(
-                    read_numeric_frame(block, f, byte_limit=contract.size[0] * contract.size[1] * 3)
-                    for f in row["frames"]
-                )
-                reason = validate_frame_history(row["capture_epoch"], tick, frames, contract)
-                if reason or any(f.source_time_ns < row["segment_start_ns"] for f in frames):
-                    raise ValueError("Frozen image history is unavailable or crosses a segment")
             yield relative, row
 
 
@@ -119,8 +101,12 @@ def _behaviors(
 
 
 def select_source(
-    source: dict[str, Any], session: dict[str, Any], rules: dict[str, Any], rng: random.Random
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    source: dict[str, Any],
+    session: dict[str, Any],
+    rules: dict[str, Any],
+    rng: random.Random,
+    index: _CollectionIndex,
+) -> list[dict[str, Any]]:
     from fh5.experiment import Packet, _decode
 
     cfg = session["configuration"]
@@ -143,8 +129,18 @@ def select_source(
         }
         for a in attempts
     }
-    chosen: dict[str, list[dict[str, Any]]] = {a["id"]: [] for a in attempts}
+    pool: list[dict[str, Any]] = []
+    pool_attempt: str | None = None
     totals: Counter[str] = Counter()
+
+    def finish_attempt() -> None:
+        if pool_attempt is not None:
+            stats[pool_attempt]["selected"] = len(pool)
+            stats[pool_attempt]["reservoir_omitted"] = totals[pool_attempt] - len(pool)
+            for sample in sorted(pool, key=lambda s: s["sequence"]):
+                index.append("samples", sample)
+            pool.clear()
+
     latest = None
     last_sequence = -1
     last_key = None
@@ -188,8 +184,16 @@ def select_source(
             source_faults.append("invalid_human_input")
         if mapped != row["mapped_input"]:
             raise ValueError("Mapped label differs from raw source evidence")
-        index = bisect_right([a["start_sequence"] for a in attempts], seq) - 1
-        attempt = attempts[index] if index >= 0 and seq < attempts[index]["end_sequence"] else None
+        position = bisect_right([a["start_sequence"] for a in attempts], seq) - 1
+        attempt = (
+            attempts[position]
+            if position >= 0 and seq < attempts[position]["end_sequence"]
+            else None
+        )
+        identifier = attempt["id"] if attempt else None
+        if identifier != pool_attempt:
+            finish_attempt()
+            pool_attempt = identifier
         gap = seq != last_sequence + 1
         last_sequence = seq
         if attempt is None:
@@ -309,7 +313,6 @@ def select_source(
             "dynamics_reason": "action_response_alignment_pending",
         }
         totals[identifier] += 1
-        pool = chosen[identifier]
         if len(pool) < rules["max_samples_per_attempt"]:
             pool.append(sample)
         else:
@@ -320,9 +323,5 @@ def select_source(
     # published rows are selected. A completely absent attempt is a configuration error.
     if seen_attempts != set(stats):
         raise ValueError("Reviewed attempt has no published rows")
-    selected = []
-    for identifier, pool in chosen.items():
-        stats[identifier]["selected"] = len(pool)
-        stats[identifier]["reservoir_omitted"] = totals[identifier] - len(pool)
-        selected.extend(pool)
-    return sorted(selected, key=lambda s: s["sequence"]), list(stats.values())
+    finish_attempt()
+    return list(stats.values())

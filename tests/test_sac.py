@@ -367,7 +367,8 @@ def test_policy_trace_cannot_relabel_human_telemetry_as_policy_experience(tmp_pa
     }
 
 
-def test_cli_prepares_warms_and_reloads_without_game_adapters(tmp_path, capsys):
+@pytest.mark.parametrize("explicit_binding", [False, True])
+def test_cli_prepares_warms_and_reloads_without_game_adapters(tmp_path, capsys, explicit_binding):
     pytest.importorskip("torch")
     from test_temporal_bc import temporal_fixture
 
@@ -400,8 +401,7 @@ def test_cli_prepares_warms_and_reloads_without_game_adapters(tmp_path, capsys):
                 str(bc / "model"),
                 "--replay",
                 str(replay),
-                "--replay-sha256",
-                digest,
+                *(["--replay-sha256", digest] if explicit_binding else []),
                 "--output",
                 str(tmp_path / "warm"),
                 "--steps",
@@ -411,14 +411,42 @@ def test_cli_prepares_warms_and_reloads_without_game_adapters(tmp_path, capsys):
         == 0
     )
     warm = json.loads(capsys.readouterr().out)
+    assert warm["replay_sha256"] == digest
+    if explicit_binding:
+        # An explicit assertion must never be replaced by a freshly computed
+        # digest, even when its supplied value is empty.
+        for wrong in ("", "0" * 64):
+            rejected = tmp_path / "rejected-warmup"
+            assert (
+                main(
+                    [
+                        "sac-warmup",
+                        "--model",
+                        str(bc / "model"),
+                        "--replay",
+                        str(replay),
+                        "--replay-sha256",
+                        wrong,
+                        "--output",
+                        str(rejected),
+                        "--steps",
+                        "2",
+                    ]
+                )
+                == 2
+            )
+            assert json.loads(capsys.readouterr().err)["status"] == "error"
+            assert not rejected.exists()
+    if not explicit_binding:
+        bc.rename(tmp_path / "original-bc")
+        replay.parent.rename(tmp_path / "original-experience")
     assert (
         main(
             [
                 "sac-critic-replay",
                 "--checkpoint",
                 str(tmp_path / "warm"),
-                "--replay",
-                str(replay),
+                *(["--replay", str(replay)] if explicit_binding else []),
                 "--report",
                 str(tmp_path / "again.html"),
             ]

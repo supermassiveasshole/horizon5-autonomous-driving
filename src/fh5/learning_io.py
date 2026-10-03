@@ -11,11 +11,11 @@ from fh5.control import Command
 from fh5.evaluation_run import EvaluationEnvironment
 from fh5.events import EventEnvironment, EventInput
 from fh5.numeric_images import PixelContract
-from fh5.realtime import RealtimeConfig, RealtimeEnvironment, TimelineInput
+from fh5.realtime import RealtimeEnvironment, RealtimeRun, TimelineInput
 from fh5.sac_sampler import SACEnvironment, SACSample, SACStart
 
 if TYPE_CHECKING:
-    from fh5.sac_realtime_sampler import SACRealtimeEnvironment
+    from fh5.sac_realtime_sampler import SACRealtimeEnvironment, SACRealtimeStart
 
 
 class LearningUnavailable(RuntimeError):
@@ -83,9 +83,9 @@ class SamplingLease(_SamplingLease[SACEnvironment]):
 
 
 class RealtimeSamplingLease(_SamplingLease["SACRealtimeEnvironment"]):
-    def start(self, identity: str, runtime: RealtimeConfig) -> RealtimeEnvironment:
+    def start(self, start: SACRealtimeStart) -> RealtimeEnvironment:
         self.phase("restarting_sampling")
-        result = self.source.start(identity, runtime)
+        result = self.source.start(start)
         self.phase("driving")
         return result
 
@@ -122,6 +122,14 @@ class _StopMenu:
 class StoppingDrive:
     source: RealtimeEnvironment
     stopped: Callable[[], bool]
+
+    def authorize(
+        self, request: RealtimeRun, manifest: dict[str, Any], inference_device: str | None
+    ) -> None:
+        authorize = getattr(self.source, "authorize", None)
+        if not callable(authorize):
+            raise ValueError("Native sampling requires qualified driving authorization")
+        authorize(request, manifest, inference_device)
 
     @property
     def source_kind(self) -> Literal["synthetic", "shadow", "native"]:

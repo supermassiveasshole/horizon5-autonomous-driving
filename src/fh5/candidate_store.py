@@ -18,7 +18,7 @@ from fh5.candidate_archive import CandidateArchive, CandidateRestore
 from fh5.candidate_selection import CandidateCompare, _eligibility
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.numeric_images import asset
-from fh5.replay_document import replay_document
+from fh5.replay_document import read_document_fields, replay_document
 from fh5.sac_source_files import recording_origins
 
 if TYPE_CHECKING:
@@ -82,14 +82,18 @@ def _events(db: sqlite3.Connection) -> Iterator[dict[str, Any]]:
     rows = db.execute("SELECT sequence, revision, payload FROM events ORDER BY sequence")
     count = 0
     parent = None
+    scope = None
     for number, revision, raw in rows:
         if hashlib.sha256(raw).hexdigest() != revision:
             raise ValueError("Candidate history changed")
         event = json.loads(raw)
         if number != count + 1 or event["parent"] != parent:
             raise ValueError("Candidate history is not continuous")
-        if event["scope"] != "synthetic_development_only":
+        if event["scope"] not in ("synthetic_development_only", "native_development_only"):
             raise ValueError("Unsupported candidate qualification scope")
+        if scope is not None and event["scope"] != scope:
+            raise ValueError("Candidate history qualification scope changed")
+        scope = event["scope"]
         yield {**event, "revision": revision}
         count += 1
         parent = revision
@@ -152,6 +156,8 @@ def _commit(root: Path, event: dict[str, Any], expected: str | None) -> str:
                 number += 1
             if latest is None or latest["revision"] != expected:
                 raise ValueError("Candidate store revision changed")
+            if latest["scope"] != event["scope"]:
+                raise ValueError("Candidate store qualification scope changed")
         raw = encode(event)
         revision = hashlib.sha256(raw).hexdigest()
         db.execute("INSERT INTO events VALUES (?, ?, ?)", (number, revision, raw))
@@ -175,9 +181,15 @@ def _publish(root: Path, work: Path, event: dict[str, Any]) -> RunResult:
     )
 
 
-def _synthetic_gate(
-    side: str, reviews: dict[str, Any], conditions: dict[str, Any], checkpoint: Path
+def _qualification_gate(
+    side: str,
+    reviews: dict[str, Any],
+    conditions: dict[str, Any],
+    checkpoint: Path,
+    scope: str,
 ) -> list[str]:
+    native = scope == "native_development_only"
+    source_kind = "native" if native else "synthetic"
     review = reviews[side]
     reasons = _eligibility(side, review, conditions["criteria"])
     if any(
@@ -190,21 +202,40 @@ def _synthetic_gate(
         item["status"] == "bound_diagnostic"
         and item["verified_predictions"] > 0
         and item.get("actor_kind") == "frozen-numeric-sac-v1"
-        and (item.get("metrics") or {}).get("evidence_kind") == "synthetic"
+        and (item.get("metrics") or {}).get("evidence_kind") == source_kind
         for item in review["executions"]
     )
     if actual != review["planned_runs"]:
-        reasons.append(side + ":actual_synthetic_policy_execution_incomplete")
+        reasons.append(f"{side}:actual_{source_kind}_policy_execution_incomplete")
     if review["verified_starts"] != review["planned_runs"] or any(
-        item.get("source_kind") != "synthetic" for item in review["starts"]
+        item.get("source_kind") != ("udp" if native else "synthetic") for item in review["starts"]
     ):
-        reasons.append(side + ":verified_synthetic_starts_incomplete")
+        reasons.append(f"{side}:verified_{source_kind}_starts_incomplete")
     if review["independence"]["status"] != "no_known_overlap":
         reasons.append(side + ":development_origins_not_separate_in_registry")
-    bc = json.loads(read_bounded(checkpoint / "bc/model.json", 1024**2))
-    if bc.get("provenance", {}).get("kind") != "synthetic":
-        reasons.append(side + ":unsupported_training_lineage")
     policy = read_json(checkpoint / "policy.json")
+    bc = read_document_fields(
+        VerifiedFile(checkpoint / "bc/model.json", policy["bc_manifest_sha256"]),
+        {"provenance"},
+    )
+    provenance = bc.get("provenance", {})
+    if native:
+        if (
+            policy.get("source_kind") not in ("native", "mixed")
+            or provenance.get("kind") != "continuous_numeric_collection"
+            or provenance.get("diagnostic_only") is not False
+        ):
+            reasons.append(side + ":unsupported_training_lineage")
+        frozen_conditions = conditions["conditions"].get("numeric_input_conditions")
+        if (
+            conditions.get("inference_device") != "cpu"
+            or not isinstance(frozen_conditions, dict)
+            or frozen_conditions.get("status") != "confirmed"
+            or provenance.get("input_conditions") != frozen_conditions
+        ):
+            reasons.append(side + ":native_training_conditions_mismatch")
+    elif provenance.get("kind") != "synthetic":
+        reasons.append(side + ":unsupported_training_lineage")
     source = VerifiedFile(checkpoint / "experience/replay.json", policy["replay_sha256"])
     with replay_document(source) as replay:
         training = recording_origins(checkpoint / "experience", replay)
@@ -233,8 +264,12 @@ def record_candidate(request: CandidateRecord) -> RunResult:
             raise ValueError("Candidate store revision changed")
     raw = read_bounded(request.config_file, 1024**2)
     config = json.loads(raw)
-    if set(config) != {"version", "comparison", "checkpoints"} or config["version"] != 1:
+    if set(config) != {"version", "comparison", "checkpoints"} or config["version"] not in (1, 2):
         raise ValueError("Unsupported candidate record configuration")
+    source_kind = "native" if config["version"] == 2 else "synthetic"
+    scope = source_kind + "_development_only"
+    if previous is not None and previous["scope"] != scope:
+        raise ValueError("Candidate store qualification scope changed")
     if set(config["checkpoints"]) != {"incumbent", "candidate"}:
         raise ValueError("Candidate record requires both complete checkpoints")
     checkpoints = {
@@ -271,11 +306,12 @@ def record_candidate(request: CandidateRecord) -> RunResult:
                 checkpoint, archive, reviewed["models"][side], "Retain candidate selection state"
             )
         ).summary["candidate_archive"]
-        gates[side] = _synthetic_gate(
+        gates[side] = _qualification_gate(
             side,
             reviewed["reviews"],
             reviewed["conditions"],
             archive / "checkpoint",
+            scope,
         )
         roles[side] = {
             "model_sha256": saved["checkpoint_sha256"],
@@ -284,7 +320,7 @@ def record_candidate(request: CandidateRecord) -> RunResult:
         }
     if gates["incumbent"]:
         raise ValueError(
-            "Incumbent lacks synthetic qualification: " + ", ".join(gates["incumbent"])
+            f"Incumbent lacks {source_kind} qualification: " + ", ".join(gates["incumbent"])
         )
     select = (
         not gates["candidate"] and reviewed["local_recommendation"] == "prefer_candidate_locally"
@@ -297,7 +333,7 @@ def record_candidate(request: CandidateRecord) -> RunResult:
         )
     event = {
         "version": 1,
-        "scope": "synthetic_development_only",
+        "scope": scope,
         "parent": request.expected_revision,
         "operation": "selection",
         "protocol_sha256": protocol,
@@ -313,10 +349,15 @@ def record_candidate(request: CandidateRecord) -> RunResult:
         },
         "default_changed": False,
         "real_driving_validated": False,
-        "synthetic_default_changed": previous is not None
+        source_kind + "_default_changed": previous is not None
         and roles["candidate" if select else "incumbent"]["model_sha256"]
         != previous["default"]["model_sha256"],
-        "independence_limits": "Registered raw origins and explicitly synthetic training only; no native qualification",
+        "independence_limits": (
+            "Registered raw origins and independently reviewed native development evidence; "
+            "no driving improvement or controller activation established"
+            if source_kind == "native"
+            else "Registered raw origins and explicitly synthetic training only; no native qualification"
+        ),
     }
     return _publish(root, work, event)
 
@@ -366,7 +407,11 @@ def rollback_candidate(request: CandidateRollback) -> RunResult:
         raise ValueError("Candidate store revision changed")
     if not isinstance(request.reason, str) or not 1 <= len(request.reason.strip()) <= 2000:
         raise ValueError("Candidate rollback requires a reason of 1..2000 characters")
-    if target is None or target["protocol_sha256"] != previous["protocol_sha256"]:
+    if (
+        target is None
+        or target["protocol_sha256"] != previous["protocol_sha256"]
+        or target["scope"] != previous["scope"]
+    ):
         raise ValueError("Rollback target is not a compatible retained default")
     folder = "events/" + uuid.uuid4().hex
     work = root / folder
@@ -405,13 +450,16 @@ def rollback_candidate(request: CandidateRollback) -> RunResult:
         or reviewed["models"][side] != role["model_sha256"]
     ):
         raise ValueError("Rollback evaluation differs from retained default")
-    reasons = _synthetic_gate(side, reviewed["reviews"], reviewed["conditions"], restored)
+    reasons = _qualification_gate(
+        side, reviewed["reviews"], reviewed["conditions"], restored, target["scope"]
+    )
     if reasons or (
         side == "candidate" and reviewed["local_recommendation"] != "prefer_candidate_locally"
     ):
         raise ValueError(
             "Rollback target no longer qualifies: " + ", ".join(reasons + reviewed["reasons"])
         )
+    source_kind = "native" if target["scope"] == "native_development_only" else "synthetic"
     event = {
         **{key: value for key, value in previous.items() if key != "revision"},
         "parent": request.expected_revision,
@@ -421,6 +469,7 @@ def rollback_candidate(request: CandidateRollback) -> RunResult:
         "qualification": qualification,
         "selection": "restore_retained_default",
         "reasons": [request.reason.strip()],
-        "synthetic_default_changed": role["model_sha256"] != previous["default"]["model_sha256"],
+        source_kind + "_default_changed": role["model_sha256"]
+        != previous["default"]["model_sha256"],
     }
     return _publish(root, work, event)

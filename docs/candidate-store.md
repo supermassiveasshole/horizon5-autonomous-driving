@@ -2,7 +2,7 @@
 
 版本库把默认版本与继续训练的探索版本分开保存，并追加选择和回退历史。每个角色指向[完整 SAC 归档](candidate-archive.md)，包括网络、优化器、温度、经验、随机状态和祖先记录。回退默认版本不删除落选候选的训练进度。
 
-当前资格范围为 `synthetic_development_only`：实际运行 CPU 策略与可响应动作的合成环境，重新核验冻结评估的执行记录、独立起跑、完整尝试与已登记原始数据用途。没有原生 FH5 激活路径，`default_changed=false`、`real_driving_validated=false` 始终保留。合成默认版本变化单独标为 `synthetic_default_changed`；不能据此宣称赛车更强。
+版本库支持 `synthetic_development_only` 和 `native_development_only`，分别核验合成执行和原生接口执行的冻结评估、独立起跑、完整尝试与已登记原始数据用途。选择只更新保存的开发版本引用，`default_changed=false`、`real_driving_validated=false` 始终保留；不激活控制器。引用变化分别记录为 `synthetic_default_changed` 或 `native_default_changed`，不代表已证明赛车更强。
 
 ## 输入和行为
 
@@ -18,7 +18,7 @@ uv run --locked fh5 candidate-rollback --store runs/versions --expected-revision
 
 后续 `candidate-record` 同样传入 `--expected-revision`。命令输出 JSON；退出 0 表示事务或查询完成，不能解释为实机驾驶成功。输入或状态不匹配时退出 2。
 
-记录配置为版本 1，路径相对配置文件解析：
+记录配置版本 1 选择合成开发范围；版本 2 选择原生开发范围，其他字段相同。路径相对配置文件解析：
 
 ```json
 {
@@ -36,6 +36,10 @@ uv run --locked fh5 candidate-rollback --store runs/versions --expected-revision
 
 `comparison.json` 采用[候选比较](candidate-selection.md)的原始批次/清单绑定，不接受外部表格中的 passed 标志。完整源模型身份须与冻结评估相符；评估前后的模型不可以混用。探索版本保存此次候选，即使它未达选择门槛。
 
+原生范围要求版本 3 冻结评估中的 CPU 确定性 SAC 执行逐项通过数值重放，并有完整 UDP 起跑依据、独立有效性审核和相互分离的训练/评估原件。完整候选须来自 `native` 或 `mixed` 经验，父 BC 来自非诊断的 `continuous_numeric_collection`，其已确认输入条件与冻结批次一致。`mixed` 保持混合来源，不改标为纯原生。现任默认也须满足资格，不能以首条登记为由豁免。
+
+一个版本库只能使用同一种范围；不能把已有合成库切换成原生库，反向也不允许。原生软件测试使用真实 CPU 模型和模拟外部设备，只能验证上述流程；实际 FH5 独立驾驶和性能收益仍待验收。
+
 合法且证据完整、最快用时改善但可靠性下降的候选另存为 `aggressive_by_reference`，区分参考输入条件；当前默认保持原样。违规、待核验或缺少执行证据不能新增激进纪录。后续普通候选和默认回退仍保留既有激进角色，其原始选择事件提供评估依据。
 
 ## 历史与回退
@@ -50,4 +54,4 @@ uv run --locked fh5 candidate-rollback --store runs/versions --expected-revision
 
 回退指定历史事件的默认版本，并重新读取其冻结比较、原始评估证据和完整模型归档；资料缺失或改变时拒绝回退。回退自身追加一个事件，保留当前探索版本与所有中间失败记录。
 
-模型归档可以独立续训，评估证据仍依赖原始批次、录制、审核依据及用途登记库。版本库不是所有实验数据的自包含备份。未知转换谱系、实际驾驶资格、原生 FH5 晋升及长期磁盘回收仍另行验收。
+模型归档可以独立续训，评估证据仍依赖原始批次、录制、审核依据及用途登记库。版本库不是所有实验数据的自包含备份。真实驾驶资格、自动激活及长期磁盘回收仍另行验收；#15 连续调度的原生接入尚未因此完成。

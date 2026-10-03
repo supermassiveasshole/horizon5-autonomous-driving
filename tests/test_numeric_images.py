@@ -147,29 +147,73 @@ def test_invalid_numeric_history_is_visible_and_never_reaches_model(tmp_path, fa
 
 def test_existing_frozen_bc_uses_prepared_numbers_without_image_io_or_codecs(tmp_path, monkeypatch):
     import hashlib
+    import json
     import threading
     from pathlib import Path
 
     pytest.importorskip("torch")
     from PIL import Image
-    from test_bc import setup_bc
+    from test_bc import legacy_model
 
     from fh5.numeric_actor import FrozenNumericActor
-    from fh5.numeric_import import LegacyNumericImport, PreparedNumericSource
+    from fh5.numeric_import import PreparedNumericSource
 
-    request = setup_bc(tmp_path)
+    request = legacy_model(tmp_path)
     baseline = run_experiment(request)
-    prepared = run_experiment(
-        LegacyNumericImport(
-            request.output_dir,
-            tmp_path / "data/dataset.json",
-            tmp_path / "prepared",
-            max_decisions=2,
-        )
-    )
     contract = PixelContract(size=(64, 36), origin="legacy_offline", history_offsets_ms=(0,))
-    model = FrozenNumericActor(request.output_dir, contract, legacy_diagnostic=True)
-    source = PreparedNumericSource(tmp_path / "prepared")
+    prepared = tmp_path / "prepared"
+    prepared.mkdir()
+    # test_vision's independent PNG is one red pixel. Bilinear resizing keeps
+    # that known RGB value, so this saved-format fixture needs no image codec.
+    pixels = bytes((255, 0, 0)) * (64 * 36)
+    (prepared / "frame.rgb").write_bytes(pixels)
+    dataset = json.loads(request.dataset_file.read_bytes())
+    examples = [(i, row) for i, row in enumerate(dataset["examples"]) if row["bc_eligible"]][:2]
+    rows = []
+    for index, example in examples:
+        actor = example["views"]["no_reference"]
+        source_ns = example["decision_ns"] - int(actor["image_age_ms"][0] * 1_000_000)
+        rows.append(
+            {
+                "decision_id": f"legacy:{index}",
+                "epoch": "legacy",
+                "decision_ns": example["decision_ns"],
+                "actor": actor,
+                "supervision": example["supervision"],
+                "frames": [
+                    {
+                        "epoch": "legacy",
+                        "frame_id": f"frame-{index}",
+                        "source_time_ns": source_ns,
+                        "capture_received_ns": source_ns + 20_000_000,
+                        "preprocess_ready_ns": source_ns + 30_000_000,
+                        "time_quality": "capture_start_proxy",
+                        "uncertainty_ns": None,
+                        "size": [64, 36],
+                        "source_layout": {"size": [1, 1], "format": "RGB"},
+                        "availability_kind": "legacy_encoded_delivery_proxy",
+                        "preprocess_version": "full-frame-pillow-bilinear-v1",
+                        "path": "frame.rgb",
+                        "sha256": hashlib.sha256(pixels).hexdigest(),
+                    }
+                ],
+            }
+        )
+    (prepared / "prepared.json").write_text(
+        json.dumps({"version": 1, "contract": contract.metadata(), "decisions": rows})
+    )
+    originals = {
+        path: path.read_bytes()
+        for path in (
+            request.model_dir / "model.json",
+            request.model_dir / "actor.pt",
+            request.dataset_file,
+            prepared / "prepared.json",
+            prepared / "frame.rgb",
+        )
+    }
+    model = FrozenNumericActor(request.model_dir, contract, legacy_diagnostic=True)
+    source = PreparedNumericSource(prepared)
     read_bytes, open_path, digest = Path.read_bytes, Path.open, hashlib.sha256
 
     def no_decode(*args, **kwargs):
@@ -201,7 +245,8 @@ def test_existing_frozen_bc_uses_prepared_numbers_without_image_io_or_codecs(tmp
             numeric_actor=model,
         )
     summary = result.summary["numeric"]
-    assert prepared.summary["numeric_import"]["decoded_unique_frames"] > 0
+    assert len(summary["decisions"]) == 2
+    assert all(row["status"] == "predicted" for row in summary["decisions"])
     assert summary["model"]["diagnostic_only"] is True
     assert source.closed
     assert not model.cache
@@ -220,6 +265,7 @@ def test_existing_frozen_bc_uses_prepared_numbers_without_image_io_or_codecs(tmp
         numeric_actor=model,
     )
     assert replay.summary["numeric"]["replay_errors"] == []
+    assert all(path.read_bytes() == original for path, original in originals.items())
 
 
 def test_preview_stall_does_not_delay_exact_input_storage(tmp_path, monkeypatch):
@@ -483,39 +529,6 @@ def test_presentation_and_archive_failures_never_change_model_inputs(tmp_path, m
     else:
         assert replay.summary["numeric"]["replay_errors"] == []
         assert all(d["prediction_max_abs_error"] == 0 for d in rows)
-
-
-@pytest.mark.parametrize("fault", ["journal", "manifest", "boundaries"])
-def test_legacy_preparation_rejects_changed_metadata_evidence(tmp_path, fault):
-    import json
-    from pathlib import Path
-
-    pytest.importorskip("torch")
-    from test_bc import setup_bc
-
-    from fh5.numeric_import import LegacyNumericImport
-
-    request = setup_bc(tmp_path)
-    run_experiment(request)
-    dataset_path = tmp_path / "data/dataset.json"
-    dataset = json.loads(dataset_path.read_text())
-    source = Path(dataset["sources"][0]["directory"])
-    if fault == "boundaries":
-        report = dataset_path.parent / "run-0-targets.json"
-        content = json.loads(report.read_text())
-        content["summary"]["observations"]["history_boundaries_ns"].append(123456789)
-        report.write_text(json.dumps(content))
-    else:
-        path = source / ("vision.jsonl" if fault == "journal" else "demonstration-session.json")
-        if fault == "journal":
-            journal = [json.loads(line) for line in path.read_text().splitlines()]
-            frame = next(row for row in journal if row.get("kind") == "frame")
-            frame["client_size"][0] += 1
-            path.write_text("\n".join(json.dumps(row) for row in journal) + "\n")
-        else:
-            path.write_bytes(path.read_bytes() + b"\n")
-    with pytest.raises(ValueError):
-        run_experiment(LegacyNumericImport(request.output_dir, dataset_path, tmp_path / "prepared"))
 
 
 def test_current_and_future_demonstration_evidence_never_enters_actor(tmp_path):

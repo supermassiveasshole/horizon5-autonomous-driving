@@ -3,13 +3,10 @@
   "capture_config": "capture-dxgi.example.json",
   "model": {
     "directory": "../runs/new-numeric-bc-candidate",
-    "expected_sha256": "REPLACE_WITH_ACTOR_PT_SHA256",
-    "manifest_sha256": "REPLACE_WITH_MODEL_JSON_SHA256",
     "device": "cuda"
   },
   "task": {
     "route_file": "../runs/t04-interior-20260929-v2/route-v2/route.json",
-    "expected_route_sha256": "3257332247f087ef5fe04b85b310b527260f55a6928ae6c540e7a48e42b15ac8",
     "start_station_m": 0,
     "start_tolerance_m": 0.5,
     "end_margin_m": 3
@@ -32,8 +29,5 @@
     "reference_count": 5
   },
   "port": 5300,
-  "shadow": {
-    "directory": "../runs/new-candidate-shadow",
-    "manifest_sha256": "REPLACE_WITH_REALTIME_MANIFEST_JSON_SHA256"
-  }
+  "shadow": null
 }

@@ -72,11 +72,18 @@ def setup_drive(tmp_path, *, desktop=None, factory=None, source_kind="synthetic"
 
 
 def test_frozen_bc_drives_bounded_commands_and_replays_without_devices(
-    tmp_path, numeric_driving_model
+    tmp_path, numeric_driving_model, monkeypatch
 ):
+    from PIL import Image
+
     request, environment, controller, capture, telemetry = setup_drive(tmp_path)
     actor = FrozenNumericActor(numeric_driving_model, request.config.pixels)
     actor.torch.set_num_threads(1)
+
+    def reject_encoded_images(*args, **kwargs):
+        pytest.fail("Numerical driving and replay must not decode JPEG/PNG image files")
+
+    monkeypatch.setattr(Image, "open", reject_encoded_images)
     r = run_experiment(
         request, realtime_environment=environment, numeric_actor_factory=lambda: actor
     ).summary["realtime"]

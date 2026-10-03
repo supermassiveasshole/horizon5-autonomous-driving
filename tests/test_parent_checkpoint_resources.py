@@ -11,7 +11,7 @@ from test_evaluation import sha
 from test_learning_loop import SharedBackend, loop_request
 from test_learning_loop import seeded_loop as seeded_loop
 from test_learning_recovery import interrupt_selection
-from test_learning_update_resume import stop_on_creation, stopped_sampling
+from test_learning_update_recovery import interrupted_update
 
 from fh5.experiment import run_experiment
 from fh5.learning_loop import LearningContinue
@@ -50,35 +50,11 @@ def rebind_report(checkpoint):
     manifest_file.write_text(json.dumps(manifest), encoding="utf-8")
 
 
-def pending_update(tmp_path, seeded_loop, monkeypatch):
-    request, pending = stopped_sampling(tmp_path, seeded_loop)
-    root = request.output_dir
-    checkpoint = root / "round-000/updates-000"
-    stop = root / "stop.request"
-    stop.unlink()
-    original_replace = Path.replace
-
-    def unavailable_index(path, target):
-        if Path(target).parent.name == "update-history":
-            raise OSError("external update index unavailable")
-        return original_replace(path, target)
-
-    with stop_on_creation(checkpoint, stop), monkeypatch.context() as fault:
-        fault.setattr(Path, "replace", unavailable_index)
-        interrupted = run_experiment(
-            LearningContinue(root, sha(root / "state.json")),
-            learning_environment=SharedBackend(seeded_loop[0]),
-        ).summary["learning_loop"]
-    assert interrupted["stop_reason"] == "interface_error"
-    assert interrupted["latest_learner"] == pending["latest_learner"]
-    assert not (root / "round-000/update-history/000000.json").exists()
-    return root, pending, checkpoint
-
-
 def test_parent_adopts_large_pending_report_then_finishes_the_original_updates(
-    tmp_path, seeded_loop, monkeypatch
+    tmp_path, seeded_loop
 ):
-    root, pending, checkpoint = pending_update(tmp_path, seeded_loop, monkeypatch)
+    root, pending = interrupted_update(tmp_path, seeded_loop)
+    checkpoint = root / "round-000/updates-000"
     report = extend_sealed_report(checkpoint, policy_padding_mb=5)
     identity = sha(checkpoint / "policy.json")
     backend = SharedBackend(seeded_loop[0])
@@ -170,9 +146,10 @@ def test_parent_adopts_large_sampling_report_then_uses_its_original_credit(tmp_p
 
 @pytest.mark.parametrize("damage", ["bad_json", "changed_report"])
 def test_invalid_pending_report_cannot_advance_parent_or_acquire_an_environment(
-    tmp_path, seeded_loop, monkeypatch, damage
+    tmp_path, seeded_loop, damage
 ):
-    root, _, checkpoint = pending_update(tmp_path, seeded_loop, monkeypatch)
+    root, _ = interrupted_update(tmp_path, seeded_loop)
+    checkpoint = root / "round-000/updates-000"
     state = root / "state.json"
     before = state.read_bytes()
     report = checkpoint / "training-report.json"

@@ -14,7 +14,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fh5.attempts import AttemptReplay
-from fh5.bc import BCReplay, BCTrain
+from fh5.bc import BCReplay
 from fh5.control import Control, validate_control_file
 from fh5.demonstration_dataset import DemonstrationDataset
 from fh5.demonstrations import DemonstrationRecord, DemonstrationReplay
@@ -22,7 +22,6 @@ from fh5.events import EventRun, validate_event_file
 from fh5.experiment import Packet, Record, Replay, run_experiment
 from fh5.observations import ObservationReplay
 from fh5.perception import Perception, PerceptionReplay
-from fh5.policy import PolicyDrive, validate_policy_file
 from fh5.recovery import RecoveryReplay
 from fh5.reward_audit import RewardAudit
 from fh5.rewards import RewardReplay
@@ -32,6 +31,7 @@ from fh5.vision import VisionRecord
 
 
 def _sac(args: argparse.Namespace) -> int:
+    from fh5.artifact_io import sha256_file
     from fh5.sac import SACCriticReplay, SACCriticResume, SACCriticWarmup
     from fh5.sac_actions import ActionBounds
     from fh5.sac_learning import SACPolicyReplay, SACResume, SACTrain
@@ -58,25 +58,29 @@ def _sac(args: argparse.Namespace) -> int:
         if not isinstance(options, dict) or options.pop("version", None) != 1:
             raise ValueError("SAC training requires a version 1 configuration")
         try:
+            warmup = args.config.parent / options.pop("warmup")
+            replay = (
+                args.config.parent / options.pop("replay")
+                if "replay" in options
+                else warmup / "experience/replay.json"
+            )
             if options.get("imitation_protocol_batch") is not None:
                 options["imitation_protocol_batch"] = (
                     args.config.parent / options["imitation_protocol_batch"]
                 )
-            request = SACTrain(
-                args.config.parent / options.pop("warmup"),
-                args.config.parent / options.pop("replay"),
-                args.output,
-                **options,
-            )
+            request = SACTrain(warmup, replay, args.output, **options)
         except (KeyError, TypeError) as error:
             raise ValueError("Invalid SAC training fields") from error
         summary = run_experiment(request).summary["sac_learning"]
         print(json.dumps(summary, ensure_ascii=False))
         return 0 if summary["stop_reason"] == "budget_completed" else 4
     if args.mode == "sac-policy-replay":
+        replay = (
+            args.replay if args.replay is not None else args.checkpoint / "experience/replay.json"
+        )
         replayed = run_experiment(
             SACPolicyReplay(
-                args.checkpoint, args.replay, args.report, raw_cache_bytes=args.raw_cache_bytes
+                args.checkpoint, replay, args.report, raw_cache_bytes=args.raw_cache_bytes
             )
         )
         print(json.dumps(replayed.summary["sac_policy"], ensure_ascii=False))
@@ -104,7 +108,7 @@ def _sac(args: argparse.Namespace) -> int:
             SACCriticWarmup(
                 args.model,
                 args.replay,
-                args.replay_sha256,
+                sha256_file(args.replay) if args.replay_sha256 is None else args.replay_sha256,
                 args.output,
                 args.steps,
                 args.batch_size,
@@ -114,7 +118,10 @@ def _sac(args: argparse.Namespace) -> int:
             )
         )
     else:
-        result = run_experiment(SACCriticReplay(args.checkpoint, args.replay, args.report))
+        replay = (
+            args.replay if args.replay is not None else args.checkpoint / "experience/replay.json"
+        )
+        result = run_experiment(SACCriticReplay(args.checkpoint, replay, args.report))
     print(json.dumps(result.summary["sac"], ensure_ascii=False))
     return (
         4
@@ -258,8 +265,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Append compatible sealed experience with explicit digest; repeat up to 10 times",
     )
     sac_policy = commands.add_parser("sac-policy-replay", help="Replay a frozen learned SAC policy")
-    for name in ("checkpoint", "replay", "report"):
+    for name in ("checkpoint", "report"):
         sac_policy.add_argument("--" + name, type=Path, required=True)
+    sac_policy.add_argument(
+        "--replay", type=Path, help="Experience file; omitted uses the checkpoint's sealed replay"
+    )
     sac_policy.add_argument(
         "--raw-cache-bytes",
         type=int,
@@ -276,7 +286,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     for name in ("model", "replay", "output"):
         sac_warmup.add_argument("--" + name, type=Path, required=True)
-    sac_warmup.add_argument("--replay-sha256", required=True)
+    sac_warmup.add_argument(
+        "--replay-sha256", help="Require this exact replay digest; omitted binds the selected file"
+    )
     sac_warmup.add_argument("--steps", type=int, default=100)
     sac_warmup.add_argument("--batch-size", type=int, default=32)
     sac_warmup.add_argument("--learning-rate", type=float, default=0.0001)
@@ -296,8 +308,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     sac_replay = commands.add_parser(
         "sac-critic-replay", help="Reload frozen BC and warmed critics without updating"
     )
-    for name in ("checkpoint", "replay", "report"):
+    for name in ("checkpoint", "report"):
         sac_replay.add_argument("--" + name, type=Path, required=True)
+    sac_replay.add_argument(
+        "--replay", type=Path, help="Experience file; omitted uses the checkpoint's sealed replay"
+    )
     prepare = commands.add_parser(
         "collection-prepare", help="Freeze a separate passive collector; no devices"
     )
@@ -312,9 +327,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     prepare.add_argument("--offline", action="store_true")
     start = commands.add_parser("collection-start", help="Start the frozen independent collector")
     start.add_argument("bundle", type=Path)
+    start.add_argument(
+        "--output", type=Path, help="New recording directory; reuse the frozen install"
+    )
     start.add_argument("--live", action="store_true")
     dataset = commands.add_parser(
-        "collection-dataset", help="Freeze reviewed sealed-source selections"
+        "collection-dataset", help="Retired: use collection-bc-prepare with a v2 configuration"
     )
     dataset.add_argument("--config", type=Path, required=True)
     dataset.add_argument("--output", type=Path, required=True)
@@ -324,7 +342,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     dataset_review.add_argument("dataset", type=Path)
     dataset_review.add_argument("--report", type=Path, required=True)
     collection_bc = commands.add_parser(
-        "collection-bc-prepare", help="Export sealed numeric BC inputs"
+        "collection-bc-prepare", help="Select sealed sources and prepare numeric BC inputs"
     )
     collection_bc.add_argument("--config", type=Path, required=True)
     collection_bc.add_argument("--output", type=Path, required=True)
@@ -343,7 +361,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     scheduled_resume.add_argument("--run", type=Path, required=True)
     scheduled_resume.add_argument("--output", type=Path, required=True)
-    scheduled_resume.add_argument("--checkpoint-sha256", required=True)
+    scheduled_resume.add_argument("--checkpoint-sha256", help="Optional expected learner digest")
     for name in ("collection-status", "collection-stop", "collection-review"):
         collection = commands.add_parser(
             name, help="Inspect, stop or verify a passive collection session"
@@ -401,15 +419,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     capture.add_argument(
         "--live", action="store_true", help="Read-only physical client capture; F8 stops"
     )
-    policy = commands.add_parser(
-        "policy", help="Validate frozen BC assets; --live drives one bounded attempt"
-    )
-    policy.add_argument("--config", type=Path, required=True)
-    policy.add_argument("--output", type=Path, required=True)
+    policy = commands.add_parser("policy", help="Retired encoded-image driver; use realtime-drive")
+    policy.add_argument("--config", type=Path)
+    policy.add_argument("--output", type=Path)
     policy.add_argument("--port", type=int, default=5300)
-    policy.add_argument(
-        "--live", action="store_true", help="Send bounded policy input; F8 releases"
-    )
+    policy.add_argument("--live", action="store_true", help="Retired; no game input is sent")
     attempt = commands.add_parser(
         "attempt-review",
         help="Review complete local attempts with independent evidence; no game input",
@@ -435,7 +449,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     recovery.add_argument("--config", type=Path, required=True)
     recovery.add_argument("--trace", type=Path, required=True)
     recovery.add_argument("--output", type=Path, required=True)
-    bc = commands.add_parser("bc-train", help="Train a bounded offline multimodal BC actor")
+    bc = commands.add_parser("bc-train", help="Retired: import history and use temporal-train")
     bc.add_argument("--config", type=Path, required=True)
     bc.add_argument("--output", type=Path, required=True)
     bc_replay = commands.add_parser("bc-replay", help="Replay a frozen BC actor; no game input")
@@ -453,7 +467,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     temporal_replay.add_argument("--report", type=Path, required=True)
     temporal_replay.add_argument("--device", choices=("cpu", "cuda"), default="cpu")
     numeric_prepare = commands.add_parser(
-        "numeric-prepare", help="Decode legacy BC images once into a numerical offline source"
+        "numeric-prepare", help="Retired: use temporal-prepare for historical training data"
     )
     numeric_prepare.add_argument("--model", type=Path, required=True)
     numeric_prepare.add_argument("--dataset", type=Path, required=True)
@@ -626,17 +640,21 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.mode == "collection-start":
             from fh5.collection_process import CollectionStart
 
-            started = run_experiment(CollectionStart(args.bundle, live=args.live))
+            started = run_experiment(
+                CollectionStart(args.bundle, live=args.live, output_dir=args.output)
+            )
             print(json.dumps(started.summary["collection"]))
             return 0
-        if args.mode in ("collection-dataset", "collection-dataset-review"):
-            from fh5.collection_dataset import CollectionDataset, CollectionDatasetReview
-
-            selected = run_experiment(
-                CollectionDataset(args.config, args.output)
-                if args.mode == "collection-dataset"
-                else CollectionDatasetReview(args.dataset, args.report)
+        if args.mode == "collection-dataset":
+            raise ValueError(
+                "collection-dataset is retired; use collection-bc-prepare with a v2 "
+                "configuration containing sources, selection rules and observation settings. "
+                "Existing selections remain readable with collection-dataset-review."
             )
+        if args.mode == "collection-dataset-review":
+            from fh5.collection_dataset import CollectionDatasetReview
+
+            selected = run_experiment(CollectionDatasetReview(args.dataset, args.report))
             print(json.dumps(selected.summary["collection_dataset"], ensure_ascii=False))
             return 0
         if args.mode in ("candidate-archive", "candidate-restore"):
@@ -816,7 +834,15 @@ def main(argv: Sequence[str] | None = None) -> int:
             return capture_command(args)
         if args.mode in ("temporal-prepare", "temporal-train", "temporal-replay"):
             return _temporal_command(args)
-        if args.mode in ("numeric-prepare", "numeric-infer", "numeric-replay"):
+        if args.mode == "numeric-prepare":
+            raise ValueError(
+                "numeric-prepare is retired. Use temporal-prepare to import historical "
+                "demonstrations for new temporal training, or collection-bc-prepare for new "
+                "numeric recordings. Existing prepared packages remain readable with "
+                "numeric-infer; frozen v1 models remain readable with bc-replay. "
+                "Single-frame data cannot provide temporal training history."
+            )
+        if args.mode in ("numeric-infer", "numeric-replay"):
             return _numeric_command(args)
         if args.mode == "input-devices":
             from fh5.live_demonstration import input_devices
@@ -824,62 +850,19 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(json.dumps({"devices": input_devices(), "commands_sent": False}))
             return 0
         if args.mode == "policy":
-            from fh5.policy_actor import FrozenActor
-
-            root, policy_route = validate_policy_file(args.config)
-            actor = FrozenActor(args.config)
-            if not args.live:
-                print(
-                    json.dumps(
-                        {
-                            "status": "validated_only",
-                            "commands_sent": False,
-                            "model_sha256": actor.manifest["weights_sha256"],
-                            "device": root["policy"]["device"],
-                            "route_length_m": policy_route["length_m"],
-                            "policy": root["policy"],
-                        }
-                    )
-                )
-                return 0
-            if not 0 <= args.port <= 65535:
-                raise ValueError("--port must be between 0 and 65535")
-            if args.output.exists():
-                raise FileExistsError(f"Output directory already exists: {args.output}")
-            args.output.parent.mkdir(parents=True, exist_ok=True)
-            if shutil.disk_usage(args.output.parent).free < 512 * 1024**2:
-                raise OSError("Need 512 MiB free for bounded capture and report")
-            from fh5.live import WindowsDesktop, XboxController
-            from fh5.live_policy import LivePolicyEnvironment
-            from fh5.live_vision import WindowsColorFrames
-
-            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as receiver:
-                receiver.bind(("127.0.0.1", args.port))
-                desktop = WindowsDesktop()
-                policy_env = LivePolicyEnvironment(
-                    receiver,
-                    XboxController(),
-                    desktop,
-                    frame_factory=lambda: WindowsColorFrames(desktop),
-                )
-                print(
-                    json.dumps(
-                        {
-                            "status": "waiting_for_verified_local_start",
-                            "stop_key": "F8",
-                            "port": receiver.getsockname()[1],
-                            "reference_mode": root["policy"]["reference_mode"],
-                        }
-                    ),
-                    flush=True,
-                )
-                result = run_experiment(
-                    PolicyDrive(args.config, args.output),
-                    policy_environment=policy_env,
-                    policy_actor=actor,
-                )
+            raise ValueError(
+                "The encoded-image policy command is retired. Use realtime-drive with a numerical "
+                "temporal BC model and configs/realtime-drive.example.json; old configurations "
+                "are not interchangeable. Existing recordings remain readable with replay."
+            )
         elif args.mode == "bc-train":
-            result = run_experiment(BCTrain(args.config, args.output))
+            raise ValueError(
+                "The legacy bc-train command is retired. Use temporal-prepare to import "
+                "compatible historical demonstrations, then temporal-train; use "
+                "collection-bc-prepare and collection-bc-train for new numeric collection. "
+                "This requires retraining, not converting old weights. Existing v1 models "
+                "remain readable with bc-replay. See docs/bc.md."
+            )
         elif args.mode == "bc-replay":
             result = run_experiment(BCReplay(args.model, args.dataset, args.report, args.device))
         elif args.mode == "demonstration-replay":
@@ -1115,33 +1098,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (OSError, ValueError, ImportError) as error:
         print(json.dumps({"status": "error", "message": str(error)}), file=sys.stderr)
         return 2
-    if args.mode == "policy":
-        if result.summary["capture_status"] == "source_error":
-            print(json.dumps({"status": "source_error", "report": str(result.report_path)}))
-            return 2
-        p = result.summary["policy"]
-        print(
-            json.dumps(
-                {
-                    **{
-                        k: p[k]
-                        for k in (
-                            "stop_reason",
-                            "release_sent",
-                            "resources_released",
-                            "geometry_completed",
-                            "formal_validity",
-                        )
-                    },
-                    "report": str(result.report_path),
-                }
-            )
-        )
-        return (
-            0
-            if p["stop_reason"] == "local_end" and p["release_sent"] and p["resources_released"]
-            else 4
-        )
     if "recovery" in result.summary:
         print(
             json.dumps(
@@ -1360,20 +1316,9 @@ def _temporal_command(args: argparse.Namespace) -> int:
 def _numeric_command(args: argparse.Namespace) -> int:
     from fh5.numeric_actor import FrozenNumericActor
     from fh5.numeric_images import NumericInfer, NumericReplay, PixelContract
-    from fh5.numeric_import import LegacyNumericImport, PreparedNumericSource
+    from fh5.numeric_import import PreparedNumericSource
 
-    if args.mode == "numeric-prepare":
-        result = run_experiment(
-            LegacyNumericImport(
-                args.model,
-                args.dataset,
-                args.output,
-                args.max_decisions,
-                args.view,
-            )
-        )
-        summary = result.summary["numeric_import"]
-    elif args.mode == "numeric-infer":
+    if args.mode == "numeric-infer":
         source = PreparedNumericSource(args.recording)
         actor = FrozenNumericActor(
             args.model, source.contract, args.device, legacy_diagnostic=args.legacy_diagnostic
@@ -1423,10 +1368,7 @@ def _numeric_command(args: argparse.Namespace) -> int:
             or summary.get("replay_errors")
             or summary.get("archive", {}).get("error")
             or not summary.get("source_released", True)
-            or (
-                args.mode != "numeric-prepare"
-                and not any(d.get("status") == "predicted" for d in decisions)
-            )
+            or not any(d.get("status") == "predicted" for d in decisions)
         )
         else 0
     )

@@ -71,9 +71,27 @@ def resume_inputs(tmp_path):
     return schedule, dataset
 
 
-def test_scheduled_bc_pressure_stop_resumes_exact_remaining_updates_without_loss_journal(tmp_path):
+@pytest.mark.parametrize("sealed_schedule_version", [1, 2])
+def test_scheduled_bc_pressure_stop_resumes_exact_remaining_updates_without_loss_journal(
+    tmp_path, sealed_schedule_version
+):
     torch = pytest.importorskip("torch")
     schedule, dataset = resume_inputs(tmp_path)
+    options = json.loads(schedule.read_bytes())
+    training_path = Path(options.pop("training_config"))
+    options.pop("training_config_sha256")
+    options["version"] = 2
+    options["training"] = json.loads(training_path.read_bytes())
+    options["training"]["dataset"] = str(dataset.resolve())
+    if sealed_schedule_version == 2:
+        options["training"].pop("dataset_sha256")
+        options["training"]["dataset"] = dataset.relative_to(
+            schedule.parent, walk_up=True
+        ).as_posix()
+    schedule.write_text(json.dumps(options))
+    requested_schedule = schedule.read_bytes()
+    original_dataset = dataset.read_bytes()
+    dataset_sha256 = hashlib.sha256(original_dataset).hexdigest()
     reference = run_experiment(
         ScheduledBCTrain(schedule, tmp_path / "reference"), learning_resources=Resources()
     ).summary["learning_schedule"]
@@ -88,12 +106,43 @@ def test_scheduled_bc_pressure_stop_resumes_exact_remaining_updates_without_loss
     assert stopped["candidate"] is None
     parent = stopped["learner_checkpoint"]
     parent_dir = Path(parent["directory"])
+    frozen_schedule = tmp_path / "stopped/schedule-config.json"
+    frozen_training = tmp_path / "stopped/training.json"
+    for settings in (
+        json.loads(frozen_schedule.read_bytes())["training"],
+        json.loads(frozen_training.read_bytes()),
+    ):
+        assert settings["dataset"] == str(dataset.resolve())
+        assert settings["dataset_sha256"] == dataset_sha256
+    checkpoint = json.loads((parent_dir / "learner.json").read_bytes())
+    assert checkpoint["dataset"] == {"path": str(dataset.resolve()), "sha256": dataset_sha256}
+    assert checkpoint["model_metadata"]["dataset_sha256"] == dataset_sha256
+    assert checkpoint["model_metadata"]["config"]["dataset_sha256"] == dataset_sha256
+    assert schedule.read_bytes() == requested_schedule
+    assert (tmp_path / "stopped/requested-schedule.json").read_bytes() == requested_schedule
+    if sealed_schedule_version == 1:
+        # An already sealed v1 run locates its training file relative to the
+        # schedule, then resolves the dataset relative to that training file.
+        legacy = json.loads(frozen_schedule.read_bytes())
+        legacy.pop("training")
+        legacy.update(
+            version=1,
+            training_config="training.json",
+            training_config_sha256=hashlib.sha256(
+                (tmp_path / "stopped/training.json").read_bytes()
+            ).hexdigest(),
+        )
+        frozen_schedule.write_text(json.dumps(legacy))
+        schedule.write_text("developer changed the original configuration")
     preserved = {
         path: hashlib.sha256(path.read_bytes()).hexdigest()
         for path in (
             parent_dir / "learner.json",
             parent_dir / "learner.pt",
             tmp_path / "stopped/schedule.json",
+            frozen_schedule,
+            frozen_training,
+            tmp_path / "stopped/requested-schedule.json",
         )
     }
     for journal in (tmp_path / "stopped").rglob("losses.jsonl"):
@@ -102,13 +151,42 @@ def test_scheduled_bc_pressure_stop_resumes_exact_remaining_updates_without_loss
 
     from fh5.learning_schedule import ScheduledBCResume
 
+    if sealed_schedule_version == 2:
+        # Even valid changes to the snapshot's JSON bytes must fail the saved
+        # binding; omission applies only to the original experiment request.
+        dataset.write_bytes(original_dataset + b"\n")
+        try:
+            with pytest.raises(ValueError, match="Frozen numerical dataset hash mismatch"):
+                run_experiment(
+                    ScheduledBCResume(
+                        tmp_path / "stopped", tmp_path / "rejected", parent["manifest_sha256"]
+                    ),
+                    learning_resources=Resources(),
+                )
+            assert not (tmp_path / "rejected/candidate").exists()
+            assert not (tmp_path / "rejected/learner/learner.json").exists()
+        finally:
+            dataset.write_bytes(original_dataset)
+
     continued = run_experiment(
-        ScheduledBCResume(tmp_path / "stopped", tmp_path / "continued", parent["manifest_sha256"]),
+        ScheduledBCResume(
+            tmp_path / "stopped",
+            tmp_path / "continued",
+            parent["manifest_sha256"] if sealed_schedule_version == 1 else None,
+        ),
         learning_resources=Resources(),
     ).summary["learning_schedule"]
     assert continued["state"] == "completed"
     assert continued["steps_completed"] == continued["durable_steps_completed"] == 6
     assert continued["steps_this_run"] == 4
+    assert (
+        json.loads((tmp_path / "continued/learner/learner.json").read_bytes())[
+            "parent_checkpoint_sha256"
+        ]
+        == parent["manifest_sha256"]
+    )
+    assert json.loads((tmp_path / "continued/schedule-config.json").read_bytes())["version"] == 2
+    assert continued["config"]["training"]["dataset_sha256"] == dataset_sha256
     assert (
         continued["learner_checkpoint"]["learner_state_sha256"]
         == reference["learner_checkpoint"]["learner_state_sha256"]
@@ -123,6 +201,9 @@ def test_scheduled_bc_pressure_stop_resumes_exact_remaining_updates_without_loss
         torch.testing.assert_close(states[1][key], states[0][key], rtol=0, atol=0)
     for path, digest in preserved.items():
         assert hashlib.sha256(path.read_bytes()).hexdigest() == digest
+    if sealed_schedule_version == 2:
+        assert schedule.read_bytes() == requested_schedule
+    assert dataset.read_bytes() == original_dataset
     reports = [
         json.loads((tmp_path / name / "candidate/report.json").read_bytes())
         for name in ("reference", "continued")

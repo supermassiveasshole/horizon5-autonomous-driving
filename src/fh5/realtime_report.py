@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Any
 from fh5.capture_metrics import percentiles
 from fh5.numeric_images import asset
 from fh5.realtime import MAX_REALTIME_REPORT_BYTES, RealtimeConfig
+from fh5.sac_context import PROPOSAL_CONTEXT
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -75,6 +76,21 @@ def write_realtime_result(
             [(b["decision_ns"] - a["decision_ns"]) / 1e6 for a, b in zip(decisions, decisions[1:])]
         ),
     }
+    if result.get("model", {}).get("command_context") == PROPOSAL_CONTEXT:
+        proposed = {
+            p["decision_id"]: p["proposed_ns"]
+            for p in result["proposals"]
+            if p["owner"] == "policy"
+        }
+        result["metrics"]["interpretation"] = (
+            "counterfactual proposal timing only; no actuator sends or executed action history"
+        )
+        result["metrics"]["source_to_proposal_ms"] = percentiles(
+            [
+                (proposed[d["decision_id"]] - d["frames"][-1]["source_time_ns"]) / 1e6
+                for d in accepted
+            ]
+        )
     for name, start, finish in (
         ("worker_queue_ms", "decision_ns", "worker_started_ns"),
         ("worker_features_and_inference_ms", "worker_started_ns", "worker_returned_ns"),

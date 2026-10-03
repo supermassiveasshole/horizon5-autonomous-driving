@@ -17,6 +17,7 @@ from fh5.realtime_report import write_realtime_result
 from fh5.realtime_state import DecisionState
 from fh5.realtime_worker import InferenceWorker
 from fh5.sac_actions import ActionBounds
+from fh5.sac_context import PROPOSAL_CONTEXT, SEND_CONTEXT
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -115,7 +116,14 @@ def run_realtime(
             state.stop(time.perf_counter_ns(), "model_startup_failed")
         else:
             if environment.source_kind == "native" and (
-                worker.kind != "frozen-numeric-temporal-bc-v2"
+                worker.kind
+                not in (
+                    "frozen-numeric-temporal-bc-v2",
+                    "frozen-numeric-sac-v1",
+                    "frozen-numeric-sac-sampling-v1",
+                )
+                or worker.kind != "frozen-numeric-temporal-bc-v2"
+                and worker.manifest.get("source_kind") not in ("native", "mixed")
                 or worker.manifest.get("diagnostic_only") is not False
                 or worker.manifest.get("explicit_dt_model") is not True
                 or request.config.pixels.origin != "direct_numeric"
@@ -126,18 +134,27 @@ def run_realtime(
                     "reference_count": request.config.reference_count,
                 }
             ):
-                raise ValueError("Native driving requires compatible non-diagnostic temporal BC")
+                raise ValueError(
+                    "Native driving requires a compatible non-diagnostic temporal actor"
+                )
             if environment.source_kind == "native":
                 authorize = getattr(environment, "authorize", None)
                 if not callable(authorize):
                     raise ValueError("Native driving requires qualified input and shadow bindings")
                 authorize(request, worker.manifest, worker.inference_device)
             state.require_command_context = bool(worker.manifest.get("command_context"))
+            state.counterfactual_context = (
+                worker.manifest.get("command_context") == PROPOSAL_CONTEXT
+            )
             if state.require_command_context:
                 state.command_bounds = ActionBounds(**worker.manifest["bounds"])
-            if state.require_command_context and environment.source_kind != "synthetic":
+            if state.counterfactual_context and environment.source_kind != "shadow":
+                raise ValueError("Counterfactual proposals require a read-only shadow environment")
+            if worker.manifest.get(
+                "command_context"
+            ) == SEND_CONTEXT and environment.source_kind not in ("synthetic", "native"):
                 raise ValueError(
-                    "Command-conditioned evaluation currently requires synthetic sends"
+                    "Command-conditioned execution requires synthetic or qualified native sends"
                 )
             threads = [
                 threading.Thread(target=receive, name="fh5-runtime-input", daemon=True),
@@ -221,6 +238,7 @@ def run_realtime(
         "game_application": "unverified",
         "decisions": state.decisions,
         "commands": state.commands,
+        **({"proposals": state.proposals} if state.counterfactual_context else {}),
         "stop_reason": state.stop_reason,
         "inference": inference,
         "model": worker.manifest,

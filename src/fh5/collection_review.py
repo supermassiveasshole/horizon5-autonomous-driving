@@ -3,45 +3,21 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import json
 import re
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from fh5.artifact_io import VerifiedFile
 from fh5.collection import CollectionReview
-from fh5.collection_store import atomic_json, collection_complete, read_bounded, write_file
+from fh5.collection_store import atomic_json, collection_complete, read_bounded
 from fh5.numeric_images import PixelContract, validate_frame_history
 from fh5.numeric_recording import read_numeric_frame
+from fh5.presentation import optional_report
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
-
-
-def collection_result(
-    path: Path, result: dict[str, Any], *, title: str = "持续采集状态"
-) -> RunResult:
-    from fh5.experiment import RunResult
-
-    if path.exists():
-        raise FileExistsError(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(result, indent=2, ensure_ascii=False, allow_nan=False)
-    write_file(
-        path,
-        (
-            '<!doctype html><html lang="zh"><meta charset="utf-8"><title>'
-            + html.escape(title)
-            + "</title>"
-            "<style>body{font:16px system-ui;margin:32px;max-width:1000px}pre{white-space:pre-wrap}</style>"
-            "<h1>"
-            + html.escape(title)
-            + "</h1><p>完整封存不等于优质示范；碰撞、离路、导航和尝试边界仍需核验。</p><pre>"
-            + html.escape(data)
-            + "</pre></html>"
-        ).encode("utf-8"),
-    )
-    return RunResult({"source_kind": "passive_collection"}, [], [], {"collection": result}, path)
 
 
 def _references(document: dict[str, Any], binding: str) -> dict[str, dict[str, Any]]:
@@ -67,7 +43,43 @@ def _references(document: dict[str, Any], binding: str) -> dict[str, dict[str, A
     return result
 
 
+def sealed_block_rows(
+    block: Path, manifest: dict[str, Any], contract: PixelContract
+) -> Iterator[dict[str, Any]]:
+    """Read verified bytes one row at a time; exhaust before accepting the block."""
+    expected = manifest["row_count"]
+    if type(expected) is not int or expected < 1:
+        raise ValueError("Sealed row count mismatch")
+    rows = VerifiedFile(block / "rows.jsonl", manifest["rows_sha256"])
+    with rows.snapshot() as stream:
+        count = 0
+        for line in stream:
+            row = json.loads(line)
+            count += 1
+            if count > expected:
+                raise ValueError("Sealed row count mismatch")
+            if (count == 1 and row["sequence"] != manifest["first_sequence"]) or (
+                count == expected and row["sequence"] != manifest["last_sequence"]
+            ):
+                raise ValueError("Sealed sequence bounds differ")
+            if row["frames"]:
+                frames = tuple(
+                    read_numeric_frame(block, f, byte_limit=contract.size[0] * contract.size[1] * 3)
+                    for f in row["frames"]
+                )
+                reason = validate_frame_history(
+                    row["capture_epoch"], row["at_ns"], frames, contract
+                )
+                if reason or any(f.source_time_ns < row["segment_start_ns"] for f in frames):
+                    raise ValueError("Archived history crosses a segment or violates contract")
+            yield row
+        if count != expected:
+            raise ValueError("Sealed row count mismatch")
+
+
 def review_collection(request: CollectionReview) -> RunResult:
+    from fh5.experiment import RunResult
+
     root = request.recording_dir
     if request.report_path.exists() or request.report_path.with_suffix(".json").exists():
         raise FileExistsError(request.report_path)
@@ -154,48 +166,23 @@ def review_collection(request: CollectionReview) -> RunResult:
                 or manifest["index"] != int(block.name)
             ):
                 raise ValueError("Sealed block belongs to another session or index")
-            rows_raw = read_bounded(block / "rows.jsonl", 256 * 1024**2)
-            if hashlib.sha256(rows_raw).hexdigest() != manifest["rows_sha256"]:
-                raise ValueError("Sealed rows hash mismatch")
-            rows = rows_raw.splitlines()
-            if len(rows) != manifest["row_count"] or not 1 <= len(rows) <= 4096:
-                raise ValueError("Sealed row count mismatch")
-            first = last = -1
-            block_previous, missing = previous, 0
-            for line in rows:
-                row = json.loads(line)
+            block_previous, missing, count = previous, 0, 0
+            for row in sealed_block_rows(block, manifest, contract):
                 sequence = row["sequence"]
                 if type(sequence) is not int or sequence <= block_previous:
                     raise ValueError("Collection sequence repeated or moved backwards")
                 missing += sequence - block_previous - 1
-                block_previous = last = sequence
-                if first == -1:
-                    first = sequence
-                if row["frames"]:
-                    if len(row["frames"]) != len(contract.history_offsets_ms):
-                        raise ValueError("Incomplete archived frame history")
-                    frames = tuple(
-                        read_numeric_frame(
-                            block, f, byte_limit=contract.size[0] * contract.size[1] * 3
-                        )
-                        for f in row["frames"]
-                    )
-                    reason = validate_frame_history(
-                        row["capture_epoch"], row["at_ns"], frames, contract
-                    )
-                    if reason or any(f.source_time_ns < row["segment_start_ns"] for f in frames):
-                        raise ValueError("Archived history crosses a segment or violates contract")
-            if first != manifest["first_sequence"] or last != manifest["last_sequence"]:
-                raise ValueError("Sealed sequence bounds differ")
+                block_previous = sequence
+                count += 1
             previous = block_previous
             result["missing_rows"] += missing
-            result["rows"] += len(rows)
+            result["rows"] += count
             result["verified_blocks"] += 1
             result["blocks"].append(
                 {
                     "path": "blocks/" + block.name,
                     "manifest_sha256": digest,
-                    "rows": len(rows),
+                    "rows": count,
                 }
             )
         except (OSError, ValueError, KeyError, TypeError) as error:
@@ -228,4 +215,11 @@ def review_collection(request: CollectionReview) -> RunResult:
     else:
         result["recovery"] = "sealed_blocks_only; final tail size unknown"
     atomic_json(request.report_path.with_suffix(".json"), result)
-    return collection_result(request.report_path, result)
+    report = optional_report(
+        request.report_path,
+        "持续采集审核（完整封存不等于优质示范）",
+        result,
+        fallback=request.report_path.with_suffix(".json"),
+        exclusive=True,
+    )
+    return RunResult({"source_kind": "passive_collection"}, [], [], {"collection": result}, report)

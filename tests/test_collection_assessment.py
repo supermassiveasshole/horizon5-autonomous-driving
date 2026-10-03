@@ -14,7 +14,7 @@ pytest.importorskip("torch")
 
 
 def candidates(tmp_path):
-    prepare, _ = prepare_inputs(tmp_path)
+    prepare = prepare_inputs(tmp_path)
     numeric = tmp_path / "numeric"
     run_experiment(CollectionBCPrepare(prepare, numeric))
     dataset = numeric / "dataset.json"

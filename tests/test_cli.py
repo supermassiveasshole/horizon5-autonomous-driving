@@ -6,9 +6,43 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from test_control import control_config
 from test_experiment import config_file, sample_packet
 from test_tracking import tracking_config
+
+from fh5.cli import main
+
+
+@pytest.mark.parametrize(
+    ("command", "replacement", "flags"),
+    [
+        ("policy", "realtime-drive", ["--config", "old-config.json", "--live"]),
+        ("collection-dataset", "collection-bc-prepare", ["--config", "old-config.json"]),
+        ("bc-train", "temporal-prepare", ["--config", "old-config.json"]),
+        (
+            "numeric-prepare",
+            "temporal-prepare",
+            ["--model", "old-model", "--dataset", "old-dataset.json"],
+        ),
+    ],
+)
+def test_retired_command_explains_migration_before_reading_old_assets(
+    tmp_path, capsys, command, replacement, flags
+):
+    output = tmp_path / "not-created"
+    result = main(
+        [
+            command,
+            "--output",
+            str(output),
+            *flags,
+        ]
+    )
+    error = json.loads(capsys.readouterr().err)
+    assert result == 2
+    assert "retired" in error["message"] and replacement in error["message"]
+    assert not output.exists()
 
 
 def test_tracking_cli_defaults_to_validation_without_controller(tmp_path):

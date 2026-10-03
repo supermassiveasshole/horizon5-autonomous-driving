@@ -12,6 +12,7 @@ from fh5.control import Command
 from fh5.numeric_images import validate_frame_history
 from fh5.realtime import RealtimeConfig, RealtimeObservation, SafetyState
 from fh5.sac_actions import ActionBounds, ActionSupportUnavailable
+from fh5.sac_context import PROPOSAL_CONTEXT, SEND_CONTEXT, context_action, proposal_context
 
 NEUTRAL = Command(0, 0, 0)
 MS = 1_000_000
@@ -42,12 +43,15 @@ class DecisionState:
         self.clock, self.executed_history = clock, executed_history
         self.notify = notify or (lambda kind, row: None)
         self.require_command_context = require_command_context
+        self.counterfactual_context = False
         self.command_bounds = command_bounds
         self.safety: SafetyState | None = None
         self.decisions: list[dict[str, Any]] = []
         self.commands: list[dict[str, Any]] = []
+        self.proposals: list[dict[str, Any]] = []
         self.pending: Work | None = None
         self.last_action: dict[str, Any] | None = None
+        self.last_proposal: dict[str, Any] | None = None
         self.last_accepted_ns: int | None = None
         self.lease_ns: int | None = None
         self.stop_reason: str | None = None
@@ -62,7 +66,12 @@ class DecisionState:
             self.clock_advanced_ns = safety.received_ns
         if old and (self.last_accepted_ns is not None or self.pending is not None):
             if old.epoch != safety.epoch:
-                self.safety_fault = self.safety_fault or safety.fault or "session_boundary"
+                self.safety_fault = self.safety_fault or (
+                    "user_stop"
+                    if safety.stop_requested
+                    else safety.fault
+                    or ("focus_lost" if not safety.focused else "session_boundary")
+                )
             elif safety.received_ns < old.received_ns:
                 self.safety_fault = "telemetry_clock_discontinuity"
             elif safety.game_timestamp_ms < old.game_timestamp_ms:
@@ -133,14 +142,32 @@ class DecisionState:
             self.last_action = row
             self.notify("command", dict(row))
 
+    def _output(self, now: int, command: Command, owner: str, work: Work | None = None) -> None:
+        if not self.counterfactual_context:
+            self._send(now, command, owner, work)
+            return
+        # A shadow proposal advances only the hypothetical action support. It
+        # never invokes a send port or becomes executed encoder action history.
+        row = {
+            "proposal_index": len(self.proposals),
+            "proposed_ns": now,
+            "owner": owner,
+            "decision_id": work.row["decision_id"] if work else None,
+            "valid_until_ns": work.row["valid_until_ns"] if work else now,
+            "proposal": asdict(command),
+        }
+        self.proposals.append(row)
+        self.last_proposal = row
+        self.notify("proposal", deepcopy(row))
+
     def stop(self, now: int, reason: str) -> None:
         if self.stop_reason is not None:
             return
         self.stop_reason = reason
-        if self.last_action is not None:
+        if self.last_action is not None or self.last_proposal is not None:
             for _ in range(3):
                 try:
-                    self._send(self.clock() if self.clock else now, NEUTRAL, "hard_stop")
+                    self._output(self.clock() if self.clock else now, NEUTRAL, "hard_stop")
                     break
                 except Exception:
                     continue
@@ -158,7 +185,7 @@ class DecisionState:
             return
         if self.lease_ns is not None and now >= self.lease_ns:
             try:
-                self._send(now, NEUTRAL, "lease_expiry")
+                self._output(now, NEUTRAL, "lease_expiry")
             except Exception:
                 self.stop(now, "send_failed")
                 return
@@ -270,6 +297,8 @@ class DecisionState:
         return None
 
     def begin(self, now: int, observation: RealtimeObservation | None) -> Work | None:
+        prior = self.last_proposal if self.counterfactual_context else self.last_action
+        time_key = "proposed_ns" if self.counterfactual_context else "returned_ns"
         if observation:
             self.capture_epoch = observation.epoch
         row: dict[str, Any] = {
@@ -304,29 +333,23 @@ class DecisionState:
             and observation.frames[-1].source_time_ns <= self.submitted_source[1]
         ):
             row["status"] = "skip_repeated_source"
-        elif self.require_command_context and self.last_action is None:
+        elif self.require_command_context and prior is None:
             try:
-                self._send(now, NEUTRAL, "initial_neutral")
+                self._output(now, NEUTRAL, "initial_neutral")
                 row["status"] = "skip_initial_command_context"
             except Exception:
                 row["status"] = "send_failed"
                 self.stop(now, "send_failed")
-        elif (
-            self.require_command_context
-            and self.last_action
-            and self.last_action["returned_ns"] >= now
-        ):
+        elif self.require_command_context and prior and prior[time_key] >= now:
             row["status"] = "skip_command_context_time"
         else:
             context = self.command_context() if self.require_command_context else None
             if context is not None and self.command_bounds is not None:
-                sent = context["sent"]
-                previous = [
-                    sent["steer_i16"] / 32767,
-                    (sent["throttle_u8"] - sent["brake_u8"]) / 255,
-                ]
+                previous, at = context_action(
+                    context, PROPOSAL_CONTEXT if self.counterfactual_context else SEND_CONTEXT, now
+                )
                 try:
-                    self.command_bounds.interval(previous, (now - context["returned_ns"]) / 1e9)
+                    self.command_bounds.interval(previous, (now - at) / 1e9)
                 except ActionSupportUnavailable:
                     row.update(status="skip_action_support", command_context=context)
                     self.notify("decision_skipped", dict(row))
@@ -350,6 +373,10 @@ class DecisionState:
         return None
 
     def command_context(self) -> dict[str, Any]:
+        if self.counterfactual_context:
+            if self.last_proposal is None:
+                raise ValueError("No counterfactual proposal available")
+            return proposal_context(self.last_proposal)
         if self.last_action is None or self.last_action["status"] != "sent":
             raise ValueError("No successful command available")
         return {
@@ -400,7 +427,7 @@ class DecisionState:
                 round(max(0, min(cfg.max_brake, -longitudinal)) * 255),
             )
             try:
-                self._send(now, command, "policy", work)
+                self._output(now, command, "policy", work)
             except Exception:
                 row["status"] = "send_failed"
                 self.stop(now, "send_failed")

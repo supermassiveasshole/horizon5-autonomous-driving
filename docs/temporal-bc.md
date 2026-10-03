@@ -2,6 +2,8 @@
 
 对应 #35。`temporal-prepare` → `temporal-train` → `temporal-replay` 经实验入口完成离线准备、训练和冻结重载，不启动游戏或连接虚拟手柄。当前先使用历史示范；DXGI 原生时间与新采集分布仍需 #34/#37/#38。
 
+历史训练数据只保留此导入入口，不需要旧模型。旧 `numeric-prepare` 已退役，已有准备包及数值推理记录仍可[离线读取](numeric-images.md)；这里输出训练用 `dataset.json`，不替换旧单视图 `prepared.json` 或转换旧权重。Δt 模型至少需要两帧有效历史，无法从单帧补造。
+
 ## 准备与训练
 
 ```powershell
@@ -10,13 +12,12 @@ uv run --locked fh5 temporal-train --config runs/temporal-train.json --output ru
 uv run --locked fh5 temporal-replay --model runs/temporal-model --dataset runs/temporal-prepared/dataset.json --report runs/temporal-reloaded.html
 ```
 
-需要 `learning` 可选依赖。输出目录必须不存在。准备命令返回冻结 `dataset.json` 的 SHA-256；将它填入训练配置，数据路径相对该配置文件：
+需要 `learning` 可选依赖。输出目录必须不存在。训练配置只需指定准备好的 `dataset.json`，路径相对配置文件。启动时按块计算其 SHA-256 并冻结到模型配置，无需手工复制摘要：
 
 ```json
 {
   "version": 1,
   "dataset": "temporal-prepared/dataset.json",
-  "dataset_sha256": "替换为准备命令返回的64位摘要",
   "seed": 20260930,
   "steps": 200,
   "batch_size": 32,
@@ -25,6 +26,8 @@ uv run --locked fh5 temporal-replay --model runs/temporal-model --dataset runs/t
   "time_mode": "actual"
 }
 ```
+
+如需预先指定某一份快照，仍可填写 `dataset_sha256`；显式值必须匹配，错误值不会自动更新。模型、内部训练配置和续训检查点始终保存完整摘要，后续数据变化仍拒绝回放或续训。原始用户配置不改写。
 
 固定时间对照仅把 `time_mode` 改为 `fixed`，保留种子、步骤、批量、数据与结构。权重取固定最后一步，不依据留出误差选模型。CPU 使用 `device: cpu`。负面结果仍保存，不注入最低油门或修改预测幅度。
 
@@ -48,4 +51,4 @@ uv run --locked fh5 temporal-replay --model runs/temporal-model --dataset runs/t
 
 报告按决策展示数值像素的 PNG 副本、时间、真实标签、预测和动作历史消融；按名义/重选历史、参考条件、起步/左右转向/松油/制动及尝试组分层报告误差。复制最近动作作为诊断基线。mask 后误差变化和非零时间梯度只证明计算/依赖，不证明 Δt 带来驾驶收益。
 
-页面播放/拖动需要独立交互核验。软件测试、历史数据回放、新 4K 动态采集和真实驾驶验收分别报告。当前旧 `policy --live` 未因这项离线功能自动升级；不能据离线 loss 降低恢复实机驾驶。
+页面播放/拖动需要独立交互核验；T33 实际 Δt 与固定时间两份指定报告已于 2026-10-03 通过[用户人工验收](validation/t33-temporal-bc.md#人工页面交互验收2026-10-03)。软件测试、历史数据回放、新 4K 动态采集和真实驾驶验收分别报告。旧 `bc-train` 与编码图像 `policy` 在线入口均已退役；历史模型仍可离线回放。数值候选进入 `realtime-drive` 仍须满足独立驾驶条件，不能据离线 loss 降低恢复实机驾驶。

@@ -44,16 +44,40 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
     report = read_realtime_recording(request.execution_dir)
     if read_bounded(manifest_path, 4096) != manifest:
         raise ValueError("Execution manifest changed during preparation")
+    source_kind = report["evidence_kind"]
     if (
-        report["evidence_kind"] != "synthetic"
-        or report["actor_kind"] not in ("frozen-numeric-sac-v1", "frozen-numeric-sac-sampling-v1")
+        source_kind not in ("synthetic", "native")
+        or report["actor_kind"]
+        not in (
+            "frozen-numeric-sac-v1",
+            "frozen-numeric-sac-sampling-v1",
+            "frozen-numeric-temporal-bc-v2",
+        )
         or report["model"] != actor.manifest
         or report["actor_kind"] != actor.kind
-        or report["model"].get("command_context") != "successful-send-return-proxy-v1"
+        or report["actor_kind"] != "frozen-numeric-temporal-bc-v2"
+        and report["model"].get("command_context") != "successful-send-return-proxy-v1"
     ):
-        raise ValueError("Asynchronous SAC experience requires matching frozen synthetic execution")
-    if len(report["decisions"]) > 12_000 or len(report["commands"]) > 20_000:
-        raise ValueError("Asynchronous SAC execution exceeds preparation bounds")
+        raise ValueError("Asynchronous SAC experience requires matching frozen execution")
+    if source_kind == "native":
+        environment = report["environment"]
+        provenance = report["model"].get("provenance", {})
+        conditions = environment.get("input_conditions", {}).get("conditions", {})
+        qualification = environment.get("qualification") or {}
+        if (
+            report["actor_kind"] != "frozen-numeric-temporal-bc-v2"
+            and report["model"].get("source_kind") not in ("native", "mixed")
+            or report["model"].get("diagnostic_only") is not False
+            or provenance.get("kind") != "continuous_numeric_collection"
+            or environment.get("mode") != "numeric_driving"
+            or qualification.get("eligible") is not True
+            or qualification.get("reasons") != []
+            or environment.get("capture", {}).get("source_kind") != "dxgi"
+            or conditions.get("status") != "confirmed"
+            or conditions != provenance.get("input_conditions")
+            or not report["commands_sent_to_game"]
+        ):
+            raise ValueError("Native SAC experience requires qualified frozen BC or SAC driving")
     pixels = PixelContract.from_metadata(report["configuration"]["pixels"])
     if pixels.origin != "direct_numeric":
         raise ValueError("Asynchronous SAC experience requires direct numerical pixels")
@@ -69,16 +93,27 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
         )
     )
     bind_execution_inputs(request.execution_dir, report, request.recording_dir, settled)
+    commands = report["commands"]
+    command_indices = {
+        command["decision_id"]: index
+        for index, command in enumerate(commands)
+        if command["decision_id"] is not None
+    }
     task = settled.summary["attempt_review"]["task"]
     if settled.metadata["control_source"] != "policy" or task["control_owner"] != "policy":
         raise ValueError("Asynchronous SAC experience requires actual policy ownership")
+    if (
+        source_kind == "native"
+        and report["environment"]["task"]["route_sha256"]
+        != (settled.summary["rewards"]["source_hashes"]["route"])
+    ):
+        raise ValueError("Native execution and independent reward routes differ")
     reward_index = index_rewards(settled, request.task_file)
     context, states, steps = reward_index.context, reward_index.states, reward_index.steps
     samples = {s["packet_index"]: s for s in settled.samples}
     by_time = {s["received_monotonic_ns"]: s for s in settled.samples}
     observations: dict[str, dict[str, Any]] = {}
     observation_errors = []
-    retained_bytes = 0
     decisions = [d for d in report["decisions"] if d["status"] == "accepted"]
     segment_bounds = reward_index.segment_bounds
     epoch_segments: dict[str, str] = {}
@@ -92,9 +127,11 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
                 raise ValueError("Observation epoch reused after independent recovery")
             verify_realtime_decision(request.execution_dir, row, pixels, actor, 1e-6)
             decision = read_realtime_decision(request.execution_dir, row, pixels)
+            command_index = command_indices[row["decision_id"]]
             if boundary is not None and (
                 any(f.source_time_ns < boundary for f in decision.frames)
-                or row["command_context"]["returned_ns"] < boundary
+                or command_index > 0
+                and commands[command_index - 1]["returned_ns"] < boundary
                 or any(
                     age is not None and row["decision_ns"] - age * 1e6 < boundary
                     for age in decision.actor["action_age_ms"]
@@ -106,9 +143,6 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
                 digest = hashlib.sha256(frame.pixels).hexdigest()
                 name = f"frames/{digest}.rgb"
                 if not (request.output_dir / name).exists():
-                    retained_bytes += frame.pixels.nbytes
-                    if retained_bytes > 512 * 1024**2:
-                        raise ValueError("Asynchronous SAC experience exceeds 512 MiB pixels")
                     write_file(request.output_dir / name, bytes(frame.pixels))
                 frames.append({**frame.metadata(), "path": name, "sha256": digest})
             observations[row["decision_id"]] = {
@@ -123,10 +157,14 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
         except (OSError, ValueError, TypeError, KeyError) as error:
             observation_errors.append({"decision_id": row["decision_id"], "error": str(error)})
 
-    commands = report["commands"]
     transitions, excluded = [], []
     for number, row in enumerate(decisions):
-        index = next(i for i, c in enumerate(commands) if c["decision_id"] == row["decision_id"])
+        index = command_indices[row["decision_id"]]
+        if index == 0:
+            excluded.append(
+                {"execution_command_index": index, "reason": "missing_previous_command"}
+            )
+            continue
         command, previous, successor = commands[index], commands[index - 1], commands[index + 1]
         following = decisions[number + 1] if number + 1 < len(decisions) else None
         start = by_time[row["telemetry_received_ns"]]["packet_index"]
@@ -145,7 +183,16 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
         current = observations.get(row["decision_id"])
         after = observations.get(following["decision_id"]) if following and not terminal else None
         reason = None
-        if current is None:
+        if previous["returned_ns"] >= row["decision_ns"]:
+            reason = "previous_command_not_available"
+        elif (
+            report["actor_kind"] == "frozen-numeric-temporal-bc-v2"
+            and previous["owner"] != "policy"
+        ):
+            # BC does not wait for SAC's executable action support after release.
+            # Resume experience with the next policy-to-policy interval.
+            reason = "supervisor_boundary"
+        elif current is None:
             reason = "missing_current_observation"
         elif not terminal and after is None:
             reason = "missing_bootstrap_observation"
@@ -174,7 +221,7 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
             cursor = step["to_packet_index"]
         if not interval or cursor != end:
             reason = reason or "unusable_reward_interval"
-        if reason is None and end is not None:
+        if source_kind == "synthetic" and reason is None and end is not None:
             for packet_index in range(start + 1, end + 1):
                 sample = samples.get(packet_index)
                 if sample and sample["received_monotonic_ns"] > command["returned_ns"]:
@@ -234,7 +281,7 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
     replay = {
         "version": 3,
         "kind": "sac-numeric-replay-v3",
-        "source_kind": "synthetic",
+        "source_kind": source_kind,
         "source_role": "online",
         "task_contract": task,
         "pixel_contract": pixels.metadata(),
@@ -249,6 +296,7 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
             "reward": settled.summary["rewards"]["reward_sha256"],
         },
         "sampling_model": report["model"],
+        "game_application": "unverified",
         "real_driving_validated": False,
     }
     payload = encode(replay)
@@ -257,7 +305,8 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
         "eligible_transitions": len(transitions),
         "excluded": excluded,
         "observation_errors": observation_errors,
-        "source_kind": "synthetic",
+        "source_kind": source_kind,
+        "game_application": "unverified",
         "real_driving_validated": False,
         "replay_sha256": hashlib.sha256(payload).hexdigest(),
         "commands_sent": False,

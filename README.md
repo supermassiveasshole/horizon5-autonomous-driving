@@ -1,97 +1,93 @@
 # FH5 歌利亚自主驾驶与学习实验
 
-使用用户固定调校的兰博基尼第六元素，从遥测与已知路线起步，建立能自行采样、训练、评估并改进驾驶策略的实验系统。首版聚焦无对抗歌利亚，后续探索对手竞速和路线泛化。
+目标：让固定调校的兰博基尼第六元素特别版 X 999 自主完成歌利亚，再通过强化学习改善速度、稳定性和竞速表现。使用官方路线与检查点；当前空场蓝图为 **105657219**，干燥季节、晴朗、固定早晨。
 
-当前实现：T01 遥测录制与离线回放已获得真实驾驶记录；T02 已在用户第六元素 X 999 上完成低速起步、左右转向、刹停及 F8/失焦/暂停释放验证。峰值约 9.58 km/h，尚未实现路线跟随或自主驾驶。见 [T02 控制说明](docs/control.md) 与 [实机验证记录](docs/validation/t02-control.md)。七天是首轮探索窗口，按可运行里程碑推进。
+当前主线是 **DXGI 数值画面与遥测/输入 → BC 初始化 → 冻结检查与短段驾驶 → SAC 学习**。优先 4K 游戏来源，默认缩放为 480×270 RGB；模型直接接收数值像素和实际帧间 Δt，采集、预处理、推理、存档各自运行。
 
-T03 开发中：[赛事生命周期](docs/events.md) 已接入 Windows 菜单适配器和 `fh5 event`。空场蓝图 `458 574 769` 的程序探测完成三次静止起跑核验及两次连续重开，约 43 秒，全程零驾驶输入；固定环境与持续采样尚未验收，见 [T03 实机记录](docs/validation/t03-event.md)。人工整圈也已保存，但因使用倒带不计入有效基线。`configs/goliath-458574769.json` 是录制快照；菜单探测另需本地页面模板及配置。
+## 已做到哪里
 
-当前实验条件更新为蓝图 `105 657 219`：干燥季节、晴朗、固定早晨，配置为 `configs/goliath-fixed-v2.json`。已完成一次赛途中暂停后自动重开，从准备到起点核验约 12.91 秒；旧蓝图记录保留原条件。持续无人值守验收仍未完成。
+| 环节 | 已有证据 | 尚未完成 |
+|---|---|---|
+| 游戏接入 | 真实遥测、手柄轴/踏板校准、低速起停与停止释放、局部路线记录 | 新管线实际模型驾驶 |
+| 数值采集与 BC | 独立后台采集、封存数据准备、真实 CPU 模型更新/加载/续训的软件验证 | 新 4K 多圈数据、实际共享负载与驾驶收益 |
+| BC→SAC | 真实 SAC 更新、完整 checkpoint 续训、响应动作的合成环境采样与冻结评估 | FH5 原生自主学习闭环、自动恢复后的驾驶与有效完赛 |
 
-T04 局部数据验收完成：[局部路线工具](docs/routes.md) 可从连续记录导出参考轨迹，独立保存走廊与检查点依据，并回放连续定位与已确认进度。已保留约 801 米历史参考，拱门后约 19.55 米的保守内部区域 v2 已经独立实测通过：653 个连续样本确认全段，窗口峰值约 9.97 km/h。`fh5 route-check` 保留完整记录、失败与版本依据；受限速度采集不等于学习策略驾驶，局部尝试有效性现由 #7 实现，见 [T04 数据记录](docs/validation/t04-route.md)。下一步按已批准的[多模态学习规格](docs/multimodal-learning-spec.md)推进：含道路/导航的真实截图历史、本车状态、因果动作历史及可选历史航点进入 BC→SAC；先做可信同步示范和离线 BC，训练与评估实际覆盖无参考条件，见[视觉导航增量](docs/visual-navigation-spec.md)。当前 #26 的 v1 保留必选参考回放，#31 已实现可选/禁用参考的 v2 观测，已完成 #28 离线 BC 初始化但未通过实机驾驶验收。精确分割/米制道路保留为可选研究，实机控制和成绩有效性另行验收。
+本项目尚未证明学习策略能自主完成歌利亚。各环节的完整验收见对应文档和 [GitHub Issues](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues)。
 
-T06 / #7 已加入 `fh5 attempt-review`：完整尝试、前向片段和恢复排除区分别留存，独立证据决定局部结论，正式全程仍单独待核验。支持已有记录离线审核，不发送控制；使用方式见 [局部尝试说明](docs/attempts.md)，真实覆盖与限制见 [T06 验证](docs/validation/t06-attempts.md)。
+## 环境
 
-T09 / #10 新增[冻结评估与全部尝试统计](docs/evaluation.md)：`fh5 evaluation-prepare` 固定 BC 或 SAC、任务和批次条件，`fh5 evaluation-review` 汇总完整录制中的五类结果及未开始计划，并核对数值执行证据。已有[冻结 SAC 的合成重复运行与回放](docs/validation/t09-sac-evaluation.md)，独立验证决策时和发送前的命令上下文。真实重复驾驶与独立最终验收仍待完成，不据此晋升版本。
-
-T13 / #14 的[候选比较](docs/candidate-selection.md)可从原始证据重新审核两个冻结开发批次，先有效性、后可靠性与用时，逐参考条件保留激进候选建议。[持久候选版本](docs/candidate-store.md)通过完整归档分别保留合成默认版本、探索进度、激进候选和回退历史，支持跨进程读取及过期写入保护。实际 FH5 自动晋升和独立驾驶资格仍待完成。
-
-## 安装与运行
-
-T07 / #8 新增[物理时间奖励与终止结算](docs/rewards.md)：`fh5 reward-replay` 重算历史局部片段，`fh5 reward-audit` 生成完整合成反例与回报排序。独立有效性、奖励标签和正式成绩保持各自结论；未启动 SAC 或新的实机驾驶。
-
-T31 / #33 已加入独立的[数值图像输入与精确回放](docs/numeric-images.md)：旧图像仅在离线准备时解码，冻结策略接收数值 RGB，数值存档在后台执行。真实历史数据已有 200 个观测精确回放；页面交互仍待验收，旧实机 `policy` 尚未迁移。参见 [T31 验证](docs/validation/t31-numeric-images.md)。
-
-需要 Python 3.12 和 [uv](https://docs.astral.sh/uv/)。在仓库根目录运行 PowerShell：
+Windows、Python 3.12、uv；从仓库根目录使用 PowerShell。基础录制/回放使用标准库，训练与原生数值采集按需安装额外依赖：
 
 ```powershell
-uv sync --locked
-New-Item -ItemType Directory -Force runs | Out-Null
-Copy-Item configs/recording.example.json runs/manual-config.json
+uv sync --locked --extra capture --extra learning
+uv run --locked fh5 --help
 ```
 
-编辑 `runs/manual-config.json`，填写本次车辆、调校、辅助、赛事和环境；不确定的项目保留 `unverified`。示例的 Sesto Elemento 来自用户选车，具体版本尚未核实。
+实体手柄采集不需要虚拟手柄驱动。模型实际控制另需 `control` extra 和已安装的 ViGEmBus，按[控制说明](docs/control.md)配置。首次手柄校准保留 `input-devices` / `demonstrate`，步骤与所需 `events` extra 见[输入校准](docs/demonstrations.md#采集与校准)。
 
-在 FH5 的 **设置 → HUD 与游戏（HUD and Gameplay）** 中开启 **Data Out**，目标 IP 设置为 `127.0.0.1`，端口设置为 `5300`，进入可手动驾驶的场景：
+新实验使用新的输出目录。`runs/` 不纳入 Git；已有数据、模型和依赖目录应保留。下列命令是操作顺序，需先替换本机路径并完成各步注明的核验。
+
+## 1. 独立采集人工驾驶
+
+在 FH5「设置 → HUD 与游戏」开启 Data Out，目标 `127.0.0.1:5300`。固定原车、调校、辅助和追尾远视角；在 `configs/capture-dxgi.example.json` 核对分辨率、HUD 等真实条件，未知项保持未核验。准备已校准的实体手柄档案 `runs/input-profile.json`。
 
 ```powershell
-uv run --locked fh5 record --config runs/manual-config.json --output runs/manual-001 --seconds 60
+uv run --locked fh5 collection-prepare --capture-config configs/capture-dxgi.example.json --input-profile runs/input-profile.json --output runs/collector
+uv run --locked fh5 collection-start runs/collector --output runs/collection-001 --live
+uv run --locked fh5 collection-status runs/collection-001
+uv run --locked fh5 collection-stop runs/collection-001
+uv run --locked fh5 collection-review runs/collection-001/recording --report runs/collection-001-reviewed.html
 ```
 
-看到 `listening` 后开始驾驶。满 60 秒自动结束，或在终端按 **Ctrl+C** 提前停止并保存。打开 `runs/manual-001/report.html` 查看轨迹、车速、播放滑块、异常及快照；页面离线可用。输出目录必须是新目录，避免覆盖实验。
+准备一次冻结安装，之后可更换 `--output` 重复采集。采集进程独立于聊天和开发源码运行；正常驾驶可包含多次起步、重开与跑圈，程序保留片段边界。查看状态确认停止后，再审阅已封存记录。软件实现与实机待验收项见[持续采集](docs/continuous-collection.md)。
 
-不运行游戏也能重新解析和回放已有记录：
+## 2. 准备数据并训练 BC
+
+参照 `configs/collection-review.example.json` 核对各次尝试和质量区间，按独立组划分 train/development/evaluation。示例不会自动确认正常驾驶；倒带、失败和未知片段必须如实保留。将来源与核验文件填入 `configs/collection-bc.example.json`。
 
 ```powershell
-uv run --locked fh5 replay runs/manual-001 --report runs/manual-001/replay.html
+uv run --locked fh5 collection-bc-prepare --config configs/collection-bc.example.json --output runs/numeric-candidate
+uv run --locked fh5 temporal-train --config configs/temporal-bc.example.json --output runs/temporal-model
+uv run --locked fh5 temporal-replay --model runs/temporal-model --dataset runs/numeric-candidate/dataset.json --report runs/temporal-reloaded.html
 ```
 
-每次回放使用新的报告文件名。接收了 UDP 并不自动证明来源是 FH5；实机核验步骤、字段定义和限制见 [录制与回放说明](docs/recording.md)。
+训练配置的 `dataset` 指向准备结果；路径相对配置文件，数据摘要自动绑定。`temporal-replay` 使用训练时同一数据集复核冻结结果；独立最终留出 `evaluation.json` 使用 `collection-bc-assess`，不能混用。示例步数、批量和抽样数是待选择的实验参数，不代表数据或训练已足够。
 
-## 彩色观测
+准备器逐条读取图像、按内容去重保存，用临时磁盘索引承载累计样本和导出记录；不再用累计帧字节量、50,000 条样本或 128 MiB 导出清单门槛拒绝。来源/核验元数据的其他历史限制仍待清理，已知边界见[数据准备](docs/collection-datasets.md)与[资源策略](docs/resource-policy.md)。需要边采集边训练时，用[采集优先调度](docs/learning-schedule.md)的单份 `collection-learning.example.json`；CPU 停止后的接续见[BC 恢复](docs/bc-resume.md)。
 
-T23 已接入冻结 SegFormer 的离线道路候选与独立人工核验流程，使用 `fh5 perceive` / `fh5 perception-replay`。输出仍是像素估计，未获道路精度或驾驶验收；安装、协议与标签说明见 [像素道路估计](docs/perception.md)。
+## 3. 冻结候选进入只读检查与驾驶
 
-彩色画面与遥测可通过 `fh5 vision` 一起记录，不发送游戏输入：
+修改 `configs/realtime-drive.example.json` 中的模型目录、设备和已核验局部路线；采集条件须与训练一致，初始保留 `shadow: null`。先运行只读配置检查：
 
 ```powershell
-uv sync --locked --extra events
-uv run --locked fh5 vision --config configs/goliath-fixed-v2.json --output runs/vision-001 --camera chase-far --seconds 60
+uv run --locked fh5 realtime-shadow --config configs/realtime-drive.example.json --output runs/shadow-001
+uv run --locked fh5 realtime-drive --config configs/realtime-drive.example.json --output runs/drive-001
 ```
 
-保持追尾远视角；F8 或输出目录的 `STOP` 文件提前结束。`report.html` 提供彩色回放、当时可用遥测及故障诊断。参数、数据格式和限制见 [彩色观测说明](docs/vision-recording.md)。
+这两条命令默认都不开设备。准备好游戏中的局部起点后，影子命令加 `--live` 才采集与预测，仍不发送控制。取得匹配的实测只读记录后填写 `shadow.directory`，查看驾驶检查的 `qualification` 和失败原因；哈希自动绑定，显式旧哈希仍严格核验。符合条件后，驾驶命令加 `--live` 才可能接管，受现有短段、速度、动作时效和停止保护约束。完整步骤见[数值驾驶](docs/realtime-decisions.md)。
 
-T25 / GitHub #26 可将已有 RGB、遥测和独立历史路线构造成因果观测回放：
+候选来源、动作历史和图像契约必须匹配。配置验证成功、离线误差下降或模拟执行器收到动作，都不等于 FH5 已实际起步或驾驶通过。
 
-```powershell
-uv run --locked fh5 observe runs/vision-001 --config configs/observations.example.json --route runs/reference/route.json --report runs/observations-001/report.html
-```
+## 4. SAC 与自主迭代
 
-报告展示图像历史、年龄/缺失掩码、本车状态和局部航点；JSON 保留可重读的原图依赖。新采集可记录真实检查时刻，旧采集明确标记为重建时钟。此阶段不控制车辆，见 [因果观测说明](docs/observations.md)。
+BC 负责初始化，自主采样和强化学习是后续主线。当前可运行真实 CPU SAC 更新、停止后继续、合成环境中的采样—学习—冻结评估；**现有 `LearningLoop` 仅支持合成外部环境**，不能直接当作 FH5 自动跑圈程序。
 
-T29 / #31 新增观测 v2，可省略历史参考，支持 `required/optional/disabled` 三种模式；独立评测路线不进入策略输入。旧录制的动作历史明确缺失，不伪造中性动作：
+- [SAC 初始化与更新](docs/sac-learning.md)：合法转移准备、critic 预热、`sac-train` 与冻结回放。
+- [完整学习状态恢复](docs/sac-resume.md)：`sac-resume` 继续网络、优化器、目标网络、温度和随机数状态。
+- [采样循环](docs/sac-cycle.md)与[连续学习循环](docs/learning-loop.md)：封存经验、更新预算、重复评估与恢复。
+- [独立评估](docs/evaluation.md)、[候选比较](docs/candidate-selection.md)与[版本保存](docs/candidate-store.md)：可靠默认与探索候选分开，奖励不能自证有效成绩。
 
-```powershell
-uv run --locked fh5 observe runs/vision-001 --config configs/observations-navigation.example.json --report runs/navigation-001/report.html
-```
+自动倒带、重开和 FH5 原生学习闭环仍需相应实机验证，不能用合成结果追认。
 
-这证明无参考观测可构造，还不是无参考驾驶能力；格式、动作历史导入及独立任务证据见 [视觉导航观测](docs/navigation-observations.md)。
+## 历史资料与研究入口
 
-## 人工同步示范
+已有编码图像记录仍可[观测回放](docs/observations.md)、[导航回放](docs/navigation-observations.md)或[离线导入数值训练](docs/temporal-bc.md)。旧 `policy`、`bc-train`、`numeric-prepare`、`collection-dataset` 创建入口已退役，迁移分别见[旧驾驶](docs/policy-driving.md)、[旧 BC](docs/bc.md)、[数值包](docs/numeric-images.md)、[数据准备](docs/collection-datasets.md)。原始资料不自动转换或覆盖。
 
-#37 新增[持续被动采集](docs/continuous-collection.md)：冻结代码/依赖后独立后台运行，支持状态、停止与已封存数据恢复。原生 DXGI/UDP/XInput 组合使用数值像素；后台生命周期已用合成输入验证，真实多次驾驶与 4K 性能仍待验收。
+[遥测录制](docs/recording.md)、[赛事菜单](docs/events.md)、[路线工具](docs/routes.md)、[传统跟随](docs/tracking.md)、[像素道路研究](docs/perception.md)和[恢复回放](docs/recovery.md)保留独立用途。详细产品依据为 [PRD](docs/PRD.md)、[驾驶学习方案](docs/driving-learning-design.md)、[奖励与有效性](docs/reward-and-validity-design.md)；术语见 [CONTEXT.md](CONTEXT.md)，决策历史见 [范围记录](docs/scope-decisions.md)和 [ADR](docs/adr/)。
 
-#38 的[数据快照](docs/collection-datasets.md)已接入封存来源筛选、关联尝试分组、数值 Δt BC 训练与冻结留出评估；采集继续追加时固定选择不变。[采集优先的学习调度](docs/learning-schedule.md)已完成合成进程验证；真实新数据、4K 游戏负载与驾驶效果仍待验收。
+## 开发
 
-CPU 数值 BC 已接入[训练状态恢复](docs/bc-resume.md)：资源停止时在完整更新边界保存网络、Adam 和随机数状态，在新目录继续原预算中的剩余更新；已完成训练的检查点可直接重新验证和发布。恢复优先使用 `learner/learner.json`，调度报告缺失或截断不阻止接续，可选日志和统计缺失也不丢弃已封存进度。连续 6 次与 2＋4 次 CPU 更新已验证精确一致；独立审阅和完整回归尚未完成，强制进程终止和 CUDA 续训未获验收。
-
-T26 / #27 从实体 XInput 手柄读取原始动作，与 RGB 和遥测同步记录；双踏板、手刹、争用及失焦等片段保留并排除。`fh5 input-devices` 查看设备，`fh5 demonstrate` 被动采集，`fh5 demonstration-dataset` 按独立回合导出无参考/参考辅助视图及未来轨迹监督。校准、质量审阅和命令见[同步示范说明](docs/demonstrations.md)，真实短段及失败排除见[验收记录](docs/validation/t26-demonstrations.md)。这一切片不训练或执行驾驶策略。
-
-## 开发检查
-
-T05 / #6 提供[局部传统路线跟随](docs/tracking.md)：`fh5 track` 默认仅检查配置，显式 `--live` 才连接控制。连续弯道、减速和有界纠偏目前为合成环境验证；真实连续弯道验收仍待完成，不属于 BC/RL 成果。
-
-T11 / #12 已提供[恢复监督回放](docs/recovery.md)：通过合成任务/UI 信号检查释放、倒带确认、历史隔离和限次停止，命令为 `fh5 recovery-replay`。它不操作游戏；自主倒带与恢复后实际驾驶尚未验收。
+`src/fh5/` 为实现与报告模板，`tests/` 为行为测试，`configs/` 为配置示例。贡献约定见 [AGENTS.md](AGENTS.md)。
 
 ```powershell
 uv run --locked pytest
@@ -100,40 +96,4 @@ uv run --locked ruff check .
 uv run --locked ruff format --check .
 ```
 
-测试通过实验运行入口验证录制、回放和故障行为。录制与回放只需 Python 标准库；实机控制使用可选 `control` 依赖和单独安装的驱动。`src/fh5/` 是代码及报告模板，`tests/` 是合成输入测试，`configs/` 是配置示例，`runs/` 是不纳入 Git 的本地实验结果。
-
-## 当前文档
-
-| 文档 | 用途 |
-|---|---|
-| [PRD](docs/PRD.md) | 当前目标、范围、功能与验收基线；实施入口 |
-| [范围记录](docs/scope-decisions.md) | Q1–Q15 决策与用户补充要求 |
-| [术语表](CONTEXT.md) | 统一领域词义 |
-| [驾驶学习主方案](docs/driving-learning-design.md) | 基线、BC→SAC、自主学习循环与实施主线 |
-| [奖励与有效性设计](docs/reward-and-validity-design.md) | 奖励投机防护、恢复分段、有效成绩及反例验证 |
-| [倒带研究](docs/rewind-research.md) | 恢复能力的依据与待实测项 |
-
-## 设计决定与研究
-
-- [ADR 0001：首版使用已知道路信息与本车遥测](docs/adr/0001-known-route-first.md)
-- [ADR 0002：将倒带恢复与正式驾驶分开](docs/adr/0002-separate-driving-and-recovery.md)
-- [ADR 0003：成绩有效性先于性能排名](docs/adr/0003-validity-before-performance.md)
-- [原始可行性评估](docs/feasibility-plan.zh-CN.md)、[参考项目审计](docs/reference-project-audit.md)、[FH5 接口研究](docs/fh5-environment-research.md)、[RL 方法研究](docs/rl-methods-research.md)
-
-研究文档保留原始证据和历史候选；早期选车、实施顺序与排期建议以当前 PRD 和用户最新决定为准。
-
-### 离线模仿学习
-
-#11 已增加 [SAC 转移、预热与离线更新](docs/sac-learning.md)：在合成数值经验上核验完整 BC 冻结预热后，`sac-train` 实际更新策略、温度、编码器和双 Q，`sac-policy-replay` 重载冻结策略。自主游戏采样循环及实机收益仍待完成。
-
-#13 已增加 [SAC 中断与续训](docs/sac-resume.md)：新快照封存数值经验、完整学习状态和训练历史，`sac-resume` 在新目录继续同一学习过程；`stop.request` 在完整更新边界保存。当前只支持 CPU 合成经验与兼容契约，实机重新入场仍待接入。
-
-#11 已接通[有界合成采样与学习循环](docs/sac-cycle.md)：冻结策略控制响应动作的测试环境，独立结算后追加经验、续训并在下一次尝试换版；数值推理先于归档，失败与排除记录保留。它验证循环软件，不代表 FH5 驾驶或默认版本晋升。
-
-安装 `learning` 可选依赖后，通过 `fh5 bc-train --config configs/bc.example.json --output runs/bc-first` 训练固定预算的多模态 BC；`fh5 bc-replay` 重放冻结模型。两者不发送游戏输入。数据、参考遮蔽、模型与误差解释见 [BC 说明](docs/bc.md)，首轮结果见 [T27 验证](docs/validation/t27-bc.md)。
-
-#35 新增 `fh5 temporal-prepare`、`temporal-train`、`temporal-replay`：历史画面仅在导入时解码，训练与推理使用数值像素和明确的帧间 Δt。支持实际/固定时间对照及冻结输入/预测核验，见[数值 Δt BC](docs/temporal-bc.md)和[离线验证](docs/validation/t33-temporal-bc.md)。首轮结果未证明 Δt 收益或起步能力，尚未接入实时驾驶。
-
-#34 已有 [DXGI 数值采集基础入口](docs/dxgi-capture.md)，`fh5 capture-dxgi` 默认只校验配置。独立采集/预处理、最新待处理槽和带 QPC 时间的历史支持软件验证；原生动态采集、性能对照与页面交互仍待验收，不构成实时驾驶通过。
-
-#36 已有[容错数值决策软件切片](docs/realtime-decisions.md)：常驻推理、缺帧跳过、绝对动作租期和独立监督通过故障回放及真实线程测试。`fh5 realtime-shadow` 默认只校验，显式 `--live` 才组合 DXGI、UDP、独立任务几何和冻结 Δt 模型做只读预测；不会连接虚拟手柄。组合通过合成像素与回环 UDP 验证，实际 FH5 的 10/20 Hz 性能和页面交互仍待验收。
+测试以实验运行入口、真实临时文件和小型模型验证软件行为；原生设备和驾驶能力另记实机证据。

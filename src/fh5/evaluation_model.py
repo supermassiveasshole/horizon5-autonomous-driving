@@ -60,6 +60,16 @@ def validate_model(
             for key in ("max_steer", "max_throttle", "max_brake")
         ):
             raise ValueError("SAC execution bounds or history differ from the trained contract")
+        if "device" in binding:
+            if (
+                binding["device"] != "cpu"
+                or actor.manifest.get("source_kind") not in ("native", "mixed")
+                or actor.bc.manifest["diagnostic_only"]
+            ):
+                raise ValueError(
+                    "Native SAC evaluation requires native/mixed experience and non-diagnostic BC"
+                )
+            return actor.bc.original_contract, False
         return actor.bc.original_contract, True
     bc = FrozenNumericActor(directory, pixels, expected_manifest_sha256=binding["manifest_sha256"])
     return bc.original_contract, bc.manifest["diagnostic_only"]

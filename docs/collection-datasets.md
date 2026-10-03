@@ -5,13 +5,17 @@
 ## 操作入口
 
 ```powershell
-uv run --locked fh5 collection-dataset --config configs/collection-dataset.example.json --output runs/dataset-001
-uv run --locked fh5 collection-dataset-review runs/dataset-001/dataset.json --report runs/dataset-001/rechecked.html
+uv run --locked fh5 collection-bc-prepare --config configs/collection-bc.example.json --output runs/numeric-candidate
+uv run --locked fh5 collection-dataset-review runs/numeric-candidate/selection.json --report runs/numeric-candidate/rechecked.html
 ```
 
-配置中的路径相对配置文件。先替换示例路径；核验格式见 `configs/collection-review.example.json`。`session_sha256` 绑定对应 `recording/session.json` 原始字节。每次导出使用新目录，追加核验或修改筛选规则生成新快照。该接口只处理封存文件，不抢占游戏、UDP 或输入设备。
+`collection-bc-prepare` 是唯一创建入口。使用 [`configs/collection-bc.example.json`](../configs/collection-bc.example.json) 的 v2 配置，在同一层填写 `seed`、`sources`、`rules` 与动作历史、航点布局和可选 `reference`。命令直接从已核验来源完成选择和数值导出，不再先创建独立 selection 目录，也无需向准备配置手抄 selection 路径或 SHA-256。
 
-快照固定当时 `index.json` 已发布的块引用及哈希，绑定 session 中的采集软件、依赖、配置、输入档案和像素/时间契约。复核只读取这组来源；后来追加的块和修改后的外部 review 不改变已有快照。源块与数值帧仍由原录制目录持有，不能移动或删除；缺失/损坏依赖会失败，快照不是全量备份。哈希用于完整性检查，不是阻止所有文件一起被改写的签名。
+配置中的路径相对配置文件。先替换来源与核验文件路径；核验格式见 [`configs/collection-review.example.json`](../configs/collection-review.example.json)。核验中的 `session_sha256` 仍绑定对应 `recording/session.json` 原始字节。质量、尝试分组和集合划分由用户复核，准备命令不会代为确认。每次导出使用新目录，追加核验或修改筛选规则生成新快照。该接口只处理封存文件，不抢占游戏、UDP 或输入设备。
+
+输出中的 `selection.json` 保留原选择快照格式；`dataset.json` 和 `evaluation.json` 分别供训练/开发与最终评估使用。selection 固定当时 `index.json` 已发布的块引用及哈希，绑定 session 中的软件来源、配置、输入档案和像素/时间契约。离线复核只读取这组来源；后来追加的块和修改后的外部 review 不改变已有快照。复核仍依赖原录制目录中的源块与数值帧，不能移动或删除；缺失/损坏依赖会失败，selection 不是全量备份。哈希用于完整性检查，不是阻止所有文件一起被改写的签名。
+
+旧 `collection-dataset` 创建命令已退役，调用时返回迁移错误。旧 `collection-bc-prepare` v1 配置中的 `dataset` / `dataset_sha256` 不再接受：将原选择配置的 `seed`、`sources`、`rules` 与原观测设置合并为 v2，并按新配置位置调整相对路径。旧选择快照无需改写，仍可用 `collection-dataset-review <旧 dataset.json> --report <新报告.html>` 离线复核；该命令也读取新输出的 `selection.json`。已有数值数据集、训练配置、模型和恢复契约不变。
 
 ## 核验与尝试分组
 
@@ -29,25 +33,35 @@ uv run --locked fh5 collection-dataset-review runs/dataset-001/dataset.json --re
 
 可信区间中且处于配置的速度/动作范围内的样本标为 BC 可用。失败与超范围样本保留实际标签及排除原因，**不裁剪动作再配原状态**。动力学与 Q 资格暂不开放：下一步还需构造并验证动作—响应对齐，Q 另需可靠奖励和终止。原始记录始终保留，不因筛选被删除。
 
-每次尝试使用固定种子的有界 reservoir 抽样，默认示例最多 1000 个同步样本；保留入选数量、候选数与省略数。全快照最多 50000 个样本，逐块处理，像素检查每次只持有当前历史。该数量是软件预算，不是数据足够或模型可驾驶的保证。
+每次尝试使用固定种子的 reservoir 抽样，示例配置每次尝试选择最多 1000 个同步样本；用户需按本次实验决定抽样预算。保留入选数量、候选数与省略数，样本数量不是数据足够或模型可驾驶的保证。
 
-快照编码最多 128 MiB，超过预算时在创建输出目录前拒绝。复核报告必须使用新的 `.html` 路径及同名 `.json`，不得覆盖已有文件或写入来源录制目录；例如复核 `dataset.json` 时不要使用 `dataset.html`，因为其 JSON 摘要会与输入重名。
+准备时只在内存中保留当前尝试的 reservoir，大小由 `max_samples_per_attempt` 决定，不再额外限制为 5000。结束该尝试后按序写入临时磁盘索引；累计样本、按来源/序号查询、帧身份与像素去重、训练/留出决策均由该索引承载，不再因合计超过 50,000 条拒绝。随机数调用顺序和每次尝试的抽样规则不变。
+
+采集复核和数值准备共用封存块的逐行读取，不再整块载入 `rows.jsonl` 或因它超过 256 MiB 而拒绝。读取前将块复制到系统临时文件并核对哈希，内存按单行及其图像历史使用；临时副本在该块读取结束后释放，需要对应块大小的临时磁盘空间。全部行数、首尾序号及帧历史检查完成后才接纳该块；尾部损坏不能留下部分合格结果。真实 I/O 或完整性错误仍会报告。
+
+其他元数据与样本选择的历史门槛尚未全部清理，资源要求以[资源策略](resource-policy.md)为准。复核报告必须使用新的 `.html` 路径及同名 `.json`，不得覆盖已有文件或写入来源录制目录；例如复核 `selection.json` 时不要使用 `selection.html`，因为其 JSON 摘要会与输入重名。
 
 ## 覆盖与就绪报告
 
-报告包含每次尝试的连续左右转向、油门/刹车/滑行、速度区间及已核验弯道事件。起步定义为低于 1 km/h 后越过该阈值且伴随油门；松 RT 定义为正纵向输入转为零或负。中断/无效区间切断事件，相邻帧不会各算一次转弯。阈值是版本化的软件统计定义，不能替代赛程能力评估。
+准备报告的 `selection` 部分直接提供覆盖与就绪信息，无需再运行复核才能查看；`collection-dataset-review` 也可独立重建这份选择报告。报告包含每次尝试的连续左右转向、油门/刹车/滑行、速度区间及已核验弯道事件。起步定义为低于 1 km/h 后越过该阈值且伴随油门；松 RT 定义为正纵向输入转为零或负。中断/无效区间切断事件，相邻帧不会各算一次转弯。阈值是版本化的软件统计定义，不能替代赛程能力评估。
 
 补录建议只依据 train/development；evaluation 的行为覆盖不出现在就绪报告中，也不参与补录建议。报告仅展示最终留出组数和样本数；当前数据准备不会使用它调参。`ready_for_software_training` 只说明选中了合格训练和开发样本，`real_candidate_ready` 仍为 false。合成源或未冻结来源标 `diagnostic_only`，不能作为新采集的人工驾驶示范。
 
 ## 导出数值历史并训练
 
-`collection-bc-prepare --config configs/collection-bc.example.json --output runs/numeric-candidate` 从固定选择导出数值历史、本车状态、严格因果动作历史及配对参考视图。先替换输入路径与 SHA-256。每帧逐字节复制 RGB 数值数据并按内容去重，不经过 JPEG，也不再次缩放；命名空间保留不同来源的帧身份。沿用 #35 的模型尺寸范围 32–640，每个方向均需满足；超出范围拒绝，而非静默改变已采集分布。独立帧的解码预算共 512 MiB，超限时减小上一步的选择规模。
+同一次 `collection-bc-prepare` 创建冻结选择并导出数值历史、本车状态、严格因果动作历史及配对参考视图。每帧逐字节复制 RGB 数值数据并按内容去重，不经过 JPEG，也不再次缩放；保留原像素尺寸、时间和不同来源的帧身份。准备命令不执行训练，也不改动原录制。
+
+导出仅暂存当前观测的图像历史，不再因不同帧身份累计超过 512 MiB 拒绝正常数据。报告保留历史字段 `decoded_frame_budget_bytes`，含义仍是按帧身份去重后的累计 RGB 字节数，仅作统计；它不是内存占用或按内容去重后的磁盘大小。帧身份冲突和像素哈希校验仍生效。
+
+选择、训练和留出清单沿用原 JSON 格式并逐条写入；训练/留出决策不再复制成内存列表，也不再受 128 MiB 导出门槛限制。仍先完成留出文件，再将其摘要绑定到训练文件。选择复核也按索引逐项比较源重建结果，接受旧清单的不同空白和键顺序，不需要先整体读取清单。临时索引放在系统临时目录，结束或失败时关闭释放；实际磁盘不足仍报告 I/O 错误，必要数据写入失败不能冒称导出完整，已写出的原件保留。内存仍包含声明的单次尝试抽样预算、当前记录/图像和来源/核验元数据；这些元数据的其他历史门槛尚待清理，不据此宣称任意多圈规模或实机质量已经验证。
 
 动作历史取每个偏移截止之前已获得且发生在当前核验区间内的实际输入；没有合格输入时保留缺失 mask。监督标签仍为决策之后的下一轮询，与 actor 的历史分离。本车世界坐标、来源身份、尝试 ID、标签时刻与筛选原因不进入 actor。
 
 默认参考缺失，两种视图的参考 mask 均为空。可选 `reference` 为 `{"route_file":"../runs/independent-route/route.json","independence_evidence":["说明为何独立于当前训练/留出尝试"]}`；先绑定资产哈希，再加载复制后的路线包。禁止与当前采集 session 同源；其他独立性依赖给出的证据，不能仅凭哈希不同就认定独立。参考只生成局部航点，其与无参考视图保持同组，不能把未核实路线当作合法进度依据。
 
-输出 `dataset.json` 只含 train/development，`evaluation.json` 单独保留最终留出。准备报告不显示最终行为或误差。训练配置按 `configs/temporal-bc.example.json` 的字段填写，`dataset` 指向新 `dataset.json`，SHA-256 取准备报告，`time_mode` 使用 `actual`；然后运行 `temporal-train --config <配置> --output <新模型目录>` 和 `temporal-replay --model <模型目录> --dataset <数值数据集> --report <新回放.html>`。模型读取内存中的 RGB 数值，PNG 只用于离线报告预览。参考缺失不声称已经验证有参考驾驶；合成来源始终带有 `diagnostic_only`。
+输出 `dataset.json` 只含 train/development，`evaluation.json` 单独保留最终留出。准备报告不显示最终行为或误差。后续训练按 [`configs/temporal-bc.example.json`](../configs/temporal-bc.example.json) 填写，`dataset` 指向新 `dataset.json`，并明确训练种子、更新步数、批量、学习率和设备；`dataset_sha256` 可省略，由程序计算并冻结，显式提供时仍须匹配。`time_mode` 使用 `actual`，固定时间对照按[数值 Δt BC 说明](temporal-bc.md)设置。然后运行 `temporal-train --config <配置> --output <新模型目录>` 和 `temporal-replay --model <模型目录> --dataset <同一数值数据集> --report <新回放.html>`；独立的 `evaluation.json` 使用下文的 `collection-bc-assess`。模型读取内存中的 RGB 数值，PNG 只用于离线报告预览。参考缺失不声称已经验证有参考驾驶；合成来源始终带有 `diagnostic_only`。
+
+用于当前 `realtime-drive` 的示例采用 `[200, 100, 0]` ms 动作历史偏移、200 ms 历史容差和五个参考槽位。200 ms 来自运行器现有历史选取规则，不是放宽实时动作有效期；训练与执行必须使用相同输入语义。旧示例的 100 ms 数据仍可离线训练与回放，但不能直接通过当前驾驶契约检查；若要按新契约训练，另行准备新快照，不改写旧数据或模型。
 
 ## 比较冻结候选与最终留出
 
@@ -65,4 +79,4 @@ uv run --locked fh5 collection-bc-assess --config configs/collection-assessment.
 
 `final` 报告标记 `selection_allowed: false`，没有训练更新或自动晋升。最终结果一旦被用于调参或补录选择，下一次独立结论必须使用新的未见留出；工具不提供跨项目的全局访问次数登记。离线动作误差不证明真实驾驶改善，合成模型继续保持 `diagnostic_only`。
 
-采集期间使用 [`collection-bc-train` 调度入口](learning-schedule.md)：CPU 小任务按采集健康和预算并行，CUDA 先采用交错基线，压力下暂停或有界退出。当前已经能在后台独立合成采集继续封存时，用固定快照完成 CPU 训练与加载回放；该原型不代表 4K 游戏负载通过。实际 4K 条件、共享资源预算与新人工多次驾驶仍按 #34/#37 验收。
+采集期间使用 [`collection-bc-train` 调度入口](learning-schedule.md)：在 `configs/collection-learning.example.json` 的 `training` 中直接填写上述训练参数，和采集绑定、资源预算一起保存，无需先建单独的训练配置文件。CPU 小任务按采集健康和预算并行，CUDA 先采用交错基线，压力下暂停或有界退出。当前已经能在后台独立合成采集继续封存时，用固定快照完成 CPU 训练与加载回放；该原型不代表 4K 游戏负载通过。实际 4K 条件、共享资源预算与新人工多次驾驶仍按 #34/#37 验收。

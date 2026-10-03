@@ -39,8 +39,10 @@ result = run_experiment(
 
 `SACSamplingActor(checkpoint, pixels, expected_sha256, exploration_seed=37)` 可作为
 `run_experiment(RealtimeRun(...), realtime_environment=..., numeric_actor_factory=...)`
-的冻结策略工厂。当前仅用于 `synthetic` 外部适配器，使用实际 CPU SAC；没有开放原生 SAC
-驾驶或新的游戏输入权限。确定性评估仍使用 `SACEvaluationActor`，原有记录格式不变。
+的冻结策略工厂，使用实际 CPU SAC。除 `synthetic` 外部适配器外，经共享配置核验当前候选、
+原生/混合经验来源、父 BC 条件和同模式影子记录后，可复用原有受保护原生驾驶入口；详见
+[数值驾驶资格](realtime-decisions.md)。确定性评估仍使用
+`SACEvaluationActor`。旧合成检查点的 actor 清单与精确回放保持不变。
 
 探索复用已训练策略的高斯分布和动作区间，不用全范围均匀随机起步。区间依据上条成功发送的整数命令、
 当前决策距该命令返回的真实时间及检查点内的幅度/变化率限制形成。独立运行器继续决定是否接纳预测、
@@ -52,16 +54,26 @@ result = run_experiment(
 不同运行的真实决策时间不同，因此相同种子不保证两次在线运行发出相同命令。
 
 运行器保存异步输入、预测和命令证据，随后可用下面的实验入口准备学习经验。
-原生资格校验、CUDA 推理及实际驾驶收益仍待后续接入和验证。
+CUDA 推理、实际游戏时效及驾驶收益仍待后续接入和验证。
 
 ## 异步记录进入学习
 
 `SACRealtimePrepare` 接收封存的异步执行目录、同一次尝试的完整遥测、独立任务/奖励与核验依据，
 以及当时实际使用的冻结 actor。先核对原始包流、实际成功发送、因果动作历史和独立数值重放，
-再生成 `sac-numeric-replay-v3`，可交给已有 `SACResume` 继续更新。当前来源必须是 `synthetic`；
-外部模拟输入使用真实 CPU 模型，并不使该记录获得原生游戏资格。
-发送返回至下一观测之间还须验证合成适配器的踏板/转向反馈；仅返回发送成功、反馈未知或矛盾的片段不能进入学习。
-此直接反馈映射只用于合成接口，不能代替 FH5 转向滤波与实际响应延迟的标定。
+再生成 `sac-numeric-replay-v3`，可交给已有 `SACResume` 继续更新。
+冻结 temporal BC 的记录也可准备经验，再经 `SACCriticWarmup` 与 `SACTrain` 启动 SAC，
+无需先有 SAC 策略。BC 的前序动作与时间取自成功发送账本；首条缺少前序命令时排除，不补中立动作。
+
+合成来源仍须验证发送返回至下一观测间的踏板/转向反馈；反馈未知或矛盾的片段不能进入学习。
+原生来源接纳通过现有条件与影子资格的 `numeric-drive` 冻结 BC 或 SAC 记录；SAC 候选须来自
+`native/mixed` 经验，合成来源候选仍不能原生驾驶。准备要求完整命令/UDP 绑定、
+一致的独立任务路线与有效性依据，以及发送返回后、后继发送前的新遥测。
+动作标签是实际成功发送的整数命令，不把 FH5 的滤波后 `Steer` 当作 XInput。
+这些证据证明发送与随后观测，不能证明游戏采用命令的时刻或具体物理响应；
+产物保留 `game_application="unverified"` 和发送返回代理时间，`real_driving_validated` 仍为 `false`。
+经验来源沿 replay、critic 预热与 SAC 检查点传递；合成/原生混合标记为 `mixed`，不由父 BC 来源推断。
+合格 SAC 的实际命令记录可经本入口接回 `SACResume`，候选更新后须重新取得其影子资格才能驾驶。
+外部设备替身验证的是软件路径，不是真实游戏证据；此经验准备操作不发送输入，也不自动开始下一次采样。
 准备前固定执行清单摘要，封存前复核未变，避免给旧转移绑定后来替换的来源。
 
 ```python
@@ -119,8 +131,9 @@ run_experiment(
 
 `SACRealtimeCycle` 将上述异步运行、独立经验审核和续训接成有界循环。
 它复用 `RealtimeRun` 的采集、推理、动作租期及旁路存档；学习只在采样资源全部释放之后进行。
-当前使用实际 CPU SAC 和合成外部 I/O；[连续学习循环](learning-loop.md)版本 3 已接入异步采样、
-冻结评估、保存与封存结果恢复。原生 SAC 资格仍未接入。
+当前使用实际 CPU SAC，可选择合成外部 I/O 或下述显式授权的原生采样适配器。
+[连续学习循环](learning-loop.md)版本 3 已接入异步采样、冻结评估、保存与封存结果恢复，
+但该上层调度与恢复仍限合成环境，不因独立原生采样入口开放而自动放开。
 
 ```python
 from fh5.realtime import RealtimeConfig
@@ -144,14 +157,31 @@ result = run_experiment(
 ```
 
 示例中的像素、历史长度、参考槽位及动作幅度必须与实际检查点一致；不一致时在取得输入设备前拒绝。
-`SACRealtimeEnvironment.start(identity, runtime)` 返回一次新的 `RealtimeEnvironment`；
-它须准备新的观测/控制历史并对命令产生合成反馈。`finish(recording_dir)` 在该次运行器资源全部释放后
+`SACRealtimeEnvironment.start(SACRealtimeStart(...))` 返回一次新的 `RealtimeEnvironment`；
+参数包含本轮 identity、`RealtimeRun`、冻结检查点及摘要、探索种子、录制/任务配置与停止回调。
+适配器须准备新的观测与控制历史。`finish(recording_dir)` 在该次运行器资源全部释放后
 返回独立核验文件或 `None`，`close()` 释放环境级资源。适配器示例见 `tests/test_sac_realtime_cycle.py`。
 
+原生入口使用 `fh5.sac_native.NativeSACSamplingEnvironment(configuration, event_config,
+shadow_seconds=..., handoff_timeout_s=..., review=...)`，并在 `SACRealtimeCycle` 中显式设置
+`live=True`。影子时长和交接期限由实验明确提供；默认 `initial_operation="restart_ready"`，
+首次位于赛前菜单时可选 `start_ready`，后续一律重开。未启用 live 不打开资源。
+适配器先核对原任务路线、运行契约、车型以及录制/菜单条件；静态资格通过后先重开并确认停车、
+释放菜单资源，再为当前候选及种子执行只读 shadow。采集资源释放且完整资格通过后，复用
+`ReadyHandoff` 与受保护数值驾驶入口；交接期限仍从菜单确认就绪的原时刻计算，包含 shadow 用时，
+不会在影子结束后刷新。租期、F8、失焦和停止回调保持有效。
+
+`review` 仍是独立观察者返回证据文件的接口，不是自动生成有效性标签的开关。未提供或返回
+`None` 时，采样原件保留，经验审核不给有效奖励，循环停止学习。本切片没有自动视觉违规审核器；
+模拟外设测试只验证新候选、新影子、重开、释放与真实 CPU 学习的衔接，不证明 FH5 实际驾驶收益。
+
 每次执行保存完整命令/数值图像记录及原始遥测，封存来源后生成 v3 replay。
+异步循环汇总只保存排除转移与观测错误的计数；完整明细沿该次 replay 路径与摘要读取，不在父记录重复。
 一次学习的 critic 更新数不超过新接纳转移数和 `max_updates_per_attempt` 两者中的较小值。
 候选完整保存、重载且预测核验通过后，下一次尝试才换用其冻结快照；父模型和可靠默认版本不变。
-当前最多 10 次尝试、每次 600 秒，并受已有图像和经验容量限制；这些是软件上限，不是实机资格。
+异步尝试轮数与每轮更新数使用调用者指定的正整数预算，不再叠加 10 轮、1000 次更新或预测总帧
+512 MiB 的拒绝门槛。原生单次驾驶仍沿用现有最多 30 秒的控制范围；实际图像存档使用运行器的
+明确预算，其他既有存储边界并未在本切片全量清理。
 
 外部停止、`stop.request` 或停止回调会阻止后续采样和学习；发送失败、释放未确认、无合格经验同样停止循环，
 保留已启动尝试。环境级关闭成功不能覆盖某次运行的释放失败。故障记录不会生成驾驶进步结论。

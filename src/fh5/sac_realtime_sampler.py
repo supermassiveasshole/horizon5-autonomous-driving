@@ -8,16 +8,29 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from fh5.collection_store import encode, write_file
-from fh5.learning_io import StoppingDrive
-from fh5.realtime import RealtimeConfig, RealtimeEnvironment, RealtimeRun
+from fh5.learning_io import LearningUnavailable, StoppingDrive
+from fh5.realtime import RealtimeEnvironment, RealtimeRun
 from fh5.realtime_numeric_replay import read_realtime_journal
 from fh5.sac_sampling_actor import SACSamplingActor
 
 
-class SACRealtimeEnvironment(Protocol):
-    source_kind: Literal["synthetic"]
+@dataclass(frozen=True)
+class SACRealtimeStart:
+    identity: str
+    request: RealtimeRun
+    checkpoint: Path
+    expected_sha256: str
+    seed: int
+    recording_config: Path
+    task_file: Path
+    stopped: Callable[[], bool]
 
-    def start(self, identity: str, runtime: RealtimeConfig) -> RealtimeEnvironment: ...
+
+class SACRealtimeEnvironment(Protocol):
+    @property
+    def source_kind(self) -> Literal["synthetic", "native"]: ...
+
+    def start(self, start: SACRealtimeStart) -> RealtimeEnvironment: ...
     def finish(self, recording_dir: Path) -> Path | None: ...
     def close(self) -> dict[str, Any]: ...
 
@@ -38,24 +51,17 @@ class _AttemptDrive(StoppingDrive):
 
 
 def sample_realtime_attempt(
-    environment: SACRealtimeEnvironment,
-    checkpoint: Path,
-    expected_sha256: str,
-    root: Path,
-    recording_config: Path,
-    runtime: RealtimeConfig,
-    seconds: float,
-    identity: str,
-    seed: int,
-    stopped: Callable[[], bool],
+    environment: SACRealtimeEnvironment, start: SACRealtimeStart
 ) -> tuple[dict[str, Any], Path | None]:
     from fh5.experiment import Packet, Record, run_experiment
 
+    root = start.request.output_dir.parent
     root.mkdir(parents=True)
     result: dict[str, Any] = {
-        "epoch": identity,
-        "sampling_checkpoint_sha256": expected_sha256,
-        "sampler_seed": seed,
+        "epoch": start.identity,
+        "sampling_checkpoint_sha256": start.expected_sha256,
+        "sampler_seed": start.seed,
+        "commands_sent_to_game": False,
         "stop_reason": "sampling_fault",
         "error": None,
         "resources_released": False,
@@ -64,27 +70,37 @@ def sample_realtime_attempt(
     drive = None
     review = None
     try:
-        if stopped():
+        if start.stopped():
             result.update(stop_reason="user_stop", resources_released=True)
             return result, None
-        drive = _AttemptDrive(environment.start(identity, runtime), stopped)
-        if drive.source_kind != "synthetic":
-            raise ValueError("Asynchronous SAC cycle requires synthetic external I/O")
+        drive = _AttemptDrive(environment.start(start), start.stopped)
+        if drive.source_kind != environment.source_kind or start.request.live != (
+            drive.source_kind == "native"
+        ):
+            raise ValueError("Asynchronous SAC source and live opt-in disagree")
         executed = run_experiment(
-            RealtimeRun(root / "execution", runtime, seconds=seconds),
+            start.request,
             realtime_environment=drive,
             numeric_actor_factory=lambda: SACSamplingActor(
-                checkpoint, runtime.pixels, expected_sha256, exploration_seed=seed
+                start.checkpoint,
+                start.request.config.pixels,
+                start.expected_sha256,
+                exploration_seed=start.seed,
             ),
         ).summary["realtime"]
         result.update(
             stop_reason=executed["stop_reason"],
             resources_released=executed["resources_released"],
             decision_count=len(executed["decisions"]),
+            commands_sent_to_game=executed["commands_sent_to_game"],
         )
         packets = read_realtime_journal(root / "execution", executed)
         run_experiment(
-            Record(recording_config, root / "recording"),
+            Record(
+                start.recording_config,
+                root / "recording",
+                "udp" if start.request.live else "synthetic",
+            ),
             packets=(
                 Packet(
                     p["received_monotonic_ns"], p["received_utc"], bytes.fromhex(p["payload_hex"])
@@ -100,6 +116,14 @@ def sample_realtime_attempt(
             raise ValueError("Asynchronous sampling stopped: " + executed["stop_reason"])
     except (Exception, KeyboardInterrupt) as error:
         result["error"] = f"{type(error).__name__}: {error}"
+        if isinstance(error, LearningUnavailable):
+            result["resources_released"] = error.resources_released
+        if (
+            isinstance(error, (InterruptedError, KeyboardInterrupt))
+            or isinstance(error.__cause__, (InterruptedError, KeyboardInterrupt))
+            or start.stopped()
+        ):
+            result["stop_reason"] = "user_stop"
     finally:
         if drive is not None:
             try:

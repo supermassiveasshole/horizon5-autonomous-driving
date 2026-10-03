@@ -136,27 +136,41 @@ def test_saturated_bc_handoff_and_stochastic_commands_share_quantized_bounds(tmp
             assert value * scale == pytest.approx(round(value * scale), abs=0.002)
 
 
-def test_cli_trains_and_replays_the_updated_sac_policy(tmp_path, capsys):
+@pytest.mark.parametrize("explicit_replay", [False, True])
+def test_cli_trains_and_replays_the_updated_sac_policy(tmp_path, capsys, explicit_replay):
     from fh5.cli import main
 
     replay = warm_start(tmp_path)
+    options = {"version": 1, "warmup": "warm", "steps": 2}
+    if explicit_replay:
+        options["replay"] = str(replay)
+    else:
+        # Only the portable warm-up is available; do not reach back into the
+        # original BC or experience directories to initialize SAC.
+        (tmp_path / "bc").rename(tmp_path / "old-bc")
+        replay.parent.rename(tmp_path / "old-experience")
+        replay = tmp_path / "warm/experience/replay.json"
     config = tmp_path / "sac.json"
-    config.write_text(
-        json.dumps({"version": 1, "warmup": "warm", "replay": str(replay), "steps": 2})
-    )
+    config.write_text(json.dumps(options))
     assert (
         main(["sac-train", "--config", str(config), "--output", str(tmp_path / "candidate")]) == 0
     )
     trained = json.loads(capsys.readouterr().out)
     assert trained["actor_updates"] == 1
+    assert trained["steps_completed"] == 2
+    assert trained["commands_sent"] is False
+    assert (tmp_path / "candidate/experience/replay.json").read_bytes() == replay.read_bytes()
+    if not explicit_replay:
+        # The learned candidate retains its own experience and no longer needs
+        # the preheating checkpoint or the original dataset to replay.
+        (tmp_path / "warm").rename(tmp_path / "old-warm")
     assert (
         main(
             [
                 "sac-policy-replay",
                 "--checkpoint",
                 str(tmp_path / "candidate"),
-                "--replay",
-                str(replay),
+                *(["--replay", str(replay)] if explicit_replay else []),
                 "--report",
                 str(tmp_path / "cli.html"),
             ]
@@ -167,6 +181,66 @@ def test_cli_trains_and_replays_the_updated_sac_policy(tmp_path, capsys):
     assert prediction_records(tmp_path, restored) == prediction_records(
         tmp_path / "candidate", trained
     )
+
+
+@pytest.mark.parametrize("fault", ["explicit_missing", "explicit_changed", "sealed_changed"])
+def test_cli_rejects_unavailable_or_changed_experience_without_fallback(tmp_path, capsys, fault):
+    from fh5.cli import main
+
+    replay = warm_start(tmp_path)
+    warmup = tmp_path / "warm"
+    options = {"version": 1, "warmup": "warm", "steps": 2}
+    if fault.startswith("explicit"):
+        options["replay"] = str(replay)
+    else:
+        replay = warmup / "experience/replay.json"
+    if fault == "explicit_missing":
+        replay.rename(replay.with_suffix(".saved"))
+    else:
+        replay.write_text("{}")
+    preserved = {p: p.read_bytes() for p in warmup.rglob("*") if p.is_file()}
+    config = tmp_path / "sac.json"
+    config.write_text(json.dumps(options))
+    output = tmp_path / "rejected"
+    assert main(["sac-train", "--config", str(config), "--output", str(output)]) == 2
+    failure = json.loads(capsys.readouterr().err)
+    assert failure["status"] == "error"
+    if fault != "explicit_missing":
+        assert "hash mismatch" in failure["message"]
+    assert not output.exists()
+    assert all(path.read_bytes() == payload for path, payload in preserved.items())
+
+
+@pytest.mark.parametrize("mode", ["sac-critic-replay", "sac-policy-replay"])
+@pytest.mark.parametrize("fault", ["explicit_missing", "explicit_changed", "sealed_changed"])
+def test_cli_frozen_replay_never_substitutes_other_experience(tmp_path, capsys, mode, fault):
+    from fh5.cli import main
+    from fh5.sac_learning import SACTrain
+
+    replay = warm_start(tmp_path)
+    checkpoint = tmp_path / "warm"
+    if mode == "sac-policy-replay":
+        checkpoint = tmp_path / "candidate"
+        run_experiment(SACTrain(tmp_path / "warm", replay, checkpoint, steps=1))
+    report = tmp_path / "rejected.html"
+    args = [mode, "--checkpoint", str(checkpoint), "--report", str(report)]
+    if fault.startswith("explicit"):
+        args += ["--replay", str(replay)]
+    else:
+        replay = checkpoint / "experience/replay.json"
+    if fault == "explicit_missing":
+        replay.rename(replay.with_suffix(".saved"))
+    else:
+        replay.write_text("{}")
+    preserved = {p: p.read_bytes() for p in checkpoint.rglob("*") if p.is_file()}
+    assert main(args) == 2
+    failure = json.loads(capsys.readouterr().err)
+    assert failure["status"] == "error"
+    if fault != "explicit_missing":
+        assert "hash mismatch" in failure["message"]
+    assert not report.exists()
+    assert not report.with_suffix(".json").exists()
+    assert all(path.read_bytes() == payload for path, payload in preserved.items())
 
 
 def test_policy_replay_cannot_overwrite_candidate_experience_or_existing_reports(tmp_path):

@@ -23,8 +23,15 @@ from fh5.sac_learning import SACTrain
 
 @pytest.fixture(scope="module")
 def candidates(tmp_path_factory):
+    import torch
+
     root = tmp_path_factory.mktemp("persistent-candidates")
-    return candidate_setup(root)
+    previous_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        yield candidate_setup(root)
+    finally:
+        torch.set_num_threads(previous_threads)
 
 
 def candidate_setup(root, *, candidate_steps=30):
@@ -227,7 +234,13 @@ def test_faster_candidate_is_retained_as_aggressive_only_with_complete_legal_evi
         assert "candidate:reliability_regressed:no_reference" in result["reasons"]
 
 
-def test_cli_persists_across_processes_and_rejects_competing_stale_writes(tmp_path, candidates):
+def test_cli_persists_across_processes_and_rejects_competing_stale_writes(
+    tmp_path, candidates, monkeypatch
+):
+    # Recording fixtures use one Torch CPU thread. Match it in new processes:
+    # parallel reductions can cross a quantized action boundary during replay.
+    monkeypatch.setenv("OMP_NUM_THREADS", "1")
+    monkeypatch.setenv("MKL_NUM_THREADS", "1")
     config = record_config(tmp_path, candidates)
     store = tmp_path / "versions"
     command = [sys.executable, "-m", "fh5"]

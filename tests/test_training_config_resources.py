@@ -153,7 +153,7 @@ def test_large_schedule_config_reaches_training_validation_without_retention(tmp
     assert not output.exists()
 
 
-def test_large_training_config_is_frozen_exactly_before_interrupted_admission(tmp_path):
+def test_large_training_config_freezes_effective_values_before_interrupted_admission(tmp_path):
     training = training_config(tmp_path, padding_mib=2)
     config = schedule_config(tmp_path)
     bind_training(config, training)
@@ -171,8 +171,12 @@ def test_large_training_config_is_frozen_exactly_before_interrupted_admission(tm
     assert summary["state"] == "stopped"
     assert summary["stop_reason"] == "interrupted"
     assert summary["steps_completed"] == 0
-    assert file_hash(output / "requested-training.json") == expected_hash
-    assert (output / "requested-training.json").stat().st_size == training.stat().st_size
+    assert file_hash(training) == expected_hash
+    assert not (output / "requested-training.json").exists()
+    assert json.loads((output / "training.json").read_bytes()) == {
+        **json.loads(training.read_bytes()),
+        "dataset": str((training.parent / "snapshot/dataset.json").resolve()),
+    }
     assert peak < training.stat().st_size
     assert resources.closed
     assert not (output / "candidate").exists()
@@ -237,30 +241,33 @@ def test_training_binding_includes_trailing_representation_bytes(tmp_path):
     assert not request.output_dir.exists()
 
 
-def test_changed_training_source_during_freeze_releases_resources_and_records_failure(tmp_path):
+def test_changes_after_training_configuration_read_do_not_change_frozen_values(tmp_path):
     training, request = configuration_request("training", tmp_path)
+    expected = json.loads(training.read_bytes())
 
     class ChangedSourceResources(InterruptedResources):
         def now_ns(self):
-            with training.open("ab") as stream:
-                stream.write(b" ")
+            training.write_text("developer has replaced the old training configuration")
             return 0
 
     resources = ChangedSourceResources()
-    with pytest.raises(ValueError, match="changed during copy"):
-        run_experiment(request, learning_resources=resources)
+    run_experiment(request, learning_resources=resources)
     assert resources.closed
     summary = json.loads((request.output_dir / "schedule.json").read_bytes())
     assert summary["state"] == "stopped"
-    assert "changed during copy" in summary["stop_reason"]
+    assert summary["stop_reason"] == "interrupted"
     assert summary["steps_completed"] == 0
     assert summary["candidate"] is None
+    assert json.loads((request.output_dir / "training.json").read_bytes()) == {
+        **expected,
+        "dataset": str((training.parent / "snapshot/dataset.json").resolve()),
+    }
 
 
 def test_large_preparation_configuration_exports_the_same_causal_dataset(tmp_path):
     from test_collection_bc import prepare_inputs
 
-    config, _ = prepare_inputs(tmp_path)
+    config = prepare_inputs(tmp_path)
     original = json.loads(config.read_bytes())
     reference = run_experiment(CollectionBCPrepare(config, tmp_path / "reference")).summary[
         "collection_bc"

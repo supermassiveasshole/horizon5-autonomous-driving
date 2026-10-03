@@ -1,4 +1,4 @@
-"""Finite sample/learn alternation, with explicit synthetic external I/O only."""
+"""Finite sample/learn alternation over declared, separately qualified external I/O."""
 
 from __future__ import annotations
 
@@ -20,7 +20,11 @@ from fh5.replay_document import replay_document
 from fh5.sac_actor import FrozenSAC
 from fh5.sac_learning import SACResume
 from fh5.sac_realtime_experience import SACRealtimePrepare
-from fh5.sac_realtime_sampler import SACRealtimeEnvironment, sample_realtime_attempt
+from fh5.sac_realtime_sampler import (
+    SACRealtimeEnvironment,
+    SACRealtimeStart,
+    sample_realtime_attempt,
+)
 from fh5.sac_replay import SACReplayPrepare
 from fh5.sac_sampler import (
     SACEnvironment,
@@ -89,18 +93,19 @@ class SACRealtimeCycle:
     max_updates_per_attempt: int = 8
     seed: int = 19
     expected_checkpoint_sha256: str | None = None
+    live: bool = False
 
     def __post_init__(self) -> None:
         if (
             type(self.cycles) is not int
-            or not 1 <= self.cycles <= 10
+            or self.cycles < 1
             or type(self.max_updates_per_attempt) is not int
-            or not 1 <= self.max_updates_per_attempt <= 1000
+            or self.max_updates_per_attempt < 1
             or type(self.seed) is not int
             or not 0 <= self.seed < 2**32
         ):
             raise ValueError("SAC realtime cycle requires finite attempts, updates and seed")
-        RealtimeRun(self.output_dir, self.runtime, seconds=self.seconds_per_attempt)
+        RealtimeRun(self.output_dir, self.runtime, seconds=self.seconds_per_attempt, live=self.live)
 
 
 def run_sac_cycle(
@@ -119,7 +124,7 @@ def run_sac_cycle(
         raise ValueError("SAC cycle needs a fresh output outside its frozen checkpoint")
     summary: dict[str, Any] = {
         "attempts": [],
-        "source_kind": "synthetic",
+        "source_kind": environment.source_kind,
         "commands_sent_to_game": False,
         "real_driving_validated": False,
         "default_changed": False,
@@ -129,8 +134,13 @@ def run_sac_cycle(
     torch = importlib.import_module("torch")
     root.mkdir(parents=True)
     try:
-        if environment.source_kind != "synthetic":
-            raise ValueError("SAC cycle currently requires synthetic external I/O")
+        if isinstance(request, SACRealtimeCycle):
+            if environment.source_kind not in ("synthetic", "native") or request.live != (
+                environment.source_kind == "native"
+            ):
+                raise ValueError("SAC sampling source and explicit live opt-in disagree")
+        elif environment.source_kind != "synthetic":
+            raise ValueError("Synchronous SAC cycle requires synthetic external I/O")
         checkpoint = request.checkpoint_dir
         expected_sampling_sha = request.expected_checkpoint_sha256
         files = (request.recording_config_file, request.task_file, request.reward_file)
@@ -147,13 +157,14 @@ def run_sac_cycle(
             root / "protocol.json",
             encode(
                 {
-                    "source_kind": "synthetic",
+                    "source_kind": environment.source_kind,
                     "cycles": request.cycles,
                     **(
                         {
                             "runtime": asdict(request.runtime),
                             "seconds_per_attempt": request.seconds_per_attempt,
                             "max_updates_per_attempt": request.max_updates_per_attempt,
+                            **({"live": True} if request.live else {}),
                         }
                         if isinstance(request, SACRealtimeCycle)
                         else {"steps_per_attempt": request.steps_per_attempt}
@@ -179,13 +190,9 @@ def run_sac_cycle(
                 actor = FrozenSAC(torch, checkpoint)
                 if expected_sampling_sha is not None and actor.sha != expected_sampling_sha:
                     raise ValueError("Sampling candidate changed after its verified handoff")
-                frame_count = (
-                    int(request.seconds_per_attempt * request.runtime.decision_hz) + 1
-                    if isinstance(request, SACRealtimeCycle)
-                    else request.steps_per_attempt + 1
-                )
                 if (
-                    frame_count
+                    isinstance(request, SACCycle)
+                    and (request.steps_per_attempt + 1)
                     * len(actor.pixels.history_offsets_ms)
                     * actor.pixels.size[0]
                     * actor.pixels.size[1]
@@ -215,15 +222,21 @@ def run_sac_cycle(
                         raise ValueError("Realtime execution contract differs from the learner")
                     result, review = sample_realtime_attempt(
                         cast(SACRealtimeEnvironment, environment),
-                        checkpoint,
-                        actor.sha,
-                        attempt_dir,
-                        request.recording_config_file,
-                        request.runtime,
-                        request.seconds_per_attempt,
-                        f"sac-attempt-{number}",
-                        request.seed + number,
-                        stopped,
+                        SACRealtimeStart(
+                            f"sac-attempt-{number}",
+                            RealtimeRun(
+                                attempt_dir / "execution",
+                                request.runtime,
+                                seconds=request.seconds_per_attempt,
+                                live=request.live,
+                            ),
+                            checkpoint,
+                            actor.sha,
+                            request.seed + number,
+                            request.recording_config_file,
+                            request.task_file,
+                            stopped,
+                        ),
                     )
                 else:
                     result, review = sample_attempt(
@@ -237,6 +250,7 @@ def run_sac_cycle(
                         stopped,
                     )
                 summary["attempts"].append(result)
+                summary["commands_sent_to_game"] |= result.get("commands_sent_to_game", False)
                 result["source_assets"] = seal_sampling_attempt(
                     attempt_dir, review, indexed=isinstance(request, SACRealtimeCycle)
                 )
@@ -274,7 +288,18 @@ def run_sac_cycle(
                             review,
                         )
                     ).summary["sac_replay"]
-                result.update(prepared)
+                if isinstance(request, SACRealtimeCycle):
+                    result.update(
+                        {
+                            key: value
+                            for key, value in prepared.items()
+                            if key not in ("excluded", "observation_errors")
+                        },
+                        excluded_transitions=len(prepared["excluded"]),
+                        observation_error_count=len(prepared["observation_errors"]),
+                    )
+                else:
+                    result.update(prepared)
                 verify_sampling_sources(result["source_assets"])
                 replay = attempt_dir / "prepared/replay.json"
                 result["replay"] = replay.relative_to(root).as_posix()
@@ -346,6 +371,7 @@ def run_sac_cycle(
     finally:
         try:
             released = environment.close()
+            summary["commands_sent_to_game"] |= released.get("commands_sent_to_game", False)
             summary["resources_released"] = released.get("resources_released") is True
             if isinstance(request, SACRealtimeCycle):
                 summary["resources_released"] &= all(
@@ -358,7 +384,7 @@ def run_sac_cycle(
         write_file(root / "summary.json", encode(summary))
     report = optional_report(
         root / "report.html",
-        "SAC 合成采样与学习循环",
+        "SAC 采样与学习循环",
         summary,
         fallback=root / "summary.json",
     )

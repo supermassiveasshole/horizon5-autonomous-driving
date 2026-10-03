@@ -2,25 +2,72 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
+from fh5.artifact_io import VerifiedFile
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import NumericFrame, PixelContract
+from fh5.replay_document import read_document_fields, read_document_paths
+
+
+def sac_model_contract(
+    directory: Path, source: PixelContract, expected_sha256: str | None = None
+) -> tuple[dict[str, Any], dict[str, Any], str]:
+    """Bind the SAC policy and its BC pixel metadata before creating native resources."""
+    raw = (directory / "policy.json").read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if expected_sha256 is not None and digest != expected_sha256:
+        raise ValueError("Frozen SAC policy manifest changed")
+    policy = json.loads(raw)
+    if (
+        policy.get("version") not in (2, 3, 4)
+        or policy.get("architecture") != "conditional-temporal-sac-v1"
+        or policy.get("stage") != "sac_updates"
+    ):
+        raise ValueError("Numerical inference requires a sealed SAC policy checkpoint")
+    bc_manifest = VerifiedFile(directory / "bc/model.json", policy["bc_manifest_sha256"])
+    fields = {"version", "numeric_contract", "contract"}
+    native = policy.get("source_kind") in ("native", "mixed")
+    if native:
+        fields.add("provenance")
+    metadata = read_document_fields(bc_manifest, fields)
+    if native:
+        metadata.update(
+            read_document_paths(bc_manifest, {("training", "train_by_view", "no_reference")})
+        )
+    if (
+        metadata.get("version") != 2
+        or PixelContract.from_metadata(metadata["numeric_contract"]) != source
+    ):
+        raise ValueError("SAC requires its exact numerical pixel contract")
+    return metadata, policy, digest
 
 
 def shadow_model_contract(
     directory: Path,
     source: PixelContract,
-    expected_model_sha256: str,
+    expected_model_sha256: str | None = None,
     allow_legacy_source_diagnostic: bool = False,
-) -> tuple[dict[str, Any], PixelContract]:
-    original = json.loads((directory / "model.json").read_text(encoding="utf-8"))
+    *,
+    expected_manifest_sha256: str | None = None,
+) -> tuple[dict[str, Any], PixelContract, str]:
+    raw = (directory / "model.json").read_bytes()
+    digest = hashlib.sha256(raw).hexdigest()
+    if expected_manifest_sha256 is not None and digest != expected_manifest_sha256:
+        raise ValueError("Frozen numerical model manifest changed")
+    original = json.loads(raw)
     if original.get("version") != 2:
         raise ValueError("Shadow runtime requires a frozen temporal BC model")
-    if original.get("weights_sha256") != expected_model_sha256:
+    if not isinstance(original.get("weights_sha256"), str):
+        raise ValueError("Frozen model manifest requires its weights hash")
+    if (
+        expected_model_sha256 is not None
+        and original.get("weights_sha256") != expected_model_sha256
+    ):
         raise ValueError("Shadow expected model hash differs from selected model")
     trained = PixelContract.from_metadata(original["numeric_contract"])
     if trained != source and not (
@@ -30,7 +77,7 @@ def shadow_model_contract(
         and replace(trained, origin="direct_numeric") == source
     ):
         raise ValueError("Explicit source diagnostic required; all other pixel fields must match")
-    return original, trained
+    return original, trained, digest
 
 
 class ShadowNumericActor:
@@ -46,11 +93,15 @@ class ShadowNumericActor:
         allow_legacy_source_diagnostic: bool = False,
         expected_manifest_sha256: str | None = None,
     ) -> None:
-        _, trained = shadow_model_contract(
-            directory, source, expected_model_sha256, allow_legacy_source_diagnostic
+        _, trained, manifest_sha256 = shadow_model_contract(
+            directory,
+            source,
+            expected_model_sha256,
+            allow_legacy_source_diagnostic,
+            expected_manifest_sha256=expected_manifest_sha256,
         )
         self.actor = FrozenNumericActor(
-            directory, trained, device, expected_manifest_sha256=expected_manifest_sha256
+            directory, trained, device, expected_manifest_sha256=manifest_sha256
         )
         self.device = self.actor.device
         if self.actor.manifest["weights_sha256"] != expected_model_sha256:

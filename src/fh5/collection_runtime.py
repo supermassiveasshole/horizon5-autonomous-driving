@@ -25,6 +25,7 @@ from fh5.collection_store import (
     write_file,
 )
 from fh5.demonstrations import _profile
+from fh5.presentation import optional_report
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -62,7 +63,7 @@ def control_collection(request: CollectionControl) -> RunResult:
 def collect(
     request: CollectionRun, environment: CollectionEnvironment, write: WriteFile | None = None
 ) -> RunResult:
-    from fh5.collection_review import collection_result
+    from fh5.experiment import RunResult
 
     if environment.source_kind not in ("synthetic", "live_passive"):
         raise ValueError("Unsupported passive collection environment")
@@ -141,4 +142,11 @@ def collect(
     result["complete"] = collection_complete(result)
     atomic_control_json(root / "final.json", result)
     atomic_control_json(root / "status.json", result)
-    return collection_result(root / "report.html", result)
+    report = optional_report(
+        root / "report.html",
+        "持续采集状态（完整封存不等于优质示范）",
+        result,
+        fallback=root / "final.json",
+        exclusive=True,
+    )
+    return RunResult({"source_kind": "passive_collection"}, [], [], {"collection": result}, report)

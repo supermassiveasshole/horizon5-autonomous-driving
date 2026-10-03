@@ -8,28 +8,45 @@ from typing import Any
 
 from fh5.numeric_images import NumericDecision, NumericFrame, PixelContract
 from fh5.sac_actor import FrozenSAC
-from fh5.sac_replay import command_action
+from fh5.sac_context import PROPOSAL_CONTEXT, SEND_CONTEXT, context_action
 
-CONTEXT_KIND = "successful-send-return-proxy-v1"
+CONTEXT_KIND = SEND_CONTEXT
 
 
 class SACEvaluationActor:
     kind = "frozen-numeric-sac-v1"
 
-    def __init__(self, directory: Path, pixels: PixelContract, expected_sha256: str) -> None:
+    def __init__(
+        self,
+        directory: Path,
+        pixels: PixelContract,
+        expected_sha256: str,
+        *,
+        counterfactual: bool = False,
+    ) -> None:
         self.frozen = FrozenSAC(importlib.import_module("torch"), directory)
         if self.frozen.sha != expected_sha256 or self.frozen.pixels != pixels:
             raise ValueError("Frozen SAC evaluation model changed")
+        self.device = self.frozen.bc.device
         self.manifest = {
             "sac_manifest_sha256": self.frozen.sha,
             "numeric_contract": pixels.metadata(),
             "model_contract": self.frozen.bc.original_contract,
-            "command_context": CONTEXT_KIND,
+            "command_context": PROPOSAL_CONTEXT if counterfactual else CONTEXT_KIND,
             "bounds": self.frozen.manifest["bounds"],
             "exploration": False,
             "noise": [0.0, 0.0],
             "diagnostic_only": True,
         }
+        if counterfactual:
+            self.manifest["inference_device"] = self.device
+        if self.frozen.manifest.get("source_kind") in ("native", "mixed"):
+            self.manifest.update(
+                source_kind=self.frozen.manifest["source_kind"],
+                provenance=self.frozen.bc.manifest["provenance"],
+                explicit_dt_model=self.frozen.bc.manifest["explicit_dt_model"],
+                diagnostic_only=self.frozen.bc.manifest["diagnostic_only"],
+            )
 
     def input_features(
         self, actor: dict[str, Any], frames: tuple[NumericFrame, ...]
@@ -39,21 +56,10 @@ class SACEvaluationActor:
     def predict_decision(
         self, decision: NumericDecision, command_context: dict[str, Any]
     ) -> list[float]:
-        context = command_context
-        if (
-            set(context)
-            != {"version", "command_index", "issued_ns", "returned_ns", "sent", "owner"}
-            or context["version"] != 1
-            or type(context["command_index"]) is not int
-            or context["command_index"] < 0
-            or context["owner"] not in ("initial_neutral", "policy", "lease_expiry", "warmup")
-            or type(context["issued_ns"]) is not int
-            or type(context["returned_ns"]) is not int
-            or not 0 <= context["issued_ns"] <= context["returned_ns"] < decision.decision_ns
-        ):
-            raise ValueError("Invalid successful command context")
-        previous = command_action(context["sent"])
-        elapsed = (decision.decision_ns - context["returned_ns"]) / 1e9
+        previous, at = context_action(
+            command_context, self.manifest["command_context"], decision.decision_ns
+        )
+        elapsed = (decision.decision_ns - at) / 1e9
         return list(
             self.frozen.predict(decision, previous, elapsed, self._noise(decision))["command"]
         )

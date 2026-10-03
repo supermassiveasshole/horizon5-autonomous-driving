@@ -123,6 +123,49 @@ def test_numeric_training_and_reload_preserve_actual_time_inputs(tmp_path):
     assert summary["training"]["reload_max_abs_error"] <= 1e-6
 
 
+def test_relative_dataset_without_manual_hash_trains_the_same_frozen_model(tmp_path):
+    import torch
+
+    from fh5.temporal_bc import TemporalBCReplay, TemporalBCTrain
+
+    config, snapshot = temporal_fixture(tmp_path)
+    options = json.loads(config.read_text())
+    expected_hash = options.pop("dataset_sha256")
+    options["dataset"] = "snapshot/dataset.json"
+    config.write_text(json.dumps(options))
+    explicit_config = tmp_path / "explicit-train.json"
+    explicit_config.write_text(json.dumps({**options, "dataset_sha256": expected_hash}))
+    originals = {
+        path: path.read_bytes()
+        for path in (config, explicit_config, snapshot, snapshot.parent / "frame.rgb")
+    }
+
+    inferred_model, explicit_model = tmp_path / "inferred-model", tmp_path / "explicit-model"
+    inferred = run_experiment(TemporalBCTrain(config, inferred_model)).summary["temporal_bc"]
+    explicit = run_experiment(TemporalBCTrain(explicit_config, explicit_model)).summary[
+        "temporal_bc"
+    ]
+    manifest = json.loads((inferred_model / "model.json").read_text())
+    assert manifest["config"]["dataset_sha256"] == expected_hash
+    assert inferred["dataset_sha256"] == expected_hash
+    inferred_weights = torch.load(
+        inferred_model / "actor.pt", map_location="cpu", weights_only=True
+    )["actor"]
+    explicit_weights = torch.load(
+        explicit_model / "actor.pt", map_location="cpu", weights_only=True
+    )["actor"]
+    assert inferred_weights.keys() == explicit_weights.keys()
+    assert all(
+        torch.equal(inferred_weights[name], explicit_weights[name]) for name in inferred_weights
+    )
+    assert inferred["decisions"] == explicit["decisions"]
+    replay = run_experiment(
+        TemporalBCReplay(inferred_model, snapshot, tmp_path / "inferred-replay.html")
+    ).summary["temporal_bc"]
+    assert replay["decisions"] == inferred["decisions"]
+    assert all(path.read_bytes() == content for path, content in originals.items())
+
+
 @pytest.fixture
 def inference_threads(request):
     torch = pytest.importorskip("torch")
@@ -261,14 +304,10 @@ def test_invalid_snapshot_never_produces_a_candidate(tmp_path, fault):
     assert not (tmp_path / "model").exists()
 
 
-def test_legacy_preparation_reselects_only_available_frames_and_trains_without_codecs(
-    tmp_path, monkeypatch
-):
-    from PIL import Image
+def legacy_preparation(tmp_path):
     from test_demonstrations import dataset_fixture
 
     from fh5.demonstration_dataset import DemonstrationDataset
-    from fh5.temporal_bc import TemporalBCTrain
     from fh5.temporal_import import TemporalBCPrepare
 
     run_experiment(
@@ -290,7 +329,27 @@ def test_legacy_preparation_reselects_only_available_frames_and_trains_without_c
             }
         )
     )
-    result = run_experiment(TemporalBCPrepare(config, tmp_path / "prepared"))
+    return TemporalBCPrepare(config, tmp_path / "prepared")
+
+
+@pytest.mark.parametrize("filename", ["vision.jsonl", "demonstration-session.json"])
+def test_temporal_preparation_rejects_changed_bound_source_evidence(tmp_path, filename):
+    request = legacy_preparation(tmp_path)
+    with (tmp_path / "train" / filename).open("ab") as stream:
+        stream.write(b"\n")
+    with pytest.raises(ValueError):
+        run_experiment(request)
+    assert not request.output_dir.exists()
+
+
+def test_legacy_preparation_reselects_only_available_frames_and_trains_without_codecs(
+    tmp_path, monkeypatch
+):
+    from PIL import Image
+
+    from fh5.temporal_bc import TemporalBCTrain
+
+    result = run_experiment(legacy_preparation(tmp_path))
     summary = result.summary["temporal_import"]
     assert summary["decoded_unique_frames"] > 0
     assert summary["jitter_variants"] > 0

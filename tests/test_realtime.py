@@ -173,6 +173,8 @@ def test_single_inflight_work_is_not_replaced_and_late_or_stuck_work_cannot_rene
         ({"speed_kmh": 15}, "speed_limit"),
         ({"task_fault": "outside_corridor"}, "outside_corridor"),
         ({"epoch": "restart"}, "session_boundary"),
+        ({"epoch": "stop", "stop_requested": True}, "user_stop"),
+        ({"epoch": "focus", "focused": False}, "focus_lost"),
         ({"game_timestamp_ms": 1}, "game_clock_discontinuity"),
     ],
 )

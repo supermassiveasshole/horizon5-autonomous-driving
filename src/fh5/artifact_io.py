@@ -58,7 +58,7 @@ class VerifiedFile:
                 shutil.copyfileobj(source, frozen, length=io.DEFAULT_BUFFER_SIZE)
             frozen.seek(0)
             if _stream_digest(cast(BinaryIO, frozen)) != self.sha256:
-                raise ValueError("Checkpoint weights changed: " + str(self.path))
+                raise ValueError("Artifact hash mismatch: " + str(self.path))
             frozen.seek(0)
             yield cast(BinaryIO, frozen)
 

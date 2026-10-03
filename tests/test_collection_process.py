@@ -1,5 +1,6 @@
 """Frozen independent collector lifecycle through the experiment interface."""
 
+import hashlib
 import json
 import os
 import py_compile
@@ -65,6 +66,10 @@ def test_prepare_freezes_copied_source_config_and_isolated_dependencies_without_
     config.write_text("changed developer configuration")
     frozen = json.loads((bundle / "frozen.json").read_bytes())
     assert frozen["source"] == "synthetic" and frozen["files"]
+    assert frozen["version"] == 3
+    assert Path(frozen["project"]) == (bundle / "project").resolve()
+    assert set(frozen["inputs"]) == {"capture.json", "input-profile.json"}
+    assert all(name.startswith(frozen["collector_package"] + "/") for name in frozen["files"])
     assert json.loads((bundle / "project" / "capture.json").read_bytes())["version"] == 1
     python = (
         bundle / "project" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -75,59 +80,156 @@ def test_prepare_freezes_copied_source_config_and_isolated_dependencies_without_
     assert Path(module_path).is_relative_to(bundle / "project" / ".venv")
 
 
-def test_detached_collector_survives_launcher_and_can_be_queried_stopped_and_replayed(tmp_path):
+def test_prepared_collector_runs_twice_without_reinstalling_or_changing_the_first_run(tmp_path):
+    from fh5.collection_process import CollectionStart
+
     bundle, config, _ = prepare(tmp_path, seconds=15)
-    (tmp_path / "developer/src/fh5/collection_worker.py").write_text(
-        "raise RuntimeError('developer edits must not run')"
-    )
+    frozen_bytes = (bundle / "frozen.json").read_bytes()
+    manifest_sha256 = hashlib.sha256(frozen_bytes).hexdigest()
+    frozen = json.loads(frozen_bytes)
+    forbidden = bundle / "project" / "recording-run"
+    with pytest.raises(ValueError, match="outside the frozen installation"):
+        run_experiment(CollectionStart(bundle, output_dir=forbidden))
+    assert not forbidden.exists()
+    cache = bundle / "project/.venv/installer-cache"
+    cache.mkdir()
+    (cache / "last-check.txt").write_text("Unrelated installer cache is not collection input")
     python = (
         bundle / "project" / ".venv" / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
     )
-    # This launcher process actually exits; the collector must outlive it.
-    launched = json.loads(
-        subprocess.check_output(
-            [str(python), "-I", "-B", "-m", "fh5", "collection-start", str(bundle)],
-            text=True,
-            timeout=10,
+    sessions, first_run = [], {}
+    for index, output in enumerate((tmp_path / "run-a", tmp_path / "run-b")):
+        if index:
+            (tmp_path / "developer/src/fh5/collection_worker.py").write_text(
+                "raise RuntimeError('developer edits must not run')"
+            )
+            config.write_text("developer config changed between collection runs")
+        state = {}
+        try:
+            if index == 0:
+                # This launcher exits before we query the detached worker.
+                launched = json.loads(
+                    subprocess.check_output(
+                        [
+                            str(python),
+                            "-I",
+                            "-B",
+                            "-m",
+                            "fh5",
+                            "collection-start",
+                            str(bundle),
+                            "--output",
+                            str(output),
+                        ],
+                        text=True,
+                        timeout=10,
+                    )
+                )
+            else:
+                launched = run_experiment(CollectionStart(bundle, output_dir=output)).summary[
+                    "collection"
+                ]
+            assert launched["pid"] != os.getpid() and launched["state"] == "launched"
+            assert launched["manifest_sha256"] == manifest_sha256
+            deadline = time.monotonic() + 7
+            while time.monotonic() < deadline:
+                state = run_experiment(CollectionControl(output)).summary["collection"]
+                if state.get("seen_rows", 0) >= 40:
+                    break
+                time.sleep(0.05)
+            assert state["process_liveness"] == "running"
+            assert state["seen_rows"] >= 40 and not state["commands_sent"]
+            assert not state["stop_requested"]
+            with pytest.raises(FileExistsError):
+                run_experiment(CollectionStart(bundle, output_dir=output))
+            live_review = run_experiment(
+                CollectionReview(output / "recording", tmp_path / f"live-{index}.html")
+            )
+            assert live_review.summary["collection"]["verified_blocks"] > 0
+        finally:
+            if (output / "start.claim").exists():
+                run_experiment(CollectionControl(output, stop=True))
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    state = run_experiment(CollectionControl(output)).summary["collection"]
+                    if state["process_liveness"] == "exited":
+                        break
+                    time.sleep(0.05)
+                if state["process_liveness"] == "running":
+                    # Only the synthetic worker identified by this run can remain.
+                    os.kill(state["pid"], signal.SIGTERM)
+        assert state["process_liveness"] == "exited" and state["final_status_present"]
+        assert state["complete"] and state["stop_reason"] == "requested_stop"
+        assert state["software_snapshot_verified"]
+        review = run_experiment(
+            CollectionReview(output / "recording", tmp_path / f"sealed-{index}.html")
+        ).summary["collection"]
+        assert review["complete"] and review["verified_blocks"] >= 2
+        assert (output / "frozen.json").read_bytes() == frozen_bytes
+        session = json.loads((output / "recording/session.json").read_bytes())
+        assert session["software_snapshot"]["manifest_sha256"] == manifest_sha256
+        assert session["software_snapshot"]["runtime"] == frozen["runtime"]
+        assert (
+            Path(session["software_snapshot"]["runtime"]["prefix"]).resolve()
+            == (bundle / "project/.venv").resolve()
         )
-    )
-    assert launched["pid"] != os.getpid() and launched["state"] == "launched"
-    config.write_text("developer config changed while collector runs")
-    deadline = time.monotonic() + 7
-    state = {}
-    try:
-        while time.monotonic() < deadline:
-            state = run_experiment(CollectionControl(bundle)).summary["collection"]
-            if state.get("seen_rows", 0) >= 40:
-                break
-            time.sleep(0.05)
-        assert state["process_liveness"] == "running"
-        assert state["seen_rows"] >= 40 and not state["commands_sent"]
-        live_review = run_experiment(CollectionReview(bundle / "recording", tmp_path / "live.html"))
-        assert live_review.summary["collection"]["verified_blocks"] > 0
-    finally:
-        run_experiment(CollectionControl(bundle, stop=True))
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        state = run_experiment(CollectionControl(bundle)).summary["collection"]
-        if state.get("final_status_present") and state["process_liveness"] == "exited":
-            break
-        time.sleep(0.05)
-    assert state["process_liveness"] == "exited" and state["complete"]
-    assert state["stop_reason"] == "requested_stop"
-    assert state["software_snapshot_verified"]
+        sessions.append(session["session_id"])
+        if index == 0:
+            first_run = {
+                output / name: (output / name).read_bytes()
+                for name in (
+                    "recording/session.json",
+                    "recording/final.json",
+                    "stop.request",
+                    "process.json",
+                )
+            }
+        else:
+            assert all(path.read_bytes() == original for path, original in first_run.items())
+        assert not any(
+            (bundle / name).exists()
+            for name in (
+                "start.claim",
+                "worker.log",
+                "process.json",
+                "worker-state.json",
+                "recording",
+                "stop.request",
+            )
+        )
+        assert (bundle / "frozen.json").read_bytes() == frozen_bytes
+    assert len(set(sessions)) == 2
 
 
-@pytest.mark.parametrize("changed", ["capture.json", "src/fh5/collection_worker.py", "uv.lock"])
+@pytest.mark.parametrize("changed", ["capture.json", "input-profile.json", "installed-collector"])
 def test_modified_frozen_asset_is_rejected_before_a_worker_starts(tmp_path, changed):
     from fh5.collection_process import CollectionStart
 
-    bundle, _, _ = prepare(tmp_path)
-    with (bundle / "project" / changed).open("a") as stream:
+    bundle, _, result = prepare(tmp_path)
+    path = (
+        Path(result.summary["collection"]["runtime"]["package"])
+        if changed == "installed-collector"
+        else bundle / "project" / changed
+    )
+    with path.open("a") as stream:
         stream.write("changed")
     with pytest.raises(ValueError, match="snapshot changed"):
         run_experiment(CollectionStart(bundle))
     assert not (bundle / "process.json").exists() and not (bundle / "recording").exists()
+
+
+def test_old_prepared_bundle_requests_reprepare_without_rewriting_it(tmp_path):
+    from fh5.collection_process import CollectionStart
+
+    bundle = tmp_path / "old-bundle"
+    bundle.mkdir()
+    path = bundle / "frozen.json"
+    original = json.dumps({"version": 1, "kind": "frozen-passive-collection-v1"})
+    path.write_text(original)
+    with pytest.raises(ValueError, match="collection-prepare in a new directory"):
+        run_experiment(CollectionStart(bundle))
+    assert path.read_text() == original
+    assert not (bundle / "start.claim").exists()
 
 
 def test_native_bundle_requires_explicit_live_start_and_locked_installer(tmp_path):
@@ -169,6 +271,17 @@ def test_terminated_worker_is_not_mistaken_for_live_heartbeat_and_seals_recover(
     from fh5.collection_process import CollectionStart
 
     bundle, _, _ = prepare(tmp_path, seconds=15)
+    manifest_path = bundle / "frozen.json"
+    legacy = json.loads(manifest_path.read_bytes())
+    legacy.update(version=2, kind="frozen-passive-collection-v2")
+    legacy.pop("project")
+    manifest_path.write_text(json.dumps(legacy))
+    original_manifest = manifest_path.read_bytes()
+    separate = tmp_path / "separate"
+    with pytest.raises(ValueError, match="collection-prepare"):
+        run_experiment(CollectionStart(bundle, output_dir=separate))
+    assert manifest_path.read_bytes() == original_manifest
+    assert not separate.exists() and not (bundle / "start.claim").exists()
     run_experiment(CollectionStart(bundle))
     try:
         deadline = time.monotonic() + 5

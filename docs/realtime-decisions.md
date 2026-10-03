@@ -16,11 +16,13 @@
 
 报告保存执行器发送次数、失败、独立看门狗与收尾事件，另增加 `source_to_send_return_ms`。原 `source_to_sendable_ms` 仍表示推理结果就绪时间。两者都不能代表游戏实际采用命令的时刻；`real_game_validation`、训练与晋升资格不会因 API 成功而置为真。原生来源的记录可以离线重放，重放始终不创建执行器。
 
-新增 `realtime-drive` CLI；旧 `policy --live` 保留为原管线入口，不自动迁移或追认旧成绩。不把接口接通当作 #9 完成。验证细节见 [数值驾驶适配记录](validation/t08-numeric-driving-adapter.md)。
+模型驾驶统一使用 `realtime-drive` CLI；旧 `policy` 在线入口已退役，配置迁移与旧录制回放见[迁移说明](policy-driving.md)。不把接口接通当作 #9 完成，也不追认旧成绩。验证细节见 [数值驾驶适配记录](validation/t08-numeric-driving-adapter.md)。
 
 ## 有界驾驶命令与条件绑定
 
-`configs/realtime-drive.example.json` 是需填写真实候选目录与 SHA-256 的模板，默认沿用 4K 采集配置。`model.expected_sha256` 是 `actor.pt` 哈希，`model.manifest_sha256` 是完整 `model.json` 哈希；`shadow.manifest_sha256` 是对应只读运行的 `realtime-manifest.json` 文件哈希。路径相对于配置文件。可暂填 `shadow: null` 查看其他缺项。
+只读预测和驾驶共用 `configs/realtime-drive.example.json`，填写一次采集、模型目录和设备、局部路线、节拍与端口；路径相对于配置文件。模板默认沿用 4K 采集配置，初始 `shadow: null`。先用这份配置运行下文的 `realtime-shadow`；取得对应实测记录后，仅将 `shadow` 改为 `{"directory":"<影子录制目录>"}`，再检查驾驶资格，无需手工计算或复制文件哈希。
+
+配置加载时绑定所选模型清单、路线和只读记录；权重身份取自模型清单，实际权重仍由 worker 验证。绑定保存在运行记录中，不改写配置。替换模型或路线后，旧只读记录会因绑定不匹配失效；加载配置后也不能悄悄换成另一份模型。原有 `model.expected_sha256`、`model.manifest_sha256`、`task.expected_route_sha256`、`shadow.manifest_sha256` 仍可作为严格断言：提供时必须匹配，省略才自动绑定；空值不表示省略。
 
 ```powershell
 uv run --locked fh5 realtime-drive --config runs/drive-config.json --output runs/numeric-drive-001 --seconds 15
@@ -36,32 +38,89 @@ uv run --locked fh5 realtime-drive --config runs/drive-config.json --output runs
 
 只读资格检查同时逐个验证决策的输入 JSON 与数值 RGB 文件、摘要、帧元数据和因果时序，不只依赖报告中保存的完整标记。此检查不加载模型或执行预测。推理 worker 在预热后报告实际使用的 `inference_device`；它须与配置和只读依据一致，不能只核对配置里的 CPU/CUDA 字符串。设备作为执行信息保留，不并入模型身份，离线数值重放仍可在另一设备上按既定误差容差核对同一模型。
 
-`ShadowEnvironment` 组合独立 DXGI 采集/预处理、单个回环 UDP 接收器和任务几何核验。每个包都检查，不能用同批末尾的正常包覆盖中间故障。准备前的菜单、时钟异常、失焦或遥测间断会清空历史；恢复后只接受边界之后的新帧。准备完成后硬故障锁存，不自动重试接管。采集 epoch 即使暂无完整历史也会传播，使旧推理及时失效。
+`ShadowEnvironment.from_native(configuration)` 为只读预测和驾驶共用原生观测组装：独立 DXGI 采集/预处理、单个回环 UDP 接收器、桌面信号、资源采样和任务几何核验。DXGI 在首次读取时才启动；该方法不创建控制器，驾驶入口仍须先通过资格检查。每个包都检查，不能用同批末尾的正常包覆盖中间故障。准备前的菜单、时钟异常、失焦或遥测间断会清空历史；恢复后只接受边界之后的新帧。准备完成后硬故障锁存，不自动重试接管。采集 epoch 即使暂无完整历史也会传播，使旧推理及时失效。
 
 任务路线须通过既有局部几何核验并绑定 SHA-256；只用于准备位置、朝向、范围和结束判定，不进入 actor 的航点输入。UDP 每批最多 64 包；发现仍有积压则报告故障。包时间为主机实际读取时刻，不是内核到达时刻或物理状态的精确时间，不能借此宣称没有网络丢包。
 
 ## 只读命令
 
-仓库示例引用本地忽略的既有模型与局部路线，其他机器需要替换为自己的已核验资产。默认 **4K 游戏客户区 → 480×270 数值 RGB**，保持原车、调校与追尾远档；游戏实际渲染、HUD 等条件仍按配置注明待核验。
+复制并填写上述共用模板为 `runs/drive-config.json`，调整相对路径。模型与局部路线须替换为自己的已核验资产。默认 **4K 游戏客户区 → 480×270 数值 RGB**，保持原车、调校与追尾远档；游戏实际渲染、HUD 等条件仍按配置注明待核验。
 
 ```powershell
-uv run --locked fh5 realtime-shadow --config configs/realtime-shadow.example.json --output runs/shadow-001 --allow-legacy-source-diagnostic
+uv run --locked fh5 realtime-shadow --config runs/drive-config.json --output runs/shadow-001
 ```
 
-此命令只校验配置、模型声明和路线，不打开采集、UDP、CUDA 或手柄。权重文件与内嵌元数据由启动后的冻结模型 worker 再验证。示例旧模型来自 `legacy_offline`；缺少显式诊断参数会拒绝来源差异，尺寸、预处理和历史契约不匹配即使有参数也会拒绝。报告分别保留训练与当前像素契约，不能修改旧模型元数据冒充新来源训练。
+此命令只校验配置、模型清单绑定和路线，不打开采集、UDP、CUDA 或手柄。权重文件与内嵌元数据由启动后的冻结模型 worker 再验证。重新录制影子时不读取配置里的旧 `shadow` 证据；旧证据缺失或失效不会妨碍重新采集，只在驾驶资格检查时使用。
+
+旧的独立影子配置及 `realtime-shadow.example.json` 已退役，不再维护第二套解析。迁移时保留原采集、模型、任务、决策和端口，补入 `shadow: null`；旧模型和记录不改写。若模型来自 `legacy_offline`，仍须显式加 `--allow-legacy-source-diagnostic`；尺寸、预处理和历史契约不匹配即使有参数也会拒绝。报告保留训练与当前像素契约，不能修改旧模型元数据冒充新来源训练，也不能据此豁免驾驶资格。
 
 游戏可配合时，在已核验局部起点停稳，然后分别运行：
 
 ```powershell
-uv run --locked fh5 realtime-shadow --config configs/realtime-shadow.example.json --output runs/shadow-10hz --hz 10 --seconds 30 --allow-legacy-source-diagnostic --live
-uv run --locked fh5 realtime-shadow --config configs/realtime-shadow.example.json --output runs/shadow-20hz --hz 20 --seconds 30 --allow-legacy-source-diagnostic --live
+uv run --locked fh5 realtime-shadow --config runs/drive-config.json --output runs/shadow-10hz --hz 10 --seconds 30 --live
+uv run --locked fh5 realtime-shadow --config runs/drive-config.json --output runs/shadow-20hz --hz 20 --seconds 30 --live
 ```
+
+`--hz` 只覆盖本次只读决策频率，不改写配置。选择频率后将 `decision.decision_hz` 设为同一值，才能绑定该频率的记录用于驾驶；不同频率的证据不会互相替代。只读时长不继承驾驶的 30 秒限制。
 
 `--live` 仅启动只读采集与预测，不连接虚拟手柄、不发送任何游戏输入；F8/失焦及原有 15 km/h 等停止条件保持。总运行时间从模型预热后计算，等待合格起点与图像历史也计入。没有接受决策或资源未释放时命令返回非零，不把空跑算通过。示例的实际起点在拱门后的局部区域，并非蓝图起跑网格。资源采样另在线程运行，报告的 GPU 显存是全设备数据，不能归因于截图。
 
 模型加载和一次预热在常驻推理线程完成，随后才启动决策调度。最多一个任务在途；忙时跳 tick。原生推理不能强行取消，挂起时停止会话并报告未释放线程，不再建线程替代。
 
 停止先锁止并解除动作，再按既有 0.5 秒界限关闭推理 worker。若在该关闭窗口内收到最后一份真实结果，收尾流程补记其特征、预测和 `discard_stopped`，供独立数值重放核对；停止后不会下发该结果。仍未返回的推理继续标为 `abandoned_inference` 并隔离记录，不延长等待或补造预测。
+
+## SAC 影子与短段驾驶接入（#11）
+
+SAC 复用上述配置和 `realtime-shadow` / `realtime-replay`，仅替换 `model`：
+
+```json
+"model": {
+  "kind": "sac",
+  "directory": "../runs/sac-candidate",
+  "device": "cpu"
+}
+```
+
+目录应含已保存的 `policy.json` 和 `policy.pt`；配置自动绑定清单，worker 加载时核对权重。
+`expected_sha256` 与 `manifest_sha256` 若显式提供，均须匹配 SAC 的 `policy.json`。
+像素、历史槽位及动作幅度须与检查点一致。默认确定性预测；可选 `model.exploration_seed`
+使用既有按决策标识生成的探索噪声，精确回放沿用保存的种子。
+当前 SAC 推理支持 CPU；`--allow-legacy-source-diagnostic` 不适用于 SAC。
+
+SAC 的动作变化率区间需要前一次命令。只读运行将其明确记录为假设提议
+`counterfactual-proposal-v1`，初始为中立；随后提议及其时刻仅用于下一次预测的动作区间。
+它们保存在 `proposals`，不写入实际 `commands`，也不填充编码器的真实动作历史。
+报告分别统计源帧到提议的延迟与实际发送延迟；后者没有样本。
+重放核对数值像素、时间特征、提议上下文与模型预测。只读记录不能作为训练转移或晋升证据。
+
+只读接入用于核对模型和实时观测能否一起工作；游戏尚未执行这些提议，观测也不代表执行后的反馈。
+
+由已核验原生经验训练的 SAC 候选可使用同一配置进入 `realtime-drive`；包含合成经验时保留
+`source_kind="mixed"`，只有合成经验的旧候选仍只能诊断。父 BC 的车辆、确认条件、因果历史、
+实际 Δt 和无参考训练资格继续核对。当前 SAC 的 `policy.json` 摘要、完整权重内嵌元数据与父 BC
+摘要共同绑定模型身份；启动不重新遍历全部训练经验。
+
+驾驶前须重新取得当前 SAC 候选、同一确定性/探索模式及相同种子的原生影子记录，不能借用 BC
+或另一候选的影子结果。检查点完整动作边界进入资格绑定，运行幅度必须相同；变化率仍由已有
+`ActionBounds` 按真实成功发送历史约束。默认不加 `--live` 只检查，原有起点、限时、F8、失焦、
+动作租期和独立 watchdog 均保留。授权与模型预热成功后，首次就绪先发送中立，之后使用
+`successful-send-return-proxy-v1`；影子提议不能冒充已执行动作。
+
+该软件入口不证明实际游戏采用命令的时刻、共享设备时效或驾驶改善，`game_application` 仍为
+`unverified`，`real_game_validation` 仍为 `false`。原生记录进入学习须另经独立经验核验。
+
+2026-10-03 软件验证：先在原入口复现配置拒绝 SAC，再通过真实 CPU checkpoint、
+原始 BGRA 设备替身、生产预处理/线程及回环 UDP 完成只读运行。
+确定性与固定种子探索分别接受并精确重放 10、9 次预测，误差均为零；父模型未改变，
+没有创建控制器，实际命令列表为空。修改提议并同步重算日志/报告摘要后，重放仍识别其
+与原始预测不符。配置检查、BC 回归、SAC 成功发送上下文和异步学习循环共 90 项通过
+（`runs/sac-shadow-regression.xml`）；期限/解除输入及数值驾驶适配器另 44 项通过
+（`runs/sac-shadow-runtime.xml`）。Ruff、格式和严格 mypy 通过。
+双轴审查发现配置阶段不应完整加载 BC 历史诊断，现复用已验哈希的流式字段投影。
+含 6,290,944 字节历史 loss 的清单，修复前 Python 峰值分配为 30,204,030 字节，
+修复后为 384,983 字节；同一文件继续正常校验，不设文件大小门槛。
+修复后的 SAC 入口与回放 9 项复测通过（`runs/sac-shadow-reviewed.xml`）。
+这批证据没有启动 FH5/Steam，不验证真实 4K 时效、游戏反馈或驾驶能力；#11 保持开放。
 
 ## 期限与恢复
 
@@ -93,7 +152,7 @@ uv run --locked fh5 realtime-replay runs/shadow-10hz --model runs/t35-temporal-2
 
 实验接口为 `run_experiment(RealtimeNumericReplay(...), numeric_actor=...)`。它验证数值可复现性，**不重新执行原来的墙钟调度、发送或车辆反应**，不把“重放成功”变成实时性能或成绩验收。旧 v1 实时记录缺少必要绑定，不能追认为通过。哈希用于本地完整性核验，不是抵御同时修改全部资产与清单的数字签名。
 
-冻结 SAC 评估通过显式成功命令上下文使用同一运行线程和旁路，说明见[评估版本 2](evaluation.md#冻结-sac-的版本-2-批次)。首次就绪发送中立后才进行模型决策；推理期间命令改变会丢弃旧结果。该模式仅支持合成执行器，BC 和只读影子的原语义保持。`RealtimeReplay` 的 `require_command_context=True` 提供对应的确定性时序故障验证。
+冻结 SAC 评估通过显式成功命令上下文使用同一运行线程和旁路，说明见[评估版本 2](evaluation.md#冻结-sac-的版本-2-批次)。首次就绪发送中立后才进行模型决策；推理期间命令改变会丢弃旧结果。该模式支持合成执行器及上述已授权的原生 SAC 驾驶，BC 和只读影子的原语义保持。`RealtimeReplay` 的 `require_command_context=True` 提供对应的确定性时序故障验证。
 
 若距离上次成功发送的间隔太短，按冻结 SAC 变化率计算并量化后的动作范围可能只有一个刻度。监督器在提交推理前记录 `skip_action_support`，保留实际命令与时间上下文；不发送新命令、不延长原动作有效期，也不虚增时间间隔或放宽变化率。后续满足条件的决策可恢复，持续缺少有效决策仍按既有看门狗停止。精确回放从冻结边界和真实发送历史重新核验这类等待，普通推理异常仍隔离。确定性故障回放可同时提供 `command_bounds=ActionBounds(...)`；其执行上限必须与 `RealtimeConfig` 一致。
 

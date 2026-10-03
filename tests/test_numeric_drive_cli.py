@@ -16,6 +16,7 @@ from test_temporal_bc import temporal_fixture
 from fh5.cli import main
 from fh5.experiment import run_experiment
 from fh5.numeric_actor import FrozenNumericActor
+from fh5.numeric_drive_cli import native_driving_environment
 from fh5.numeric_drive_config import NumericDriveConfiguration
 from fh5.realtime_driving import NumericDrivingEnvironment
 from fh5.realtime_model import ShadowNumericActor
@@ -76,13 +77,10 @@ def drive_config(tmp_path, model):
                 "capture_config": str(capture_path),
                 "model": {
                     "directory": str(model),
-                    "expected_sha256": metadata["weights_sha256"],
-                    "manifest_sha256": hashlib.sha256(model_bytes).hexdigest(),
                     "device": "cpu",
                 },
                 "task": {
                     "route_file": str(task_file),
-                    "expected_route_sha256": hashlib.sha256(task_file.read_bytes()).hexdigest(),
                     "end_margin_m": 0.5,
                 },
                 "decision": {"reference_count": 1},
@@ -131,9 +129,6 @@ def synthetic_shadow(tmp_path, model, config, *, native_file_fixture=False):
     root = json.loads(config.read_text())
     root["shadow"] = {
         "directory": str(plan.request.output_dir),
-        "manifest_sha256": hashlib.sha256(
-            (plan.request.output_dir / "realtime-manifest.json").read_bytes()
-        ).hexdigest(),
     }
     config.write_text(json.dumps(root))
 
@@ -161,7 +156,7 @@ def test_live_option_cannot_bypass_diagnostic_candidate(tmp_path, numeric_drivin
     assert not output.exists()
 
 
-@pytest.mark.parametrize("changed", ["shadow_manifest", "model_manifest"])
+@pytest.mark.parametrize("changed", ["shadow_manifest", "model_manifest", "weights", "route"])
 def test_changed_bound_manifest_rejects_before_devices(
     tmp_path, numeric_driving_model, capsys, changed
 ):
@@ -169,12 +164,18 @@ def test_changed_bound_manifest_rejects_before_devices(
     if changed == "shadow_manifest":
         synthetic_shadow(tmp_path, numeric_driving_model, config)
     root = json.loads(config.read_text())
-    root["shadow" if changed == "shadow_manifest" else "model"]["manifest_sha256"] = "0" * 64
+    section, key = {
+        "shadow_manifest": ("shadow", "manifest_sha256"),
+        "model_manifest": ("model", "manifest_sha256"),
+        "weights": ("model", "expected_sha256"),
+        "route": ("task", "expected_route_sha256"),
+    }[changed]
+    root[section][key] = "0" * 64
     config.write_text(json.dumps(root))
     output = tmp_path / "drive"
     assert main(["realtime-drive", "--config", str(config), "--output", str(output), "--live"]) == 2
     report = json.loads(capsys.readouterr().err)
-    assert "manifest changed" in report["message"].lower()
+    assert any(word in report["message"].lower() for word in ("changed", "differs"))
     assert not output.exists()
 
 
@@ -204,21 +205,43 @@ def test_shadow_evidence_does_not_transfer_to_different_runtime(
     assert not report["qualification"]["eligible"]
 
 
-def test_qualified_file_fixture_reaches_guarded_native_adapter(tmp_path, eligible_model):
+@pytest.mark.parametrize("explicit_hashes", [False, True])
+def test_qualified_file_fixture_reaches_guarded_native_adapter(
+    tmp_path, eligible_model, explicit_hashes, monkeypatch
+):
     config = drive_config(tmp_path, eligible_model)
     synthetic_shadow(tmp_path, eligible_model, config, native_file_fixture=True)
-    plan = NumericDriveConfiguration(config, tmp_path / "drive", 1.5, True)
+    if explicit_hashes:
+        root = json.loads(config.read_text())
+        model_bytes = (eligible_model / "model.json").read_bytes()
+        root["model"].update(
+            expected_sha256=json.loads(model_bytes)["weights_sha256"],
+            manifest_sha256=hashlib.sha256(model_bytes).hexdigest(),
+        )
+        root["task"]["expected_route_sha256"] = hashlib.sha256(
+            Path(root["task"]["route_file"]).read_bytes()
+        ).hexdigest()
+        root["shadow"]["manifest_sha256"] = hashlib.sha256(
+            (tmp_path / "shadow/realtime-manifest.json").read_bytes()
+        ).hexdigest()
+        config.write_text(json.dumps(root))
+    original = config.read_bytes()
     capture, telemetry, controller = Capture(), Telemetry(), Controller()
-    observations = ShadowEnvironment(
-        plan.request,
-        plan.capture,
-        lambda: capture,
-        telemetry,
-        Desktop(),
-        plan.task,
-        input_conditions=plan.bindings,
+    monkeypatch.setattr("fh5.dxgi_windows.WindowsDXGIFrames", lambda target: capture)
+    monkeypatch.setattr("fh5.numeric_drive_config.UDPTelemetry", lambda port: telemetry)
+    monkeypatch.setattr("fh5.live.WindowsDesktop", Desktop)
+    monkeypatch.setattr("fh5.live.XboxController", lambda: controller)
+    monkeypatch.setattr("fh5.capture_resources.WindowsResources", lambda: None)
+    plan = NumericDriveConfiguration(config, tmp_path / "drive", 1.5, True)
+    shadow = plan.qualification["shadow"]
+    assert (
+        shadow["manifest_sha256"]
+        == hashlib.sha256((tmp_path / "shadow/realtime-manifest.json").read_bytes()).hexdigest()
     )
-    env = NumericDrivingEnvironment(observations, lambda: controller, configuration=plan)
+    assert (
+        plan.model_hash == hashlib.sha256((eligible_model / "model.json").read_bytes()).hexdigest()
+    )
+    env = native_driving_environment(plan)
     r = run_experiment(
         plan.request, realtime_environment=env, numeric_actor_factory=plan.actor
     ).summary["realtime"]
@@ -227,6 +250,29 @@ def test_qualified_file_fixture_reaches_guarded_native_adapter(tmp_path, eligibl
     assert r["commands_sent_to_game"] and r["resources_released"]
     assert controller.closed and telemetry.closed and capture.closed
     assert r["real_game_validation"] is False
+    assert config.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    "changed,reason",
+    [("model", "shadow_model_manifest_sha256_mismatch"), ("route", "shadow_task_mismatch")],
+)
+def test_replacing_selected_artifact_does_not_reuse_old_shadow(
+    tmp_path, eligible_model, changed, reason
+):
+    copied = tmp_path / "model-copy"
+    shutil.copytree(eligible_model, copied)
+    config = drive_config(tmp_path, copied)
+    synthetic_shadow(tmp_path, copied, config, native_file_fixture=True)
+    previous = NumericDriveConfiguration(config, tmp_path / "drive", 1, True)
+    assert previous.qualification["eligible"]
+    path = copied / "model.json" if changed == "model" else previous.task.route_file
+    # Equivalent JSON is still a different frozen artifact. No manual hashes are
+    # present in this config; the old recording must retain its original binding.
+    path.write_bytes(path.read_bytes() + b"\n")
+    current = NumericDriveConfiguration(config, tmp_path / "drive", 1, True)
+    assert not current.qualification["eligible"]
+    assert reason in current.qualification["reasons"]
 
 
 @pytest.mark.parametrize("changed", ["bindings", "capture", "request"])

@@ -8,7 +8,6 @@ import math
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, replace
-from itertools import chain
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from threading import Lock
@@ -34,14 +33,12 @@ from fh5.learning_io import (
 from fh5.learning_monitor import StorageMonitor, validate_monitor
 from fh5.learning_recovery import (
     archive_failed_sampling,
-    checkpoint_learning_evidence,
     completed_sampling,
     retryable_sampling,
     sampling_bindings,
     verify_archived_sampling,
 )
 from fh5.learning_stages import StageHistory
-from fh5.learning_update_history import UpdateHistory
 from fh5.learning_updates import UpdateProgress, retained_update_progress
 from fh5.numeric_images import PixelContract
 from fh5.presentation import optional_report
@@ -66,7 +63,7 @@ class LearningLoop:
 @dataclass(frozen=True)
 class LearningContinue:
     run_dir: Path
-    expected_state_sha256: str
+    expected_state_sha256: str | None = None
 
 
 class LearningEnvironment(Protocol):
@@ -373,11 +370,12 @@ class _Loop:
     def stopped(self) -> bool:
         return self.stopping_reason() is not None
 
-    def restore(self, expected: str) -> bool:
+    def restore(self, expected: str | None) -> bool:
         path = self.root / "state.json"
-        if _sha(path) != expected:
+        current = _sha(path)
+        if expected is not None and current != expected:
             raise ValueError("Learning continuation state changed")
-        state = read_json(path, expected_sha256=expected)
+        state = read_json(path, expected_sha256=current)
         if (
             state["version"] != 1
             or state["scope"] != "synthetic_development_only"
@@ -446,8 +444,15 @@ class _Loop:
                     verify_sampling_sources(attempt.get("source_assets", {}))
             if "candidate_evaluation" in row:
                 _input(self.root, row["candidate_evaluation"]).verify()
-            if row.get("update_segments"):
-                self.update_progress(number, row)
+            if row["complete"] and (
+                "sampling_parent" in row
+                or "update_segments" in row
+                or (round_dir / "updates-000").exists()
+            ):
+                progress = self.update_progress(number, row)
+                if progress.learner["sha256"] != row["candidate_sha256"]:
+                    raise ValueError("Completed round has unacknowledged updates")
+                row.pop("update_segments", None)
         self.reconcile_sampling()
         self.reconcile_updates()
         self.reconcile_evaluation()
@@ -696,12 +701,7 @@ class _Loop:
             return False
         return True
 
-    def update_history(self, number: int, row: dict[str, Any]) -> UpdateHistory:
-        return UpdateHistory(self.root / f"round-{number:03d}", row.get("update_segments", []))
-
-    def update_progress(
-        self, number: int, row: dict[str, Any], *, proposed_entry: dict[str, Any] | None = None
-    ) -> UpdateProgress:
+    def update_progress(self, number: int, row: dict[str, Any]) -> UpdateProgress:
         parent = row.get("sampling_parent", self.state["explorer"])
         if (
             parent["sha256"] != row["sampling_checkpoint_sha256"]
@@ -713,15 +713,10 @@ class _Loop:
             checkpoint_dir=Path(parent["directory"]),
             expected_checkpoint_sha256=parent["sha256"],
         )
-        segments = iter(self.update_history(number, row))
-        if proposed_entry is not None:
-            segments = chain(segments, (proposed_entry,))
-        progress = retained_update_progress(request, parent, segments)
-        if (
-            progress.earned != self.update_budget(row)
-            or progress.completed != row["learner_updates"]
-            or progress.learner["sha256"] != row["candidate_sha256"]
-        ):
+        progress = retained_update_progress(
+            request, parent, row["candidate_sha256"], row["learner_updates"]
+        )
+        if progress.earned != self.update_budget(row):
             raise ValueError("Stopped updates differ from their retained progress")
         return progress
 
@@ -730,31 +725,24 @@ class _Loop:
         number: int,
         row: dict[str, Any],
         progress: UpdateProgress,
-        output: Path,
         kind: Literal["resumed_updates", "sealed_updates"],
     ) -> None:
-        history = self.update_history(number, row)
-        learner = _learner(output, _sha(output / "policy.json"))
-        _, learned = checkpoint_learning_evidence(output, learner["sha256"])
-        proposed = {
-            **row,
-            "sampling_parent": dict(row.get("sampling_parent", self.state["explorer"])),
-            "learner_updates": row["learner_updates"] + learned["steps_completed"],
-            "candidate_sha256": learner["sha256"],
-        }
-        entry = {"directory": str(output), "sha256": learner["sha256"]}
-        checked = self.update_progress(number, proposed, proposed_entry=entry)
-        proposed["update_segments"] = history.append(entry)
-        row.update(proposed)
-        self.state["learner_updates"] += checked.completed - progress.completed
-        self.state["latest_learner"] = checked.learner
+        completed = progress.completed - row["learner_updates"]
+        row.update(
+            sampling_parent=dict(row.get("sampling_parent", self.state["explorer"])),
+            learner_updates=progress.completed,
+            candidate_sha256=progress.learner["sha256"],
+        )
+        row.pop("update_segments", None)
+        self.state["learner_updates"] += completed
+        self.state["latest_learner"] = progress.learner
         self.state.setdefault("recoveries", []).append(
             {
                 "kind": kind,
                 "round": number,
-                "completed": checked.completed - progress.completed,
-                "remaining": checked.earned - checked.completed,
-                "directory": str(output),
+                "completed": completed,
+                "remaining": progress.earned - progress.completed,
+                "directory": progress.learner["directory"],
             }
         )
 
@@ -763,24 +751,21 @@ class _Loop:
         if not rows or rows[-1]["complete"]:
             return
         row, number = rows[-1], len(rows) - 1
-        count = self.update_history(number, row).count
-        output = self.root / f"round-{number:03d}" / f"updates-{count:03d}"
-        if not output.exists():
+        if "candidate_sha256" not in row:
             return
-        phase = self.state["phase"]
-        if phase == "stopped":
-            phase = self.stages.before_stop(phase)
         if (
-            phase != "resuming_updates"
-            or self.state["rounds_completed"] != number
+            self.state["rounds_completed"] != number
             or not all(prior["complete"] for prior in rows[:-1])
             or not self.state["child_resources_released"]
         ):
             raise ValueError("Pending updates are not bound to an interrupted continuation")
-        progress = self.update_progress(number, row)
-        if progress.learner != self.state["latest_learner"]:
+        if row["candidate_sha256"] != self.state["latest_learner"]["sha256"]:
             raise ValueError("Pending updates differ from the current learner")
-        self.accept_updates(number, row, progress, output, "sealed_updates")
+        progress = self.update_progress(number, row)
+        row.setdefault("sampling_parent", dict(self.state["explorer"]))
+        if progress.learner != self.state["latest_learner"]:
+            self.accept_updates(number, row, progress, "sealed_updates")
+        row.pop("update_segments", None)
 
     def resume_updates(self, number: int, row: dict[str, Any]) -> bool:
         from fh5.experiment import run_experiment
@@ -788,10 +773,9 @@ class _Loop:
         progress = self.update_progress(number, row)
         if progress.learner != self.state["latest_learner"]:
             raise ValueError("Stopped updates differ from the current learner")
-        count = self.update_history(number, row).count
         if not self.capacity("updating"):
             return False
-        output = self.root / f"round-{number:03d}" / f"updates-{count:03d}"
+        output = self.root / f"round-{number:03d}" / f"updates-{progress.segments:03d}"
         self.save("resuming_updates")
         learned = run_experiment(
             SACResume(
@@ -802,7 +786,7 @@ class _Loop:
             ),
             sac_stop_requested=lambda _: self.stopped(),
         ).summary["sac_learning"]
-        self.accept_updates(number, row, progress, output, "resumed_updates")
+        self.accept_updates(number, row, self.update_progress(number, row), "resumed_updates")
         self.save("learned")
         if learned["stop_reason"] != "budget_completed" or self.stopped():
             self.state["stop_reason"] = self.stopping_reason() or learned["stop_reason"]
@@ -965,25 +949,13 @@ class _Loop:
                 row["evaluation_completion_sha256"] = _sha(completion)
         row["evaluation_run"] = execution
         self.state["child_resources_released"] &= execution["resources_released"]
-        publication = row.get("review_publication")
-        if publication is not None and (
-            not isinstance(publication, dict)
-            or set(publication) != {"sequence", "directory"}
-            or type(publication["sequence"]) is not int
-            or publication["sequence"] < 0
-            or not isinstance(publication["directory"], str)
-        ):
-            raise ValueError("Invalid parent review publication")
-        attempt = 0 if publication is None else publication["sequence"]
-        review_output = root / ("reviewed" if attempt == 0 else f"reviewed-{attempt:03d}")
-        if publication is not None and Path(publication["directory"]) != review_output:
-            raise ValueError("Parent review publication directory changed")
+        attempt = 0
+        review_output = root / "reviewed"
         while review_output.exists() or review_output.is_symlink() or review_output.is_junction():
             attempt += 1
             review_output = root / f"reviewed-{attempt:03d}"
-        # Older directories remain independently readable on disk. Preserve a
-        # legacy list if present, but never grow it with later publications.
-        row["review_publication"] = {"directory": str(review_output), "sequence": attempt}
+        # Derived reports need no parent allocation state. Retain occupied paths
+        # and leave old publication metadata untouched, without consulting it.
         self.save("reviewing_evaluation")
         ledger_file = self.review_ledger(root, row)
         # Never derive legality from the model or a successful execution summary.
@@ -1272,11 +1244,10 @@ def run_learning_loop(
                 loop.save("stopped", final=True)
         finally:
             loop.stages.close()
-    atomic_json(root / "summary.json", loop.state)
     report = optional_report(
         root / "report.html",
         "合成自主学习循环（循环运行不等于驾驶能力提升）",
         loop.state,
-        fallback=root / "summary.json",
+        fallback=root / "state.json",
     )
     return RunResult({}, [], [], {"learning_loop": loop.state}, report)

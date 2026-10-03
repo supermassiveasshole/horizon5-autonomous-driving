@@ -14,11 +14,12 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
+from fh5.artifact_io import sha256_file
 from fh5.capture_config import parse_capture_config
 from fh5.collection import CollectionConfig, CollectionControl
 from fh5.collection_host import process_identity
 from fh5.collection_status import PROCESS_FIELDS, control_source, read_control_status
-from fh5.collection_store import atomic_control_json, atomic_json, read_bounded
+from fh5.collection_store import atomic_control_json, atomic_json
 from fh5.demonstrations import _profile
 
 if TYPE_CHECKING:
@@ -44,6 +45,7 @@ class CollectionPrepare:
 class CollectionStart:
     bundle: Path
     live: bool = False
+    output_dir: Path | None = None
 
 
 def bundle_python(project: Path) -> Path:
@@ -90,27 +92,19 @@ def _install(request: CollectionPrepare, project: Path) -> None:
             stdout=log,
             stderr=subprocess.STDOUT,
             check=True,
-            timeout=600,
             creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
         )
 
 
-def snapshot_files(project: Path) -> dict[str, str]:
+def collector_files(project: Path, package: Path) -> dict[str, str]:
+    """Bind executable collector files, not the surrounding Python installation."""
     result: dict[str, str] = {}
-    total = 0
-    for path in sorted(project.rglob("*")):
+    for path in sorted(package.rglob("*")):
         if path.is_symlink() or not path.resolve().is_relative_to(project.resolve()):
             raise ValueError("Frozen collector files must be copied, not linked")
         if path.is_dir():
             continue
-        total += path.stat().st_size
-        if len(result) >= 20000 or total > 2 * 1024**3:
-            raise ValueError("Frozen collector exceeds file or byte budget")
-        digest = hashlib.sha256()
-        with path.open("rb") as stream:
-            while data := stream.read(1024**2):
-                digest.update(data)
-        result[path.relative_to(project).as_posix()] = digest.hexdigest()
+        result[path.relative_to(project).as_posix()] = sha256_file(path)
     return result
 
 
@@ -119,9 +113,9 @@ def prepare_collection(
 ) -> RunResult:
     from fh5.experiment import RunResult
 
-    capture_bytes = read_bounded(request.capture_config, 1024**2)
+    capture_bytes = request.capture_config.read_bytes()
     capture, _ = parse_capture_config(json.loads(capture_bytes))
-    profile_bytes = read_bounded(request.input_profile, 1024**2)
+    profile_bytes = request.input_profile.read_bytes()
     profile = _profile(profile_bytes)
     if profile["calibration"]["status"] != "verified":
         raise ValueError("Frozen collection requires a verified input profile")
@@ -136,8 +130,8 @@ def prepare_collection(
     root, repository = request.output_dir.resolve(), request.repository.resolve()
     sources = repository / "src" / "fh5"
     source_paths = [p for p in sources.rglob("*") if p.suffix in (".py", ".html")]
-    if not source_paths or len(source_paths) > 1000:
-        raise ValueError("Collector source package missing or too large")
+    if not source_paths:
+        raise ValueError("Collector source package missing")
     root.mkdir(parents=True, exist_ok=False)
     project = root / "project"
     project.mkdir()
@@ -146,7 +140,7 @@ def prepare_collection(
             relative = path.relative_to(repository)
             target = project / relative
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(read_bounded(path, 16 * 1024**2))
+            shutil.copyfile(path, target)
         (project / "capture.json").write_bytes(capture_bytes)
         (project / "input-profile.json").write_bytes(profile_bytes)
         if installer is None:
@@ -168,21 +162,26 @@ def prepare_collection(
                 ],
                 cwd=project,
                 env=_clean_environment(),
-                timeout=30,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
         )
         if not Path(runtime["package"]).resolve().is_relative_to(project / ".venv"):
             raise ValueError("Collector package resolved outside its isolated environment")
+        package = Path(runtime["package"]).resolve().parent
         manifest = {
-            "version": 1,
-            "kind": "frozen-passive-collection-v1",
+            "version": 3,
+            "kind": "frozen-passive-collection-v3",
+            "project": str(project),
             "source": request.source,
             "port": request.port,
             "collection": {**asdict(request.config), "pixels": request.config.pixels.metadata()},
             "installer": "uv_locked_copy" if installer is None else "injected_installer",
             "runtime": runtime,
-            "files": snapshot_files(project),
+            "collector_package": package.relative_to(project).as_posix(),
+            "files": collector_files(project, package),
+            "inputs": {
+                name: sha256_file(project / name) for name in ("capture.json", "input-profile.json")
+            },
             "commands_sent": False,
         }
         atomic_json(root / "frozen.json", manifest)
@@ -194,28 +193,63 @@ def prepare_collection(
     )
 
 
-def verify_bundle(root: Path) -> tuple[dict[str, Any], str]:
-    payload = read_bounded(root / "frozen.json", 8 * 1024**2)
+def collector_project(root: Path, manifest: dict[str, Any]) -> Path:
+    """Resolve the fixed installation independently of a recording's output directory."""
+    if manifest["version"] == 2:
+        return root / "project"
+    project = Path(manifest["project"])
+    if not project.is_absolute():
+        raise ValueError("Frozen collector installation requires an absolute project path")
+    return project
+
+
+def read_bundle(root: Path) -> tuple[dict[str, Any], str]:
+    """Read the launch identity and verify the two inputs before opening devices."""
+    payload = (root / "frozen.json").read_bytes()
     manifest = json.loads(payload)
-    if (
-        manifest.get("kind") != "frozen-passive-collection-v1"
-        or manifest.get("version") != 1
-        or manifest.get("commands_sent") is not False
-        or snapshot_files(root / "project") != manifest["files"]
-    ):
-        raise ValueError("Frozen collector snapshot changed or is unsupported")
+    if (manifest.get("version"), manifest.get("kind")) not in (
+        (2, "frozen-passive-collection-v2"),
+        (3, "frozen-passive-collection-v3"),
+    ) or manifest.get("commands_sent") is not False:
+        raise ValueError("Unsupported collector bundle; run collection-prepare in a new directory")
+    project = collector_project(root, manifest)
+    inputs = {name: sha256_file(project / name) for name in ("capture.json", "input-profile.json")}
+    if inputs != manifest["inputs"]:
+        raise ValueError("Frozen collector input snapshot changed")
     return manifest, hashlib.sha256(payload).hexdigest()
+
+
+def verify_bundle(root: Path) -> tuple[dict[str, Any], str]:
+    """Check the installed collector once at launch; dependencies stay isolated by copy."""
+    manifest, digest = read_bundle(root)
+    project = collector_project(root, manifest).resolve()
+    package = (project / manifest["collector_package"]).resolve()
+    if (
+        not package.is_relative_to(project / ".venv")
+        or collector_files(project, package) != manifest["files"]
+    ):
+        raise ValueError("Frozen collector code snapshot changed")
+    return manifest, digest
 
 
 def start_collection(request: CollectionStart) -> RunResult:
     from fh5.experiment import RunResult
 
-    root = request.bundle.resolve()
-    manifest, digest = verify_bundle(root)
+    bundle = request.bundle.resolve()
+    manifest, digest = verify_bundle(bundle)
     if manifest["source"] == "native" and not request.live:
         raise ValueError("Native collection requires explicit --live; preparation opens no devices")
     if manifest["source"] == "native" and manifest["installer"] != "uv_locked_copy":
         raise ValueError("Native collection requires locked, independently installed dependencies")
+    project = collector_project(bundle, manifest).resolve()
+    root = request.output_dir.resolve() if request.output_dir is not None else bundle
+    if root != bundle:
+        if manifest["version"] == 2:
+            raise ValueError("Separate output requires a new collection-prepare installation")
+        if root.is_relative_to(project):
+            raise ValueError("Collection output must be outside the frozen installation")
+        root.mkdir(parents=True, exist_ok=False)
+        shutil.copyfile(bundle / "frozen.json", root / "frozen.json")
     if (root / "recording").exists():
         raise FileExistsError(root / "recording")
     token = uuid.uuid4().hex
@@ -225,7 +259,7 @@ def start_collection(request: CollectionStart) -> RunResult:
         with (root / "worker.log").open("xb") as log:
             process = subprocess.Popen(
                 [
-                    str(bundle_python(root / "project")),
+                    str(bundle_python(project)),
                     "-I",
                     "-B",
                     "-m",

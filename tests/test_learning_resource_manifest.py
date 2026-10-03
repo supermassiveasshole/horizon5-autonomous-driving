@@ -93,7 +93,11 @@ def test_large_bound_manifest_reaches_native_sampling_and_explicit_stop(
     assert summary["candidate"] is None and not (output / "candidate").exists()
     assert summary["commands_sent"] is False
     assert file_hash(manifest) == manifest_hash
-    assert file_hash(output / "requested-training.json") == training_hash
+    assert file_hash(training) == training_hash
+    assert json.loads((output / "training.json").read_bytes()) == {
+        **json.loads(training.read_bytes()),
+        "dataset": str((training.parent / "snapshot/dataset.json").resolve()),
+    }
     assert json.loads(result.report_path.read_bytes()) == summary
 
 
@@ -144,7 +148,10 @@ def test_changed_large_manifest_rejects_before_the_next_host_query(
         assert summary["sample_count"] == 1
         assert summary["steps_completed"] == summary["durable_steps_completed"] == 0
         assert summary["candidate"] is None and not (output / "candidate").exists()
-        assert file_hash(output / "requested-training.json") == training_hash
+        assert file_hash(training) == training_hash
+        assert json.loads((output / "training.json").read_bytes())["dataset"] == str(
+            (training.parent / "snapshot/dataset.json").resolve()
+        )
 
 
 def test_native_cache_keeps_integer_interval_without_float_conversion(tmp_path, monkeypatch):

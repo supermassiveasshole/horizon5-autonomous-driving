@@ -56,8 +56,19 @@ def test_failed_bc_checkpoint_reports_durable_parent_and_can_retry(
     assert not (child / "learner/learner.json").exists()
     # Retry through the failed run's public descriptor. Its incomplete child
     # must never replace the published parent as the recovery source.
+    manifest = Path(checkpoint["directory"]) / "learner.json"
+    original = manifest.read_bytes()
+    manifest.write_bytes(original + b"\n")
+    try:
+        with pytest.raises(ValueError):
+            run_experiment(
+                ScheduledBCResume(child, tmp_path / "rejected"), learning_resources=Resources()
+            )
+        assert not (tmp_path / "rejected").exists()
+    finally:
+        manifest.write_bytes(original)
     retried = run_experiment(
-        ScheduledBCResume(child, tmp_path / "retried", checkpoint["manifest_sha256"]),
+        ScheduledBCResume(child, tmp_path / "retried"),
         learning_resources=Resources(),
     ).summary["learning_schedule"]
     assert retried["steps_this_run"] == 4

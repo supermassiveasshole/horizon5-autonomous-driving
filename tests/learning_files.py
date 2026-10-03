@@ -29,18 +29,15 @@ def stage_records(root, summary):
 
 
 def update_bindings(root, row):
-    binding = row.get("update_segments", [])
-    if isinstance(binding, list):
-        return binding
-    previous = None
     entries = []
-    for number in range(binding["count"]):
-        path = root / f"round-{row['number']:03d}/update-history/{number:06d}.json"
-        raw = path.read_bytes()
-        node = json.loads(raw)
-        assert node["format"] == "learning-update-node-v1"
-        assert node["previous_sha256"] == previous
-        previous = hashlib.sha256(raw).hexdigest()
-        entries.append(node["entry"])
-    assert previous == binding["head_sha256"]
-    return entries
+    while True:
+        directory = root / f"round-{row['number']:03d}/updates-{len(entries):03d}"
+        checkpoint = directory / "policy.json"
+        if not checkpoint.is_file():
+            return entries
+        entries.append(
+            {
+                "directory": str(directory),
+                "sha256": hashlib.sha256(checkpoint.read_bytes()).hexdigest(),
+            }
+        )

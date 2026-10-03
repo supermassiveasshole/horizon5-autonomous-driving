@@ -34,17 +34,21 @@
 
 ```powershell
 uv run --locked fh5 sac-prepare --recording runs/synthetic/recording --trace runs/synthetic/trace.json --task runs/synthetic/task.json --reward runs/synthetic/reward.json --evidence runs/synthetic/evidence.json --output runs/sac-replay
-uv run --locked fh5 sac-warmup --model runs/temporal-bc --replay runs/sac-replay/replay.json --replay-sha256 <prepare返回的摘要> --output runs/critic-first --steps 100
+uv run --locked fh5 sac-warmup --model runs/temporal-bc --replay runs/sac-replay/replay.json --output runs/critic-first --steps 100
 uv run --locked fh5 sac-warmup-resume --checkpoint runs/critic-first --output runs/critic-continued
-uv run --locked fh5 sac-critic-replay --checkpoint runs/critic-first --replay runs/sac-replay/replay.json --report runs/critic-reloaded.html
+uv run --locked fh5 sac-critic-replay --checkpoint runs/critic-first --report runs/critic-reloaded.html
 uv run --locked fh5 sac-train --config configs/sac-learning.example.json --output runs/sac-candidate
 uv run --locked fh5 sac-resume --checkpoint runs/sac-candidate --output runs/sac-continued --steps 100
-uv run --locked fh5 sac-policy-replay --checkpoint runs/sac-candidate --replay runs/sac-replay/replay.json --report runs/sac-policy.html
+uv run --locked fh5 sac-policy-replay --checkpoint runs/sac-candidate --report runs/sac-policy.html
 ```
 
 `sac-prepare` 无可用转移时返回 4；输入错误返回 2；成功返回 0。报告展示资格、排除原因、Q 更新量与 BC 不变检查。loss 或 Q 变化不等于驾驶进步。
 
+`sac-warmup` 自动计算并绑定选中经验的摘要，可用 `--replay-sha256` 断言预期原件。两种冻结回放默认使用检查点内的 `experience/replay.json`，仍按保存的摘要核验；可用 `--replay` 显式指定原经验。指定原件缺失或摘要不符时直接报错，不回退到其他文件。未封存经验的旧检查点须显式给出原经验；Python 请求参数及检查点格式保持不变。
+
 ## 策略、温度与共享编码器更新
+
+`sac-train` 配置只需指定 `warmup` 和训练参数；省略 `replay` 时使用该预热检查点已封存的经验，仍按检查点摘要核验，不需要原始 BC 或经验目录。旧配置中的显式 `replay` 继续生效，路径相对配置文件解析；缺失、损坏或摘要不符时直接拒绝，不回退到另一份经验。没有封存经验的旧版预热仍需显式指定原经验文件。Python 的 `SACTrain` 参数保持不变。
 
 `SACTrain` 从已保存的 BC/双 Q 预热检查点出发，采用固定经验和有限 CPU 更新预算。版本 2 预热必须完成原阶段预算后才允许交接；其历史清单与报告继续保留在 SAC 快照中。`steps=0` 可单独核对交接，不执行优化。新策略版本 `conditional-temporal-sac-v1` 保留原数值 Δt 输入，并向策略提供上一实际命令、实际间隔和可执行区间；任务进度/计时上下文仍只提供给 critic。
 

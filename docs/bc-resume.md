@@ -5,14 +5,15 @@
 资源压力停止后，可在新目录执行原实验预算中尚未完成的更新：
 
 ```powershell
-$checkpointHash = (Get-FileHash -LiteralPath runs/scheduled-candidate-001/learner/learner.json -Algorithm SHA256).Hash.ToLowerInvariant()
-uv run --locked fh5 collection-bc-resume --run runs/scheduled-candidate-001 --output runs/scheduled-candidate-002 --checkpoint-sha256 $checkpointHash
+uv run --locked fh5 collection-bc-resume --run runs/scheduled-candidate-001 --output runs/scheduled-candidate-002
 ```
 
 恢复优先读取父运行的 `learner/learner.json`，因此 `schedule.json` 缺失或截断时也可用上述命令。
-该命令对本地已封存清单计算摘要；若已有留存摘要，应使用留存值核验原件。
+省略 `--checkpoint-sha256` 时，程序对选中的已封存清单计算并绑定摘要，再核验权重、优化器、随机数和数据契约。
+若已有留存摘要，可用 `--checkpoint-sha256 <摘要>` 显式断言；不匹配会拒绝，不自动刷新。
 未成功发布新 learner 的失败运行可以通过完整的 `schedule.json` 指向仍有效的祖先检查点；
-此时使用报告中的 `learner_checkpoint.manifest_sha256`，也可以直接从原父运行恢复。
+此时自动使用报告中已保存的 `learner_checkpoint.manifest_sha256` 核验祖先，不重新计算来接受变化后的原件。
+也可以直接从原父运行恢复。已发布 learner 的损坏或摘要错误不会触发向旧祖先回退；新检查点保存实际选中的父摘要。
 
 输出目录必须是新目录，不能位于父运行、父检查点、数据集或采集环境内。
 新运行读取父目录的冻结调度配置；训练配置、数据摘要、总更新预算、采样顺序和模型输入契约保持一致。

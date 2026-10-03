@@ -111,6 +111,53 @@ def test_sealed_blocks_preserve_numeric_frames_raw_packets_and_human_input(tmp_p
     assert pixels.read_bytes() == bytes([51, 17, 34] * 2)
 
 
+@pytest.mark.parametrize("error", [OSError, MemoryError, FileExistsError])
+def test_unavailable_html_keeps_completed_collection_and_verifiable_blocks(tmp_path, error):
+    req = request(tmp_path)
+    source = Stream([input_at(ms) for ms in range(250, 851, 50)])
+    report = req.output_dir / "report.html"
+    open_file = Path.open
+    failures = []
+
+    def unavailable_html(path, *args, **kwargs):
+        if path == report:
+            assert source.closed
+            assert (req.output_dir / "final.json").is_file()
+            failures.append(path)
+            if error is FileExistsError:
+                with open_file(path, "w", encoding="utf-8") as stream:
+                    stream.write("another writer's report")
+                return open_file(path, *args, **kwargs)
+            raise error("optional HTML unavailable")
+        return open_file(path, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "open", unavailable_html)
+        result = run_experiment(req, collection_environment=source)
+    collected = result.summary["collection"]
+    assert failures == [report]
+    assert collected["complete"] and collected["stop_reason"] == "source_end"
+    assert collected["seen_rows"] == collected["written_rows"] == 13
+    assert collected["archive_released"] and collected["environment"]["resources_released"]
+    assert collected["presentation"]["status"] == "unavailable"
+    assert result.report_path == req.output_dir / "final.json"
+    assert json.loads(result.report_path.read_bytes())["complete"]
+    if error is FileExistsError:
+        assert report.read_text(encoding="utf-8") == "another writer's report"
+    report = tmp_path / "review.html"
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "open", unavailable_html)
+        reviewed = run_experiment(CollectionReview(req.output_dir, report))
+    assert reviewed.report_path == report.with_suffix(".json")
+    assert json.loads(reviewed.report_path.read_bytes())["complete"]
+    assert reviewed.summary["collection"]["presentation"]["status"] == "unavailable"
+    if error is FileExistsError:
+        assert report.read_text(encoding="utf-8") == "another writer's report"
+    assert reviewed.summary["collection"]["complete"]
+    assert reviewed.summary["collection"]["verified_blocks"] == 5
+    assert reviewed.summary["collection"]["errors"] == []
+
+
 def saved_rows(root):
     return [
         json.loads(line)

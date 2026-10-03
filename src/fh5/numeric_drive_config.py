@@ -1,4 +1,4 @@
-"""Frozen numerical driving configuration and pre-device qualification."""
+"""Shared numerical shadow/driving configuration and pre-device qualification."""
 
 from __future__ import annotations
 
@@ -6,13 +6,14 @@ import hashlib
 import json
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
+from fh5.artifact_io import sha256_file
 from fh5.capture_config import parse_capture_config
-from fh5.collection_store import read_bounded
 from fh5.numeric_actor import FrozenNumericActor
+from fh5.numeric_images import DecisionActor
 from fh5.realtime import RealtimeConfig, RealtimeRun
-from fh5.realtime_model import ShadowNumericActor, shadow_model_contract
+from fh5.realtime_model import ShadowNumericActor, sac_model_contract, shadow_model_contract
 from fh5.realtime_numeric_replay import (
     read_realtime_decision,
     read_realtime_journal,
@@ -20,22 +21,37 @@ from fh5.realtime_numeric_replay import (
 )
 from fh5.realtime_shadow import LocalTask
 from fh5.realtime_udp import UDPTelemetry
+from fh5.sac_actions import ActionBounds
+from fh5.sac_context import PROPOSAL_CONTEXT, SEND_CONTEXT
 
 
 class NumericDriveConfiguration:
     """Validate immutable inputs before constructing any native resource."""
 
-    def __init__(self, config_file: Path, output_dir: Path, seconds: float, live: bool) -> None:
-        raw = read_bounded(config_file, 1024**2)
+    def __init__(
+        self,
+        config_file: Path,
+        output_dir: Path,
+        seconds: float,
+        live: bool,
+        *,
+        mode: Literal["drive", "shadow", "legacy-shadow"] = "drive",
+        hz: int | None = None,
+    ) -> None:
+        self.mode = mode
+        raw = config_file.read_bytes()
         root = json.loads(raw)
         if (
             set(root)
             != {"version", "capture_config", "model", "task", "decision", "port", "shadow"}
             or root["version"] != 1
         ):
-            raise ValueError("Unsupported numerical driving configuration")
+            raise ValueError(
+                "Use the shared configs/realtime-drive.example.json configuration; "
+                "old shadow-only configurations must add shadow: null"
+            )
         base = config_file.parent
-        capture_bytes = read_bounded(base / root["capture_config"], 1024**2)
+        capture_bytes = (base / root["capture_config"]).read_bytes()
         document = json.loads(capture_bytes)
         self.capture, self.target = parse_capture_config(document)
         if self.capture.pixels.origin != "direct_numeric":
@@ -43,33 +59,64 @@ class NumericDriveConfiguration:
         settings = dict(root["decision"])
         if "action_offsets_ms" in settings:
             settings["action_offsets_ms"] = tuple(settings["action_offsets_ms"])
+        if hz is not None:
+            settings["decision_hz"] = hz
         self.request = RealtimeRun(
             output_dir,
             RealtimeConfig(pixels=self.capture.pixels, **settings),
             seconds=seconds,
-            live=live,
+            live=live and mode == "drive",
         )
-        if seconds > 30:
+        if mode == "drive" and seconds > 30:
             raise ValueError("Numerical driving is limited to 30 seconds")
         task = dict(root["task"])
         task["route_file"] = base / task["route_file"]
+        if "expected_route_sha256" not in task:
+            task["expected_route_sha256"] = sha256_file(task["route_file"])
         self.task = LocalTask(**task)
         self.task.load()
         model = root["model"]
-        if set(model) != {"directory", "expected_sha256", "manifest_sha256", "device"} or model[
-            "device"
-        ] not in ("cpu", "cuda"):
-            raise ValueError("Driving requires frozen model manifest and weight hashes")
+        self.model_kind = model.get("kind", "bc")
+        allowed = {"directory", "device", "expected_sha256", "manifest_sha256"}
+        if self.model_kind == "sac":
+            allowed.update(("kind", "exploration_seed"))
+        if (
+            not {"directory", "device"} <= set(model) <= allowed
+            or not all(
+                isinstance(value, str) for key, value in model.items() if key != "exploration_seed"
+            )
+            or model["device"] not in ("cpu", "cuda")
+        ):
+            raise ValueError("Driving requires model directory/device and optional string hashes")
         self.model_dir = base / model["directory"]
-        model_bytes = read_bounded(self.model_dir / "model.json", 4 * 1024**2)
-        self.model_hash = hashlib.sha256(model_bytes).hexdigest()
-        if self.model_hash != model["manifest_sha256"]:
-            raise ValueError("Driving model manifest changed")
-        self.metadata, _ = shadow_model_contract(
-            self.model_dir, self.capture.pixels, model["expected_sha256"]
-        )
-        if json.loads(model_bytes) != self.metadata:
-            raise ValueError("Driving model changed during validation")
+        self.exploration_seed = model.get("exploration_seed")
+        if self.model_kind == "sac":
+            if mode == "legacy-shadow" or model["device"] != "cpu":
+                raise ValueError("SAC requires CPU with its exact source contract")
+            if "exploration_seed" in model and (
+                type(self.exploration_seed) is not int or not 0 <= self.exploration_seed < 2**64
+            ):
+                raise ValueError("SAC exploration seed must be an unsigned 64-bit integer")
+            self.metadata, self.sac_policy, self.model_hash = sac_model_contract(
+                self.model_dir, self.capture.pixels, model.get("expected_sha256")
+            )
+            if "manifest_sha256" in model and model["manifest_sha256"] != self.model_hash:
+                raise ValueError("Frozen SAC policy manifest changed")
+            self.training_pixels = self.capture.pixels
+            bounds = ActionBounds(**self.sac_policy["bounds"])
+            if any(
+                getattr(bounds, key) != getattr(self.request.config, key)
+                for key in ("max_steer", "max_throttle", "max_brake")
+            ):
+                raise ValueError("SAC action bounds differ from the configured runtime")
+        else:
+            self.metadata, self.training_pixels, self.model_hash = shadow_model_contract(
+                self.model_dir,
+                self.capture.pixels,
+                model.get("expected_sha256"),
+                allow_legacy_source_diagnostic=mode == "legacy-shadow",
+                expected_manifest_sha256=model.get("manifest_sha256"),
+            )
         cfg = self.request.config
         if self.metadata["contract"]["actor_shape"] != {
             "action_count": len(cfg.action_offsets_ms),
@@ -79,7 +126,9 @@ class NumericDriveConfiguration:
         self.device = model["device"]
         self.telemetry = UDPTelemetry(root["port"])
         self.bindings = {
-            "drive_config_sha256": hashlib.sha256(raw).hexdigest(),
+            "drive_config_sha256" if mode == "drive" else "shadow_config_sha256": hashlib.sha256(
+                raw
+            ).hexdigest(),
             "capture_config_sha256": hashlib.sha256(capture_bytes).hexdigest(),
             "capture_target": asdict(self.target),
             "conditions": document["input_conditions"],
@@ -87,8 +136,20 @@ class NumericDriveConfiguration:
             "model_manifest_sha256": self.model_hash,
         }
         self.bindings = json.loads(json.dumps(self.bindings))
+        self.qualification: dict[str, Any] = {
+            "eligible": False,
+            "reasons": ["read_only_mode"],
+            "shadow": None,
+        }
+        if mode != "drive":
+            return
         provenance = self.metadata.get("provenance", {})
         reasons = []
+        if self.model_kind == "sac" and self.sac_policy.get("source_kind") not in (
+            "native",
+            "mixed",
+        ):
+            reasons.append("synthetic_sac_model")
         if provenance.get("diagnostic_only") is not False:
             reasons.append("diagnostic_model")
         if provenance.get("kind") != "continuous_numeric_collection":
@@ -120,20 +181,25 @@ class NumericDriveConfiguration:
         else:
             shadow, shadow_reasons = self._shadow(base, root["shadow"])
             reasons.extend(shadow_reasons)
-        self.qualification: dict[str, Any] = {
+        self.qualification = {
             "eligible": not reasons,
             "reasons": reasons,
             "shadow": shadow,
         }
 
     def _shadow(self, base: Path, entry: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-        if not isinstance(entry, dict) or set(entry) != {"directory", "manifest_sha256"}:
+        if (
+            not isinstance(entry, dict)
+            or not {"directory"} <= set(entry) <= {"directory", "manifest_sha256"}
+            or not all(isinstance(value, str) for value in entry.values())
+        ):
             raise ValueError("Driving requires a bound shadow recording manifest")
         root = base / entry["directory"]
-        raw = read_bounded(root / "realtime-manifest.json", 4096)
-        if hashlib.sha256(raw).hexdigest() != entry["manifest_sha256"]:
+        raw = (root / "realtime-manifest.json").read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        if "manifest_sha256" in entry and digest != entry["manifest_sha256"]:
             raise ValueError("Shadow evidence manifest changed")
-        report = read_realtime_recording(root)
+        report = read_realtime_recording(root, expected_manifest_sha256=digest)
         read_realtime_journal(root, report)
         for row in report["decisions"]:
             if "actor" in row:
@@ -146,10 +212,21 @@ class NumericDriveConfiguration:
             or report["commands_sent_to_game"]
         ):
             reasons.append("shadow_not_native")
-        if report["actor_kind"] != ShadowNumericActor.kind or any(
+        shadow_kind = (
+            (
+                "frozen-numeric-sac-sampling-v1"
+                if self.exploration_seed is not None
+                else "frozen-numeric-sac-v1"
+            )
+            if self.model_kind == "sac"
+            else ShadowNumericActor.kind
+        )
+        if report["actor_kind"] != shadow_kind or any(
             report["model"].get(key) != value for key, value in self._candidate_identity().items()
         ):
             reasons.append("shadow_candidate_mismatch")
+        if self.model_kind == "sac" and report["model"].get("command_context") != PROPOSAL_CONTEXT:
+            reasons.append("shadow_context_mismatch")
         expected = {**asdict(self.request.config), "pixels": self.capture.pixels.metadata()}
         if report["configuration"] != json.loads(json.dumps(expected)):
             reasons.append("shadow_decision_configuration_mismatch")
@@ -207,14 +284,41 @@ class NumericDriveConfiguration:
             reasons.append("shadow_timing_outside_runtime_budget")
         return {
             "directory": str(root),
-            "manifest_sha256": entry["manifest_sha256"],
+            "manifest_sha256": digest,
             "report_sha256": json.loads(raw)["report_sha256"],
             "accepted_decisions": len(accepted),
             "active_span_s": span,
             "reasons": reasons,
         }, reasons
 
-    def actor(self) -> FrozenNumericActor:
+    def actor(self) -> DecisionActor:
+        if self.model_kind == "sac":
+            from fh5.sac_evaluation_actor import SACEvaluationActor
+            from fh5.sac_sampling_actor import SACSamplingActor
+
+            if self.exploration_seed is not None:
+                return SACSamplingActor(
+                    self.model_dir,
+                    self.capture.pixels,
+                    self.model_hash,
+                    exploration_seed=self.exploration_seed,
+                    counterfactual=self.mode != "drive",
+                )
+            return SACEvaluationActor(
+                self.model_dir,
+                self.capture.pixels,
+                self.model_hash,
+                counterfactual=self.mode != "drive",
+            )
+        if self.mode != "drive":
+            return ShadowNumericActor(
+                self.model_dir,
+                self.capture.pixels,
+                self.metadata["weights_sha256"],
+                self.device,
+                allow_legacy_source_diagnostic=self.mode == "legacy-shadow",
+                expected_manifest_sha256=self.model_hash,
+            )
         return FrozenNumericActor(
             self.model_dir,
             self.capture.pixels,
@@ -229,6 +333,23 @@ class NumericDriveConfiguration:
             )
 
     def _candidate_identity(self) -> dict[str, Any]:
+        if self.model_kind == "sac":
+            return {
+                "sac_manifest_sha256": self.model_hash,
+                "numeric_contract": self.capture.pixels.metadata(),
+                "model_contract": self.metadata["contract"],
+                "provenance": self.metadata.get("provenance"),
+                "source_kind": self.sac_policy.get("source_kind"),
+                "bounds": self.sac_policy["bounds"],
+                "exploration": self.exploration_seed is not None,
+                "noise": {
+                    "scheme": "sha256-box-muller-decision-v1",
+                    "seed": self.exploration_seed,
+                    "key": ["epoch", "decision_id", "decision_ns"],
+                }
+                if self.exploration_seed is not None
+                else [0.0, 0.0],
+            }
         return {
             "weights_sha256": self.metadata["weights_sha256"],
             "numeric_contract": self.capture.pixels.metadata(),
@@ -246,3 +367,5 @@ class NumericDriveConfiguration:
             raise ValueError("Loaded inference device differs from qualified timing evidence")
         if any(manifest.get(key) != value for key, value in self._candidate_identity().items()):
             raise ValueError("Loaded driving candidate differs from qualified model")
+        if self.model_kind == "sac" and manifest.get("command_context") != SEND_CONTEXT:
+            raise ValueError("Native SAC driving requires successful-send command context")

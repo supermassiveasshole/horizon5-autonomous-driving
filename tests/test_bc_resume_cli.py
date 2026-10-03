@@ -28,17 +28,11 @@ def test_cli_completed_bc_checkpoint_only_repeats_verification(tmp_path, monkeyp
         fh5.learning_resources, "NativeLearningResources", lambda *a, **kw: Resources()
     )
     output = tmp_path / "continued"
-    result = main(
-        [
-            "collection-bc-resume",
-            "--run",
-            str(parent),
-            "--output",
-            str(output),
-            "--checkpoint-sha256",
-            checkpoint["manifest_sha256"],
-        ]
-    )
+    args = ["collection-bc-resume", "--run", str(parent), "--output", str(output)]
+    assert main([*args, "--checkpoint-sha256", "0" * 64]) == 2
+    assert capsys.readouterr().err
+    assert not output.exists()
+    result = main(args)
     assert result == 0
     summary = json.loads(capsys.readouterr().out)
     assert summary["state"] == "completed"

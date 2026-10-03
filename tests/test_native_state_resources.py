@@ -145,7 +145,10 @@ def test_native_large_state_reaches_verified_backlog_then_explicit_stop(
     )
     assert "runtime" not in json.dumps(event)
     assert all(sha256_file(path) == digest for path, digest in before.items())
-    assert sha256_file(inputs.output / "requested-training.json") == sha256_file(inputs.training)
+    assert json.loads((inputs.output / "training.json").read_bytes()) == {
+        **json.loads(inputs.training.read_bytes()),
+        "dataset": str((inputs.training.parent / "snapshot/dataset.json").resolve()),
+    }
     assert not (inputs.training.parent / "snapshot/dataset.json").exists()
     assert not any(
         name == "torch" or name.startswith("torch.") for name in set(sys.modules) - imported

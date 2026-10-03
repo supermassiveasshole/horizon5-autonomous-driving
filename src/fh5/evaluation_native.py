@@ -89,11 +89,13 @@ class NativeEvaluationEnvironment:
             self.configuration, request.output_dir, request.seconds, True
         )
         plan.require_eligible()
+        if plan.exploration_seed is not None:
+            raise ValueError("Native evaluation requires deterministic policy execution")
         config = batch["config"]
         task = json.loads(read_bounded(request.batch_dir / "task.json", 1024**2))
         runtime = {**asdict(plan.request.config), "pixels": plan.capture.pixels.metadata()}
         if (
-            config["model"]["kind"] != "bc"
+            config["model"]["kind"] != plan.model_kind
             or config["model"]["manifest_sha256"] != plan.model_hash
             or config["model"]["device"] != plan.device
             or config["runtime"] != json.loads(json.dumps(runtime))

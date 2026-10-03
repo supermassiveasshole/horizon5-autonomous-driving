@@ -13,11 +13,16 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.bc_checkpoint import BCRecovery, read_bc_checkpoint
-from fh5.collection_store import encode, read_bounded, write_file
+from fh5.collection_store import encode, write_file
 from fh5.learning_diagnostics import RecordJournal
 from fh5.learning_observation import resource_observation
 from fh5.replay_document import read_document_fields
-from fh5.temporal_bc import TemporalBCTrain, _configuration, run_temporal_bc
+from fh5.temporal_bc import (
+    TemporalBCTrain,
+    _checked_configuration,
+    _configuration,
+    run_temporal_bc,
+)
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -33,7 +38,7 @@ class ScheduledBCTrain:
 class ScheduledBCResume:
     run_dir: Path
     output_dir: Path
-    expected_checkpoint_sha256: str
+    expected_checkpoint_sha256: str | None = None
 
 
 class LearningResources(Protocol):
@@ -49,19 +54,25 @@ class ScheduleStopped(Exception):
     pass
 
 
-def _configuration_schedule(path: Path) -> dict[str, Any]:
-    fields = {
+def _configuration_schedule(source: VerifiedFile) -> dict[str, Any]:
+    shared_fields = {
         "version",
-        "training_config",
-        "training_config_sha256",
         "collector_bundle",
         "collector_manifest_sha256",
         "budget",
     }
     config = read_document_fields(
-        VerifiedFile(path, sha256_file(path)), fields, reject_unknown=True
+        source,
+        shared_fields | {"training", "training_config", "training_config_sha256"},
+        reject_unknown=True,
     )
-    if set(config) != fields or config["version"] != 1:
+    version = config.get("version")
+    if not (
+        version == 1
+        and set(config) == shared_fields | {"training_config", "training_config_sha256"}
+        or version == 2
+        and set(config) | {"collector_manifest_sha256"} == shared_fields | {"training"}
+    ):
         raise ValueError("Unsupported learning schedule")
     budget_fields = {
         "cpu_threads",
@@ -96,14 +107,33 @@ def _configuration_schedule(path: Path) -> dict[str, Any]:
     # not a second hard-coded capacity or duration ceiling.
     if budget["max_gpu_utilization_percent"] > 100:
         raise ValueError("GPU utilization budget must be a percentage from 0 to 100")
-    for key in ("training_config_sha256", "collector_manifest_sha256"):
+    if "collector_manifest_sha256" not in config:
+        config["collector_manifest_sha256"] = sha256_file(
+            source.path.parent / config["collector_bundle"] / "frozen.json"
+        )
+    for key in (
+        ("training_config_sha256", "collector_manifest_sha256")
+        if version == 1
+        else ("collector_manifest_sha256",)
+    ):
         if (
             not isinstance(config[key], str)
             or len(config[key]) != 64
             or any(c not in "0123456789abcdef" for c in config[key])
         ):
             raise ValueError("Expected SHA-256 binding: " + key)
-    return config
+    if version == 1:
+        training_path = source.path.parent / config["training_config"]
+        training = _configuration(training_path, expected_sha256=config["training_config_sha256"])
+        training_base = training_path.parent
+    else:
+        training = _checked_configuration(config["training"], source.path.parent)
+        training_base = source.path.parent
+    return {
+        **{key: config[key] for key in shared_fields},
+        "version": 2,
+        "training": dict(training, dataset=str((training_base / training["dataset"]).resolve())),
+    }
 
 
 class LearningSchedule:
@@ -316,17 +346,17 @@ def run_scheduled_bc(
         if isinstance(request, ScheduledBCResume)
         else request.config_file
     )
-    config = _configuration_schedule(config_file)
+    config_source = VerifiedFile(config_file, sha256_file(config_file))
+    config = _configuration_schedule(config_source)
     base = config_file.parent
-    training_path = base / config["training_config"]
-    training = _configuration(training_path, expected_sha256=config["training_config_sha256"])
-    training_source = VerifiedFile(training_path, config["training_config_sha256"])
-    dataset = (training_path.parent / training["dataset"]).resolve()
+    training = config["training"]
+    dataset = Path(training["dataset"])
     parent = None
     if isinstance(request, ScheduledBCResume):
         if request.output_dir.resolve().is_relative_to(request.run_dir.resolve()):
             raise ValueError("BC continuation output must be outside its parent run")
         checkpoint_root = request.run_dir / "learner"
+        expected = request.expected_checkpoint_sha256
         if not (checkpoint_root / "learner.json").is_file():
             # Runs stopped before a new seal can still refer to their durable
             # ancestor. A newly sealed learner never depends on this report,
@@ -337,16 +367,20 @@ def run_scheduled_bc(
             ).get("learner_checkpoint")
             if (
                 not isinstance(previous, dict)
-                or previous.get("manifest_sha256") != request.expected_checkpoint_sha256
+                or not isinstance(previous.get("manifest_sha256"), str)
+                or (expected is not None and previous["manifest_sha256"] != expected)
             ):
                 raise ValueError("Scheduled BC run has no matching durable learner checkpoint")
             checkpoint_root = Path(previous["directory"])
+            expected = previous["manifest_sha256"]
+        elif expected is None:
+            expected = sha256_file(checkpoint_root / "learner.json")
         if request.output_dir.resolve().is_relative_to(checkpoint_root.resolve()):
             raise ValueError("BC continuation output must be outside its parent checkpoint")
         parent = read_bc_checkpoint(
             importlib.import_module("torch"),
             checkpoint_root,
-            expected_sha256=request.expected_checkpoint_sha256,
+            expected_sha256=expected,
             cpu_threads=config["budget"]["cpu_threads"],
         )
         effective = dict(training, dataset=str(dataset))
@@ -383,12 +417,9 @@ def run_scheduled_bc(
     partial = request.output_dir / ".candidate"
     try:
         write_file(frozen_config, encode(training))
-        training_source.copy_to(request.output_dir / "requested-training.json")
-        write_file(request.output_dir / "requested-schedule.json", encode(config))
+        config_source.copy_to(request.output_dir / "requested-schedule.json")
         config = dict(
             config,
-            training_config=str(frozen_config.resolve()),
-            training_config_sha256=hashlib.sha256(encode(training)).hexdigest(),
             collector_bundle=str((base / config["collector_bundle"]).resolve()),
         )
         write_file(request.output_dir / "schedule-config.json", encode(config))
@@ -399,9 +430,7 @@ def run_scheduled_bc(
             config["budget"]["cpu_threads"],
             recovery,
         )
-        candidate_hash = hashlib.sha256(
-            read_bounded(partial / "model.json", 128 * 1024**2)
-        ).hexdigest()
+        candidate_hash = sha256_file(partial / "model.json")
         schedule.checkpoint("publish", training["steps"])
         state = "completed"
         diagnostic = (
