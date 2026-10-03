@@ -136,7 +136,10 @@ def test_skips_do_not_renew_absolute_action_lease_and_recovery_uses_new_images(t
     assert r["decisions"][0]["safety_at_decision"]["car_ordinal"] == 2941
 
 
-@pytest.mark.parametrize("delay,reason", [(110, "discard_deadline"), (None, "abandoned_inference")])
+@pytest.mark.parametrize(
+    "delay,reason",
+    [(110, "discard_deadline"), (400, "discard_deadline"), (None, "abandoned_inference")],
+)
 def test_single_inflight_work_is_not_replaced_and_late_or_stuck_work_cannot_renew(
     tmp_path, delay, reason
 ):
@@ -153,7 +156,7 @@ def test_single_inflight_work_is_not_replaced_and_late_or_stuck_work_cannot_rene
     assert r["decisions"][2]["status"] == "skip_busy"
     assert not any(c["decision_id"] == "d1" for c in r["commands"])
     if delay is None:
-        assert r["stop_reason"] == "inference_watchdog"
+        assert r["stop_reason"] == "time_limit"
         assert not any(
             c["owner"] == "policy" and c["issued_ns"] > BASE + 300 * MS for c in r["commands"]
         )
@@ -234,7 +237,10 @@ def test_frozen_old_frame_cannot_renew_lease_or_hide_blackout(tmp_path):
     r = result.summary["realtime"]
     assert len([c for c in r["commands"] if c["owner"] == "policy"]) == 1
     assert r["decisions"][1]["status"] == "skip_repeated_source"
-    assert r["stop_reason"] == "decision_watchdog"
+    assert r["stop_reason"] == "time_limit"
+    release = next(c for c in r["commands"] if c["owner"] == "lease_expiry")
+    assert release["issued_ns"] == BASE + 400 * MS
+    assert release["sent"] == {"steer_i16": 0, "throttle_u8": 0, "brake_u8": 0}
 
 
 @pytest.mark.parametrize("prediction", [(float("nan"), 0.5), (1.01, 0), (0, -1.1)])
@@ -372,11 +378,14 @@ def test_persistent_worker_cannot_block_independent_action_expiry(tmp_path):
     )
     r = result.summary["realtime"]
     assert len(set(actor.calls)) == 1
-    assert r["stop_reason"] == "inference_watchdog"
+    assert r["stop_reason"] == "time_limit"
     actions = [c for c in r["commands"] if c["owner"] == "policy"]
-    assert len(actions) == 1
+    assert len(actions) >= 2
     release = next(c for c in r["commands"] if c["owner"] == "lease_expiry")
     assert 0 <= release["issued_ns"] - actions[0]["valid_until_ns"] < 50 * MS
+    late = next(d for d in r["decisions"] if d["status"] == "discard_deadline")
+    assert all(c["decision_id"] != late["decision_id"] for c in actions)
+    assert any(c["issued_ns"] > late["inference_returned_ns"] for c in actions)
     assert r["inference"]["warmup_completed"] is True
     assert game.sent[-1][1].throttle_u8 == 0 and game.closed
     assert r["commands_sent_to_game"] is False
@@ -534,22 +543,37 @@ def test_seeded_source_frame_losses_allow_fresh_decisions_to_continue(tmp_path, 
     assert sum(d["status"] == "accepted" for d in r["decisions"]) >= 30
 
 
-def test_300_ms_blackout_latches_watchdog_and_cannot_resume_on_its_own(tmp_path):
-    points = tuple(sample(ms, obs=not 350 <= ms < 650) for ms in range(250, 801, 50))
+@pytest.mark.parametrize("legacy_watchdog_ms", [None, 250, 1000])
+def test_300_ms_blackout_releases_action_and_resumes_after_fresh_history(
+    tmp_path, legacy_watchdog_ms
+):
+    # Capture is absent from 350 through 649 ms. After it returns, the 200 ms
+    # history is not usable until 850 ms; no invented frames fill that gap.
+    points = tuple(sample(ms, obs=ms < 350 or ms >= 850) for ms in range(250, 1001, 50))
     result = run_experiment(
         RealtimeReplay(
             tmp_path / "blackout",
-            RealtimeConfig(pixels=PixelContract(size=(2, 1))),
+            RealtimeConfig(pixels=PixelContract(size=(2, 1)), watchdog_ms=legacy_watchdog_ms),
             points,
             (InferenceReply(10),) * len(points),
         )
     )
     r = result.summary["realtime"]
-    assert r["stop_reason"] == "decision_watchdog"
+    assert r["stop_reason"] == "time_limit"
+    release = next(c for c in r["commands"] if c["owner"] == "lease_expiry")
+    assert release["issued_ns"] == BASE + 450 * MS
+    assert release["sent"] == {"steer_i16": 0, "throttle_u8": 0, "brake_u8": 0}
     assert not any(
-        c["owner"] == "policy" and c["issued_ns"] >= BASE + 350 * MS for c in r["commands"]
+        c["owner"] == "policy" and BASE + 350 * MS <= c["issued_ns"] < BASE + 850 * MS
+        for c in r["commands"]
     )
-    assert r["decisions"][-1]["status"] == "skip_stopped"
+    resumed = [d for d in r["decisions"] if d["decision_ns"] >= BASE + 850 * MS]
+    assert all(d["status"] == "accepted" for d in resumed)
+    assert all(f["source_time_ns"] >= BASE + 650 * MS for d in resumed for f in d["frames"])
+    assert any(
+        c["owner"] == "policy" and c["decision_id"] == resumed[0]["decision_id"]
+        for c in r["commands"]
+    )
 
 
 def test_first_inflight_prediction_is_cancelled_if_the_prepared_session_loses_focus(tmp_path):

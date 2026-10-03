@@ -195,13 +195,9 @@ class DecisionState:
                 self.stop(now, "send_failed")
                 return
             self.lease_ns = None
-        if (
-            self.last_accepted_ns is not None
-            and now - self.last_accepted_ns >= self.config.watchdog_ms * MS
-        ):
-            self.stop(now, "inference_watchdog" if self.pending else "decision_watchdog")
-        elif self.pending and now - self.pending.row["decision_ns"] >= self.config.watchdog_ms * MS:
-            self.stop(now, "inference_watchdog")
+        # Missing observations or a busy worker do not invalidate the control
+        # session. The absolute action lease above releases stale input while
+        # we wait; only a fresh, timely result may command again.
 
     def _actor(self, now: int, observation: RealtimeObservation) -> dict[str, Any]:
         actions: list[list[float] | None] = []

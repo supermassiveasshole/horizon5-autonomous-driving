@@ -3,11 +3,13 @@
 import hashlib
 import json
 import shutil
+import time
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
+from fh5.capture.pipeline import CaptureEvent
 from fh5.cli import main
 from fh5.commands.numeric_drive import native_driving_environment
 from fh5.driving.config import NumericDriveConfiguration
@@ -106,9 +108,11 @@ def test_dry_run_reports_ineligible_candidate_without_opening_devices(
     assert not output.exists()
 
 
-def synthetic_shadow(tmp_path, model, config, *, native_file_fixture=False):
-    plan = NumericDriveConfiguration(config, tmp_path / "shadow", 2, False)
-    capture = Capture()
+def synthetic_shadow(
+    tmp_path, model, config, *, native_file_fixture=False, capture=None, seconds=2
+):
+    plan = NumericDriveConfiguration(config, tmp_path / "shadow", seconds, False)
+    capture = capture or Capture()
     if native_file_fixture:
         capture.source_kind = "dxgi"  # External source identity is simulated in this test only.
     bindings = dict(plan.bindings)
@@ -125,12 +129,66 @@ def synthetic_shadow(tmp_path, model, config, *, native_file_fixture=False):
     metadata = json.loads((model / "model.json").read_text())
     actor = ShadowNumericActor(model, plan.capture.pixels, metadata["weights_sha256"])
     actor.actor.torch.set_num_threads(1)
-    run_experiment(plan.request, realtime_environment=env, numeric_actor_factory=lambda: actor)
+    result = run_experiment(
+        plan.request, realtime_environment=env, numeric_actor_factory=lambda: actor
+    )
     root = json.loads(config.read_text())
     root["shadow"] = {
         "directory": str(plan.request.output_dir),
     }
     config.write_text(json.dumps(root))
+    return result.summary["realtime"]
+
+
+def test_shadow_qualification_preserves_a_recovered_capture_gap(tmp_path, eligible_model, capsys):
+    class InterruptedCapture(Capture):
+        def __init__(self):
+            super().__init__()
+            self.gap_start_ns = None
+            self.gap_end_ns = None
+
+        def capture(self):
+            now = time.perf_counter_ns()
+            if self.gap_start_ns is None:
+                self.gap_start_ns = now + 1_200_000_000
+                self.gap_end_ns = self.gap_start_ns + 300_000_000
+            if self.gap_start_ns <= now < self.gap_end_ns:
+                return CaptureEvent(now, reason="no_new_frame")
+            return super().capture()
+
+    config = drive_config(tmp_path, eligible_model)
+    capture = InterruptedCapture()
+    shadow = synthetic_shadow(
+        tmp_path,
+        eligible_model,
+        config,
+        native_file_fixture=True,
+        capture=capture,
+        seconds=3,
+    )
+    assert shadow["stop_reason"] == "time_limit"
+    assert shadow["evidence"]["recording_complete"]
+    assert shadow["evidence"]["exact_replay_eligible"]
+    assert not shadow["commands_sent_to_game"] and not shadow["real_game_validation"]
+    assert shadow["environment"]["capture"]["no_new_frame"] > 0
+    assert shadow["metrics"]["maximum_consecutive_skip_ms"] >= 300
+    accepted = [row for row in shadow["decisions"] if row["status"] == "accepted"]
+    before = [row for row in accepted if row["decision_ns"] < capture.gap_start_ns]
+    after = [row for row in accepted if row["decision_ns"] > capture.gap_end_ns]
+    assert before and after
+    assert after[0]["decision_ns"] - before[-1]["decision_ns"] >= 300_000_000
+    for row in accepted:
+        assert row["inference_returned_ns"] < row["deadline_ns"]
+        assert (
+            0 <= row["inference_returned_ns"] - row["frames"][-1]["source_time_ns"] <= 100_000_000
+        )
+
+    output = tmp_path / "drive"
+    assert main(["realtime-drive", "--config", str(config), "--output", str(output)]) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["qualification"]["eligible"], report["qualification"]["reasons"]
+    assert report["qualification"]["shadow"]["accepted_decisions"] == len(accepted)
+    assert not report["devices_opened"] and not output.exists()
 
 
 def test_synthetic_shadow_cannot_qualify_native_driving(tmp_path, numeric_driving_model, capsys):

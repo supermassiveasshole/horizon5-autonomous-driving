@@ -17,7 +17,6 @@
     "action_lease_ms": 150,
     "max_image_age_ms": 100,
     "max_telemetry_age_ms": 100,
-    "watchdog_ms": 250,
     "expected_car_ordinal": 2941,
     "expected_pi": 999,
     "max_speed_kmh": 15,

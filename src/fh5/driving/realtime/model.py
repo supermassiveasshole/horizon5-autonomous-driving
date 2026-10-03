@@ -26,7 +26,8 @@ class RealtimeConfig:
     action_lease_ms: int = 150
     max_image_age_ms: int = 100
     max_telemetry_age_ms: int = 100
-    watchdog_ms: int = 250
+    # Legacy recording/configuration metadata; gaps no longer stop a session.
+    watchdog_ms: int | None = None
     expected_car_ordinal: int = 2941
     expected_pi: int = 999
     max_speed_kmh: float = 15
@@ -44,7 +45,6 @@ class RealtimeConfig:
             ("action_lease_ms", 10, 250),
             ("max_image_age_ms", 1, 100),
             ("max_telemetry_age_ms", 1, 100),
-            ("watchdog_ms", 10, 250),
             ("expected_car_ordinal", 1, 1_000_000),
             ("expected_pi", 1, 999),
             ("reference_count", 1, 256),
@@ -52,6 +52,10 @@ class RealtimeConfig:
             value = getattr(self, name)
             if type(value) is not int or not lo <= value <= hi:
                 raise ValueError("Invalid real-time bound: " + name)
+        if self.watchdog_ms is not None and (
+            type(self.watchdog_ms) is not int or self.watchdog_ms <= 0
+        ):
+            raise ValueError("Legacy watchdog metadata must be positive milliseconds or null")
         for name, low, high in (
             ("max_speed_kmh", 1, 15),
             ("start_speed_kmh", 0, 1),
@@ -71,9 +75,8 @@ class RealtimeConfig:
             or self.action_offsets_ms[-1] != 0
             or any(type(v) is not int or not 0 <= v <= 2000 for v in self.action_offsets_ms)
             or any(a <= b for a, b in zip(self.action_offsets_ms, self.action_offsets_ms[1:]))
-            or self.action_lease_ms > self.watchdog_ms
         ):
-            raise ValueError("Invalid real-time history or lease/watchdog relation")
+            raise ValueError("Invalid real-time history")
 
 
 @dataclass(frozen=True)

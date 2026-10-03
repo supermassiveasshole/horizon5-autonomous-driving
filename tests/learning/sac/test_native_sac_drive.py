@@ -212,8 +212,8 @@ def test_native_sac_keeps_existing_stop_and_image_lease_protection(
         )
         console = capsys.readouterr()
         report = json.loads((output / "report.json").read_bytes())
-        assert code == (0 if fault == "user_stop" else 1), console
-        expected = "decision_watchdog" if fault == "image_loss" else fault
+        assert code == (1 if fault == "focus_lost" else 0), console
+        expected = "time_limit" if fault == "image_loss" else fault
         assert report["stop_reason"] == expected
         assert report["resources_released"] and world.actuator_closed and world.capture_closed
         sent = [row["command"] for row in world.commands]
