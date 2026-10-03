@@ -51,9 +51,17 @@ def test_collection_export_preserves_pixels_past_inputs_and_separate_holdout(tmp
 def test_exported_collection_trains_and_reloads_without_final_holdout_feedback(tmp_path):
     pytest.importorskip("torch")
     from fh5.collection_bc import CollectionBCPrepare
+    from fh5.numeric_drive_config import NumericDriveConfiguration
     from fh5.temporal_bc import TemporalBCReplay, TemporalBCTrain
 
     config = prepare_inputs(tmp_path)
+    # Exercise the documented preparation settings with real sealed test sources.
+    # The source stays diagnostic; matching runtime history is not game qualification.
+    example = json.loads(
+        (Path(__file__).parents[1] / "configs/collection-bc.example.json").read_text()
+    )
+    example["sources"] = json.loads(config.read_text())["sources"]
+    config.write_text(json.dumps(example))
     output = tmp_path / "numeric"
     run_experiment(CollectionBCPrepare(config, output))
     dataset = output / "dataset.json"
@@ -85,6 +93,25 @@ def test_exported_collection_trains_and_reloads_without_final_holdout_feedback(t
     )
     assert reloaded.summary["temporal_bc"]["decisions"] == summary["decisions"]
     assert reloaded.summary["temporal_bc"]["verification"]["max_abs_error"] <= 1e-6
+
+    from test_route_check import route
+
+    examples = Path(__file__).parents[1] / "configs"
+    capture = json.loads((examples / "capture-dxgi.example.json").read_text())
+    capture["pixels"] = json.loads((tmp_path / "model/model.json").read_text())["numeric_contract"]
+    capture_path = tmp_path / "capture.json"
+    capture_path.write_text(json.dumps(capture))
+    settings = json.loads((examples / "realtime-drive.example.json").read_text())
+    settings["capture_config"] = str(capture_path)
+    settings["model"] = {"directory": str(tmp_path / "model"), "device": "cpu"}
+    settings["task"]["route_file"] = str(route(tmp_path))
+    settings["task"]["end_margin_m"] = 0.5  # fixture route is only three metres
+    driving = tmp_path / "drive.json"
+    driving.write_text(json.dumps(settings))
+    plan = NumericDriveConfiguration(driving, tmp_path / "not-opened", 1, False)
+    assert "action_history_mismatch" not in plan.qualification["reasons"]
+    assert "diagnostic_model" in plan.qualification["reasons"]
+    assert not plan.qualification["eligible"]
 
 
 def test_optional_independent_reference_only_changes_paired_reference_branch(tmp_path):

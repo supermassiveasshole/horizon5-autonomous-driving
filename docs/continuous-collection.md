@@ -48,7 +48,7 @@ uv run --locked fh5 collection-start runs/collector --output runs/collection-002
 ```powershell
 uv run --locked fh5 collection-status runs/collection-001
 uv run --locked fh5 collection-stop runs/collection-001
-uv run --locked fh5 collection-review runs/collection-001 --report runs/collection-001-reviewed.html
+uv run --locked fh5 collection-review runs/collection-001/recording --report runs/collection-001-reviewed.html
 ```
 
 直接查询 recording 目录只读取最新心跳/最终状态，标记 `process_liveness=not_checked`；查询其 bundle 则额外向操作系统核对实际进程。停止请求使采集退出并封存尾块。数据是否完整与进程是否存活分别报告。

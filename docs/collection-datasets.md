@@ -51,7 +51,9 @@ uv run --locked fh5 collection-dataset-review runs/numeric-candidate/selection.j
 
 默认参考缺失，两种视图的参考 mask 均为空。可选 `reference` 为 `{"route_file":"../runs/independent-route/route.json","independence_evidence":["说明为何独立于当前训练/留出尝试"]}`；先绑定资产哈希，再加载复制后的路线包。禁止与当前采集 session 同源；其他独立性依赖给出的证据，不能仅凭哈希不同就认定独立。参考只生成局部航点，其与无参考视图保持同组，不能把未核实路线当作合法进度依据。
 
-输出 `dataset.json` 只含 train/development，`evaluation.json` 单独保留最终留出。准备报告不显示最终行为或误差。后续训练仍使用独立配置：按 [`configs/temporal-bc.example.json`](../configs/temporal-bc.example.json) 填写，`dataset` 指向新 `dataset.json`，`dataset_sha256` 取准备报告的 `snapshot_sha256["dataset.json"]`，并明确训练种子、更新步数、批量、学习率和设备；`time_mode` 使用 `actual`，固定时间对照按[数值 Δt BC 说明](temporal-bc.md)设置。然后运行 `temporal-train --config <配置> --output <新模型目录>` 和 `temporal-replay --model <模型目录> --dataset <数值数据集> --report <新回放.html>`。模型读取内存中的 RGB 数值，PNG 只用于离线报告预览。参考缺失不声称已经验证有参考驾驶；合成来源始终带有 `diagnostic_only`。
+输出 `dataset.json` 只含 train/development，`evaluation.json` 单独保留最终留出。准备报告不显示最终行为或误差。后续训练按 [`configs/temporal-bc.example.json`](../configs/temporal-bc.example.json) 填写，`dataset` 指向新 `dataset.json`，并明确训练种子、更新步数、批量、学习率和设备；`dataset_sha256` 可省略，由程序计算并冻结，显式提供时仍须匹配。`time_mode` 使用 `actual`，固定时间对照按[数值 Δt BC 说明](temporal-bc.md)设置。然后运行 `temporal-train --config <配置> --output <新模型目录>` 和 `temporal-replay --model <模型目录> --dataset <同一数值数据集> --report <新回放.html>`；独立的 `evaluation.json` 使用下文的 `collection-bc-assess`。模型读取内存中的 RGB 数值，PNG 只用于离线报告预览。参考缺失不声称已经验证有参考驾驶；合成来源始终带有 `diagnostic_only`。
+
+用于当前 `realtime-drive` 的示例采用 `[200, 100, 0]` ms 动作历史偏移、200 ms 历史容差和五个参考槽位。200 ms 来自运行器现有历史选取规则，不是放宽实时动作有效期；训练与执行必须使用相同输入语义。旧示例的 100 ms 数据仍可离线训练与回放，但不能直接通过当前驾驶契约检查；若要按新契约训练，另行准备新快照，不改写旧数据或模型。
 
 ## 比较冻结候选与最终留出
 

@@ -19,7 +19,7 @@
     "max_label_delay_ms": 50
   },
   "action_history_offsets_ms": [200, 100, 0],
-  "max_action_age_ms": 100,
+  "max_action_age_ms": 200,
   "waypoint_distances_m": [5, 10, 20, 30, 50],
   "reference": null
 }
