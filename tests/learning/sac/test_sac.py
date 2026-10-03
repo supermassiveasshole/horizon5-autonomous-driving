@@ -15,7 +15,9 @@ from tests.observation.test_route_check import route
 from tests.support.checkpoint_files import prediction_records
 
 
-def experience(tmp_path, *, terminal=True, host_factor=1, timeline=None, owner="policy"):
+def experience(
+    tmp_path, *, terminal=True, host_factor=1, timeline=None, owner="policy", speed_mps=4.0
+):
     bundle = route(tmp_path)
     config = tmp_path / "record.json"
     config.write_text(
@@ -32,12 +34,12 @@ def experience(tmp_path, *, terminal=True, host_factor=1, timeline=None, owner="
         raw = bytearray(324)
         struct.pack_into("<iI", raw, 0, 1, 1000 + elapsed)
         struct.pack_into("<iii", raw, 212, 2941, 6, 999)
-        struct.pack_into("<ffff", raw, 244, x, 2, 0.2, 4)
+        struct.pack_into("<ffff", raw, 244, x, 2, 0.2, speed_mps)
         raw[315] = 51
         packets.append(Packet(now, "2026-10-01T00:00:00+00:00", bytes(raw)))
         state = actor_state()
         state["ego"] = {
-            "speed_mps": 4.0,
+            "speed_mps": struct.unpack_from("<f", raw, 256)[0],
             "velocity_car_mps": [0.0] * 3,
             "angular_velocity_car_radps": [0.0] * 3,
         }

@@ -7,6 +7,7 @@ from typing import Any
 
 def command_values(torch: Any, latent: Any, context: Any) -> dict[str, Any]:
     """Map a latent action to the executable grid and its declared gradient surrogate."""
+    context = context.to(dtype=latent.dtype)
     lower, upper = context[:, 3:5], context[:, 5:7]
     continuous = (lower + upper) / 2 + (upper - lower) / 2 * torch.tanh(latent)
     grid = latent.new_tensor([32767, 255])
@@ -33,38 +34,44 @@ def make_policy(torch: Any, fusion: Any, feature_width: int, initial_log_std: fl
             nn.init.constant_(self.log_std.bias, initial_log_std)
 
         def forward(self, features: Any, context: Any, noise: Any = None) -> dict[str, Any]:
-            lower, upper = context[:, 3:5], context[:, 5:7]
+            # Preserve the sender's integer command at half-cell boundaries:
+            # float32 inverse-tanh round trips and grid multiplication can each
+            # move an unchanged BC prediction into the adjacent command cell.
+            action_context = context.to(dtype=torch.float64)
+            lower, upper = action_context[:, 3:5], action_context[:, 5:7]
             center, scale = (lower + upper) / 2, (upper - lower) / 2
             if not bool((scale > 0).all()):
                 raise ValueError("SAC policy requires nondegenerate support")
-            desired = self.fusion(features)
+            desired = self.fusion(features).to(dtype=torch.float64)
             normalized = (desired.clamp(lower, upper) - center) / scale
             # A quarter command cell keeps the finite inverse tanh in the same
             # rounded command cell as BC even at a saturated bound.
-            grid = features.new_tensor([32767, 255])
+            grid = desired.new_tensor([32767, 255])
             margin = (0.25 / (grid * scale)).clamp(min=1e-6, max=0.25)
             mean = torch.atanh(normalized.clamp(-1 + margin, 1 - margin))
             mean = mean + self.context_mean(context)
             log_std = self.log_std(torch.cat([features, context], dim=1)).clamp(-5, -1)
             sigma = log_std.exp()
-            epsilon = torch.randn_like(mean) if noise is None else noise.expand_as(mean)
+            epsilon = torch.randn_like(log_std) if noise is None else noise.expand_as(mean)
             latent = mean + sigma * epsilon
             # Forward Q values always see executable commands. Backprop uses
             # the explicitly declared straight-through quantization surrogate.
-            values = command_values(torch, latent, context)
+            values = command_values(torch, latent, action_context)
             normal_logp = -0.5 * (epsilon.square() + math.log(2 * math.pi)) - log_std
             log_tanh = 2 * (math.log(2) - latent - torch.nn.functional.softplus(-2 * latent))
             log_probability = (normal_logp - log_tanh - scale.log()).sum(dim=1)
-            deterministic = command_values(torch, mean, context)["rounded"]
+            deterministic = command_values(torch, mean, action_context)["rounded"]
             return {
-                "command": values["straight_through"],
-                "continuous": values["continuous"],
-                "deterministic": deterministic,
+                "command": values["straight_through"].to(dtype=features.dtype),
+                "continuous": values["continuous"].to(dtype=features.dtype),
+                "deterministic": deterministic.to(dtype=features.dtype),
+                # Guidance recomputes commands from this mean; retain the
+                # coordinate precision while network inputs stay float32.
                 "mean": mean,
                 "log_std": log_std,
                 "latent": latent,
-                "log_probability": log_probability,
-                "log_scale": scale.log().sum(dim=1),
+                "log_probability": log_probability.to(dtype=features.dtype),
+                "log_scale": scale.log().sum(dim=1).to(dtype=features.dtype),
             }
 
     return Policy()

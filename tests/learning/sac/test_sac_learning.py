@@ -12,10 +12,10 @@ from tests.learning.sac.test_sac import experience
 from tests.support.checkpoint_files import prediction_records, update_records
 
 
-def warm_start(root, *, bounds=None):
+def warm_start(root, *, bounds=None, speed_mps=4.0):
     from fh5.learning.sac.actions import ActionBounds
 
-    request = experience(root)
+    request = experience(root, speed_mps=speed_mps)
     prepared = run_experiment(request).summary["sac_replay"]
     bc = root / "bc"
     bc.mkdir()
@@ -96,6 +96,58 @@ def test_learned_policy_reloads_with_same_commands_and_continuous_density(tmp_pa
     manifest_path.write_text(json.dumps(manifest))
     with pytest.raises(ValueError, match="metadata"):
         run_experiment(SACPolicyReplay(tmp_path / "candidate", replay, tmp_path / "bad.html"))
+
+
+@pytest.mark.parametrize("speed_mps,steer_i16", [(0.47876, 1739), (2.14489, 1740)])
+def test_bc_handoff_preserves_commands_near_half_grid_cells(tmp_path, speed_mps, steer_i16):
+    import math
+
+    import torch
+
+    from fh5.learning.sac.training import SACPolicyReplay, SACTrain
+
+    # These real BC predictions lie just above/below half an integer steering
+    # cell. Float32 grid multiplication and inverse-tanh round trips used to
+    # move them into the adjacent command even with unchanged BC features.
+    replay = warm_start(tmp_path, speed_mps=speed_mps)
+    candidate = tmp_path / "candidate"
+    command_gradients = []
+
+    def observe(module, inputs, output):
+        if isinstance(module, torch.nn.Linear):
+            assert inputs[0].dtype == module.weight.dtype == torch.float32
+        if isinstance(output, dict) and "command" in output:
+            assert output["command"].dtype == torch.float32
+            if output["command"].requires_grad:
+                # Observe the actual learner's command Jacobian without
+                # replacing its optimizer, loss, sampling or network.
+                gradient = torch.autograd.grad(
+                    output["command"].sum(), module.context_mean.bias, retain_graph=True
+                )[0]
+                assert gradient.dtype == torch.float32
+                assert torch.isfinite(gradient).all()
+                assert (gradient != 0).all()
+                command_gradients.append(gradient.detach())
+
+    with torch.nn.modules.module.register_module_forward_hook(observe):
+        trained = run_experiment(SACTrain(tmp_path / "warm", replay, candidate, steps=2)).summary[
+            "sac_learning"
+        ]
+    assert command_gradients
+    before = prediction_records(candidate, {"predictions": trained["before_predictions"]})
+    assert round(before[0]["deterministic"][0] * 32767) == steer_i16
+    lo, hi = before[0]["context"][3], before[0]["context"][5]
+    # Guidance also reconstructs a command from the mean. Its serialized
+    # action coordinate must retain the same boundary-side information.
+    continuous = (lo + hi) / 2 + (hi - lo) / 2 * math.tanh(before[0]["mean"][0])
+    assert round(continuous * 32767) == steer_i16
+    assert trained["bc_transfer_command_error"] == 0
+    assert trained["actor_updates"] == 1
+    assert trained["actor_change_max"] > 0
+    restored = run_experiment(
+        SACPolicyReplay(candidate, replay, tmp_path / "replayed.html")
+    ).summary["sac_policy"]
+    assert prediction_records(tmp_path, restored) == prediction_records(candidate, trained)
 
 
 def test_sac_terminal_target_keeps_physical_reward_without_bootstrap(tmp_path):
