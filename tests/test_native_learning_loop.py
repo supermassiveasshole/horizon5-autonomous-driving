@@ -337,8 +337,9 @@ def test_native_loop_without_review_keeps_raw_recording_and_does_not_learn(
         devices.cleanup()
 
 
+@pytest.mark.parametrize("resume_fault", [None, "focus_lost"])
 def test_native_loop_resumes_stopped_evaluation_qualification_without_relearning(
-    tmp_path, seeded_native, native_candidate
+    tmp_path, seeded_native, native_candidate, resume_fault
 ):
     config, drive, event, _ = native_loop(
         tmp_path, seeded_native, native_candidate.parent, rounds=1
@@ -381,17 +382,36 @@ def test_native_loop_resumes_stopped_evaluation_qualification_without_relearning
     finally:
         devices.cleanup()
     (root / "stop.request").unlink()
-    fresh = LoopDevices()
+
+    class ResumedDevices(LoopDevices):
+        def drive(self, plan):
+            observed = super().drive(plan)
+            if resume_fault:
+                world = self.worlds[-1]
+
+                def focused():
+                    with world.lock:
+                        return not any(row["command"]["throttle_u8"] for row in world.commands)
+
+                observed.observations.desktop.focused = focused
+            return observed
+
+    fresh = ResumedDevices()
     try:
         resumed = run_experiment(
             LearningContinue(root, live=True),
             learning_environment=learning_backend(drive, event, fresh),
         ).summary["learning_loop"]
-        assert resumed["stop_reason"] == "budget_completed", resumed
+        assert resumed["stop_reason"] == (
+            "evaluation_execution_stopped" if resume_fault else "budget_completed"
+        ), resumed
         assert resumed["learner_updates"] == 2 and resumed["rounds_completed"] == 1
         assert resumed["latest_learner"] == first["latest_learner"]
         assert all(sha(path) == digest for path, digest in retained.items())
-        assert len(fresh.worlds) == 2 and all(p.exploration_seed is None for p in fresh.plans)
+        assert not resumed["rounds"][0]["evaluation_interrupted_by_stop"]
+        assert not resumed["rounds"][0]["evaluation_interrupted_by_resource"]
+        assert len(fresh.worlds) == (1 if resume_fault else 2)
+        assert all(p.exploration_seed is None for p in fresh.plans)
         assert first["stop_reason"] == "stop_requested", first
     finally:
         fresh.cleanup()

@@ -971,6 +971,10 @@ class _Loop:
                 raise ValueError(
                     "Interrupted evaluation is retained; cannot overwrite its attempts"
                 )
+            # A stopped qualification did not execute the batch. Its old stop
+            # cannot classify a later, newly acquired evaluation's fault.
+            row["evaluation_interrupted_by_stop"] = False
+            row["evaluation_interrupted_by_resource"] = False
             source = self.acquire(
                 "evaluation", number, lambda: self.environment.evaluation(f"round-{number:03d}")
             )
