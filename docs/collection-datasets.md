@@ -69,4 +69,4 @@ uv run --locked fh5 collection-bc-assess --config configs/collection-assessment.
 
 `final` 报告标记 `selection_allowed: false`，没有训练更新或自动晋升。最终结果一旦被用于调参或补录选择，下一次独立结论必须使用新的未见留出；工具不提供跨项目的全局访问次数登记。离线动作误差不证明真实驾驶改善，合成模型继续保持 `diagnostic_only`。
 
-采集期间使用 [`collection-bc-train` 调度入口](learning-schedule.md)：CPU 小任务按采集健康和预算并行，CUDA 先采用交错基线，压力下暂停或有界退出。当前已经能在后台独立合成采集继续封存时，用固定快照完成 CPU 训练与加载回放；该原型不代表 4K 游戏负载通过。实际 4K 条件、共享资源预算与新人工多次驾驶仍按 #34/#37 验收。
+采集期间使用 [`collection-bc-train` 调度入口](learning-schedule.md)：在 `configs/collection-learning.example.json` 的 `training` 中直接填写上述训练参数，和采集绑定、资源预算一起保存，无需先建单独的训练配置文件。CPU 小任务按采集健康和预算并行，CUDA 先采用交错基线，压力下暂停或有界退出。当前已经能在后台独立合成采集继续封存时，用固定快照完成 CPU 训练与加载回放；该原型不代表 4K 游戏负载通过。实际 4K 条件、共享资源预算与新人工多次驾驶仍按 #34/#37 验收。

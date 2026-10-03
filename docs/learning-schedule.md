@@ -6,7 +6,9 @@
 uv run --locked fh5 collection-bc-train --config configs/collection-learning.example.json --output runs/scheduled-candidate-001
 ```
 
-将示例中的路径和 SHA-256 替换为实际值：`training_config` 使用现有 Temporal BC 配置；`collector_bundle` 指向 `collection-prepare` 生成的独立环境，哈希绑定其中 `frozen.json`。路径相对调度配置文件。输出必须是新目录，并位于输入数据集和采集环境之外。工作区后续修改不会改变已经封存的数据清单。
+v2 配置在 `training` 中直接填写数据集及其哈希、种子、更新步数、批量、学习率、设备和时间模式，与采集绑定和资源预算放在同一个文件中。无需再建立单独训练配置，也无需计算该配置文件的哈希。`collector_bundle` 指向 `collection-prepare` 生成的独立环境，哈希绑定其中 `frozen.json`。数据集和采集环境路径均相对于这份配置文件；数据与采集环境的完整性检查保留。输出必须是新目录，并位于输入数据集和采集环境之外。
+
+旧 v1 配置及已封存运行继续可读：读取时先验证 `training_config_sha256`，按旧训练文件的位置解析数据路径，再归一为同一 v2 结构。新运行只写出 v2。手动迁移时，将原训练文件内容放进 `training`，删除 `training_config` 与 `training_config_sha256`，并调整数据相对路径；旧配置和成果无需改写。
 
 ## 调度规则
 
@@ -37,7 +39,7 @@ session 写入、离线消费者及候选清单中的剩余限制仍列在资源
 `events_unverified` 表示已追加、但无法确认完整保存的条数。刷新失败时不能用“未遗漏”推断已保存。
 资源检查、停止请求和必要训练状态不依赖这份日志。未知诊断文本不进入此契约，错误的存在仍参与准入判断。
 
-`schedule.json` 记录等待、压力原因、已完成及已持久化更新数、最长工作单元、输入配置和候选哈希。`requested-training.json` 保留原训练配置字节，`requested-schedule.json` 保留原调度参数；`training.json` 固定解析后的数据路径，`schedule-config.json` 绑定这份训练配置与解析后的采集路径。保留这些产物及数据依赖后，可在新输出目录重跑冻结配置，工作区原配置的修改不影响它。CPU 数值 BC 另可通过[完整 learner 检查点](bc-resume.md)继续剩余更新。完整训练和重载验证结束后，才把 `.candidate` 发布为 `candidate/`，其中仍是标准 BC 模型和联动画面报告；随报告发布的预览使用相对链接。停止时不发布候选，可能留下 `.candidate` 诊断文件；它不是 learner 检查点，也不证明可以续训。
+`schedule.json` 记录等待、压力原因、已完成及已持久化更新数、最长工作单元、输入配置和候选哈希。`requested-schedule.json` 保留提交的调度配置；`schedule-config.json` 冻结归一后的 v2 参数与绝对路径，可直接在新目录重跑。`training.json` 是供既有数值 BC 学习器使用的内部训练输入，不再需要用户编写，也不再生成重复的 `requested-training.json`。工作区原配置的后续修改不影响冻结运行；原数据与采集环境仍须保留。CPU 数值 BC 另可通过[完整 learner 检查点](bc-resume.md)继续剩余更新。完整训练和重载验证结束后，才把 `.candidate` 发布为 `candidate/`，其中仍是标准 BC 模型和联动画面报告；随报告发布的预览使用相对链接。停止时不发布候选，可能留下 `.candidate` 诊断文件；它不是 learner 检查点，也不证明可以续训。
 
 CPU 恢复优先读取运行目录的 `learner/learner.json`，不要求 `schedule.json` 可读；训练和数据依赖仍须完整。只有没有发布新 learner 时，才通过调度报告定位仍有效的祖先检查点。`steps_completed` 与 `durable_steps_completed` 分别表示已计算和已封存更新，保存失败不得混同两者。调度报告写入发生 OS/内存错误时，返回摘要记录 `learning_schedule.schedule_report.status = unavailable`；已完成结果保持完成，`report_path` 指向已封存 learner。该错误状态只保证出现在返回摘要中。可选 loss 日志或累计统计缺失不阻止接续；不完整统计明确标记为 `partial`。
 

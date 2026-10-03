@@ -71,9 +71,19 @@ def resume_inputs(tmp_path):
     return schedule, dataset
 
 
-def test_scheduled_bc_pressure_stop_resumes_exact_remaining_updates_without_loss_journal(tmp_path):
+@pytest.mark.parametrize("sealed_schedule_version", [1, 2])
+def test_scheduled_bc_pressure_stop_resumes_exact_remaining_updates_without_loss_journal(
+    tmp_path, sealed_schedule_version
+):
     torch = pytest.importorskip("torch")
     schedule, dataset = resume_inputs(tmp_path)
+    options = json.loads(schedule.read_bytes())
+    training_path = Path(options.pop("training_config"))
+    options.pop("training_config_sha256")
+    options["version"] = 2
+    options["training"] = json.loads(training_path.read_bytes())
+    options["training"]["dataset"] = str(dataset.resolve())
+    schedule.write_text(json.dumps(options))
     reference = run_experiment(
         ScheduledBCTrain(schedule, tmp_path / "reference"), learning_resources=Resources()
     ).summary["learning_schedule"]
@@ -88,12 +98,28 @@ def test_scheduled_bc_pressure_stop_resumes_exact_remaining_updates_without_loss
     assert stopped["candidate"] is None
     parent = stopped["learner_checkpoint"]
     parent_dir = Path(parent["directory"])
+    frozen_schedule = tmp_path / "stopped/schedule-config.json"
+    if sealed_schedule_version == 1:
+        # An already sealed v1 run locates its training file relative to the
+        # schedule, then resolves the dataset relative to that training file.
+        legacy = json.loads(frozen_schedule.read_bytes())
+        legacy.pop("training")
+        legacy.update(
+            version=1,
+            training_config="training.json",
+            training_config_sha256=hashlib.sha256(
+                (tmp_path / "stopped/training.json").read_bytes()
+            ).hexdigest(),
+        )
+        frozen_schedule.write_text(json.dumps(legacy))
+    schedule.write_text("developer changed the original configuration")
     preserved = {
         path: hashlib.sha256(path.read_bytes()).hexdigest()
         for path in (
             parent_dir / "learner.json",
             parent_dir / "learner.pt",
             tmp_path / "stopped/schedule.json",
+            frozen_schedule,
         )
     }
     for journal in (tmp_path / "stopped").rglob("losses.jsonl"):
@@ -109,6 +135,7 @@ def test_scheduled_bc_pressure_stop_resumes_exact_remaining_updates_without_loss
     assert continued["state"] == "completed"
     assert continued["steps_completed"] == continued["durable_steps_completed"] == 6
     assert continued["steps_this_run"] == 4
+    assert json.loads((tmp_path / "continued/schedule-config.json").read_bytes())["version"] == 2
     assert (
         continued["learner_checkpoint"]["learner_state_sha256"]
         == reference["learner_checkpoint"]["learner_state_sha256"]

@@ -60,23 +60,21 @@ class TemporalBCReplay:
     device: str = "cpu"
 
 
-def _configuration(path: Path, *, expected_sha256: str | None = None) -> dict[str, Any]:
-    digest = sha256_file(path)
-    if expected_sha256 is not None and digest != expected_sha256:
-        raise ValueError("Frozen training configuration changed")
-    fields = {
-        "version",
-        "dataset",
-        "dataset_sha256",
-        "seed",
-        "steps",
-        "batch_size",
-        "learning_rate",
-        "device",
-        "time_mode",
-    }
-    value = read_document_fields(VerifiedFile(path, digest), fields, reject_unknown=True)
-    if set(value) != fields:
+_CONFIGURATION_FIELDS = {
+    "version",
+    "dataset",
+    "dataset_sha256",
+    "seed",
+    "steps",
+    "batch_size",
+    "learning_rate",
+    "device",
+    "time_mode",
+}
+
+
+def _checked_configuration(value: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != _CONFIGURATION_FIELDS:
         raise ValueError("Unsupported temporal training config")
     legacy = {k: v for k, v in value.items() if k not in ("time_mode", "dataset_sha256")}
     _checked_config(dict(legacy, image_size=[64, 36]))
@@ -87,6 +85,16 @@ def _configuration(path: Path, *, expected_sha256: str | None = None) -> dict[st
     ):
         raise ValueError("Invalid time mode or frozen dataset hash")
     return value
+
+
+def _configuration(path: Path, *, expected_sha256: str | None = None) -> dict[str, Any]:
+    digest = sha256_file(path)
+    if expected_sha256 is not None and digest != expected_sha256:
+        raise ValueError("Frozen training configuration changed")
+    value = read_document_fields(
+        VerifiedFile(path, digest), _CONFIGURATION_FIELDS, reject_unknown=True
+    )
+    return _checked_configuration(value)
 
 
 def run_temporal_bc(
