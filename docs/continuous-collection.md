@@ -10,18 +10,22 @@
 在开发仓库执行准备命令。它复制当前源文件、锁文件、配置和已校准输入档案，通过 `uv sync --locked --no-dev --no-editable --link-mode copy` 安装独立依赖；不打开采集设备。原配置与源码以后改变，不影响已经准备好的副本。记录实际 Python 基础运行时路径/版本和包版本；基础 Python 与 Windows 系统库仍属于机器运行环境，第三方包和项目代码独立复制。
 
 ```powershell
-uv run --locked fh5 collection-prepare --capture-config configs/capture-dxgi.example.json --input-profile runs/t27-demo-a-20260929/input-profile.json --output runs/collector-001
-uv run --locked fh5 collection-start runs/collector-001 --live
-uv run --locked fh5 collection-status runs/collector-001
-uv run --locked fh5 collection-stop runs/collector-001
-uv run --locked fh5 collection-review runs/collector-001/recording --report runs/collector-001-reviewed.html
+uv run --locked fh5 collection-prepare --capture-config configs/capture-dxgi.example.json --input-profile runs/t27-demo-a-20260929/input-profile.json --output runs/collector
+uv run --locked fh5 collection-start runs/collector --output runs/collection-001 --live
+uv run --locked fh5 collection-status runs/collection-001
+uv run --locked fh5 collection-stop runs/collection-001
+uv run --locked fh5 collection-review runs/collection-001/recording --report runs/collection-001-reviewed.html
+# 上一轮停止后，复用相同安装；无需再次准备或安装依赖。
+uv run --locked fh5 collection-start runs/collector --output runs/collection-002 --live
 ```
 
 输入档案必须是已核验的真实档案；命令中的路径是本机现有实例。可用 `--uv` 指定 uv，`--offline` 只使用已缓存依赖，`--seconds` 调整采集时长。默认 4 小时；准备失败保留 `install.log`/失败原因，不把半成品当可启动环境。
 
-每个 bundle 只启动一次，重新采集准备新目录，不覆盖旧证据。新版 v2 清单只绑定实际安装的 `fh5` 包（包括包内已有字节码）及 `capture.json`、`input-profile.json`；不遍历第三方安装目录或无关缓存。启动前核对采集包和两份输入，子进程只复核输入及启动身份，不重复扫描代码。`software_snapshot_verified` 表示这项绑定成立，不代表整个 Python 环境的文件内容证明。独立、非 editable 的复制安装继续隔离开发修改；冻结副本运行期间不手动修改代码或同步依赖。来源复制和哈希使用文件流，不以文件数量、文件大小或安装耗时的任意上限拒绝准备。
+新准备的 v3 采集包固定安装位置，每次 `collection-start --output` 只创建本轮目录并复制冻结清单，复用原安装。每轮的启动 token、进程状态、日志、停止请求和 `recording/` 各自独立；状态、停止及后台学习的 `collector_bundle` 都指向本轮输出目录。输出目录必须尚不存在，且不能放入冻结的 `project/`；没有“当前运行”指针或自动轮转。更换代码、依赖、采集条件或输入档案时才在新目录重新准备安装。安装保留在原位置供后续启动使用，已有录制仍可独立回放。
 
-旧 v1 的已准备 bundle 需用当前 `collection-prepare` 在新目录重新准备；原 bundle、已经运行的进程及已有录制不改写，录制仍可回放和准备数据集。Windows 使用隐藏的独立进程，标准输入关闭，日志写入本目录；不依赖启动命令或聊天回合保持运行。状态查询继续核对启动 token、PID 和创建时间，区分启动器与实际 worker。无法核对时报告 unknown；异常退出且缺少最终状态会标为 interrupted，不自动覆盖记录。
+清单只绑定实际安装的 `fh5` 包（包括包内已有字节码）及 `capture.json`、`input-profile.json`；不遍历第三方安装目录或无关缓存。启动前核对采集包和两份输入，子进程只复核输入及启动身份，不重复扫描代码。`software_snapshot_verified` 表示这项绑定成立，不代表整个 Python 环境的文件内容证明。独立、非 editable 的复制安装继续隔离开发修改；冻结副本运行期间不手动修改代码或同步依赖。来源复制和哈希使用文件流，不以文件数量、文件大小或安装耗时的任意上限拒绝准备。
+
+省略 `--output` 仍按旧用法在采集包内录制一次，不覆盖旧证据。已准备的 v2 包继续支持这种启动方式；它的冻结 worker 不认识独立输出目录，需用当前版本重新准备一次才能复用安装。旧 v1 包也需在新目录重新准备。原包、已经运行的进程及已有录制不改写，录制仍可回放和准备数据集。Windows 使用隐藏的独立进程，标准输入关闭，日志写入本轮目录；不依赖启动命令或聊天回合保持运行。状态查询继续核对启动 token、PID 和创建时间，区分启动器与实际 worker。无法核对时报告 unknown；异常退出且缺少最终状态会标为 interrupted，不自动覆盖记录。
 
 正常开发继续在原仓库和原 `.venv` 中进行；冻结副本采集期间不修改或同步依赖。纯软件诊断可在准备时加 `--source synthetic --seconds 15`，随后启动不加 `--live`；它仅生成合成数据，最多 60 秒，不打开屏幕、UDP 或手柄，不是训练示范。
 

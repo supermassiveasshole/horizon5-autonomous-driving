@@ -79,7 +79,7 @@ uv run --locked fh5 observe runs/vision-001 --config configs/observations-naviga
 
 ## 人工同步示范
 
-#37 新增[持续被动采集](docs/continuous-collection.md)：冻结代码/依赖后独立后台运行，支持状态、停止与已封存数据恢复。原生 DXGI/UDP/XInput 组合使用数值像素；后台生命周期已用合成输入验证，真实多次驾驶与 4K 性能仍待验收。
+#37 的[持续被动采集](docs/continuous-collection.md)只需准备一次冻结安装，之后用 `fh5 collection-start runs/collector --output runs/collection-001 --live` 启动；下一轮换输出目录即可，不重复安装依赖。状态查询、停止及学习调度指向本轮目录，旧记录保留。原生 DXGI/UDP/XInput 组合使用数值像素；后台生命周期已用合成输入验证，真实多次驾驶与 4K 性能仍待验收。
 
 #38 的[数据快照](docs/collection-datasets.md)已接入封存来源筛选、关联尝试分组、数值 Δt BC 训练与冻结留出评估；采集继续追加时固定选择不变。[采集优先的学习调度](docs/learning-schedule.md)已完成合成进程验证；真实新数据、4K 游戏负载与驾驶效果仍待验收。
 

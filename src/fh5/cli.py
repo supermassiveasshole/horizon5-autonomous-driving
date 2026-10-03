@@ -311,6 +311,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     prepare.add_argument("--offline", action="store_true")
     start = commands.add_parser("collection-start", help="Start the frozen independent collector")
     start.add_argument("bundle", type=Path)
+    start.add_argument(
+        "--output", type=Path, help="New recording directory; reuse the frozen install"
+    )
     start.add_argument("--live", action="store_true")
     dataset = commands.add_parser(
         "collection-dataset", help="Retired: use collection-bc-prepare with a v2 configuration"
@@ -621,7 +624,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.mode == "collection-start":
             from fh5.collection_process import CollectionStart
 
-            started = run_experiment(CollectionStart(args.bundle, live=args.live))
+            started = run_experiment(
+                CollectionStart(args.bundle, live=args.live, output_dir=args.output)
+            )
             print(json.dumps(started.summary["collection"]))
             return 0
         if args.mode == "collection-dataset":

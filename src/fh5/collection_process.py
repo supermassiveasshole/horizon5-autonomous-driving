@@ -45,6 +45,7 @@ class CollectionPrepare:
 class CollectionStart:
     bundle: Path
     live: bool = False
+    output_dir: Path | None = None
 
 
 def bundle_python(project: Path) -> Path:
@@ -168,8 +169,9 @@ def prepare_collection(
             raise ValueError("Collector package resolved outside its isolated environment")
         package = Path(runtime["package"]).resolve().parent
         manifest = {
-            "version": 2,
-            "kind": "frozen-passive-collection-v2",
+            "version": 3,
+            "kind": "frozen-passive-collection-v3",
+            "project": str(project),
             "source": request.source,
             "port": request.port,
             "collection": {**asdict(request.config), "pixels": request.config.pixels.metadata()},
@@ -191,20 +193,27 @@ def prepare_collection(
     )
 
 
+def collector_project(root: Path, manifest: dict[str, Any]) -> Path:
+    """Resolve the fixed installation independently of a recording's output directory."""
+    if manifest["version"] == 2:
+        return root / "project"
+    project = Path(manifest["project"])
+    if not project.is_absolute():
+        raise ValueError("Frozen collector installation requires an absolute project path")
+    return project
+
+
 def read_bundle(root: Path) -> tuple[dict[str, Any], str]:
     """Read the launch identity and verify the two inputs before opening devices."""
     payload = (root / "frozen.json").read_bytes()
     manifest = json.loads(payload)
-    if (
-        manifest.get("kind") != "frozen-passive-collection-v2"
-        or manifest.get("version") != 2
-        or manifest.get("commands_sent") is not False
-    ):
+    if (manifest.get("version"), manifest.get("kind")) not in (
+        (2, "frozen-passive-collection-v2"),
+        (3, "frozen-passive-collection-v3"),
+    ) or manifest.get("commands_sent") is not False:
         raise ValueError("Unsupported collector bundle; run collection-prepare in a new directory")
-    inputs = {
-        name: sha256_file(root / "project" / name)
-        for name in ("capture.json", "input-profile.json")
-    }
+    project = collector_project(root, manifest)
+    inputs = {name: sha256_file(project / name) for name in ("capture.json", "input-profile.json")}
     if inputs != manifest["inputs"]:
         raise ValueError("Frozen collector input snapshot changed")
     return manifest, hashlib.sha256(payload).hexdigest()
@@ -213,7 +222,7 @@ def read_bundle(root: Path) -> tuple[dict[str, Any], str]:
 def verify_bundle(root: Path) -> tuple[dict[str, Any], str]:
     """Check the installed collector once at launch; dependencies stay isolated by copy."""
     manifest, digest = read_bundle(root)
-    project = (root / "project").resolve()
+    project = collector_project(root, manifest).resolve()
     package = (project / manifest["collector_package"]).resolve()
     if (
         not package.is_relative_to(project / ".venv")
@@ -226,12 +235,21 @@ def verify_bundle(root: Path) -> tuple[dict[str, Any], str]:
 def start_collection(request: CollectionStart) -> RunResult:
     from fh5.experiment import RunResult
 
-    root = request.bundle.resolve()
-    manifest, digest = verify_bundle(root)
+    bundle = request.bundle.resolve()
+    manifest, digest = verify_bundle(bundle)
     if manifest["source"] == "native" and not request.live:
         raise ValueError("Native collection requires explicit --live; preparation opens no devices")
     if manifest["source"] == "native" and manifest["installer"] != "uv_locked_copy":
         raise ValueError("Native collection requires locked, independently installed dependencies")
+    project = collector_project(bundle, manifest).resolve()
+    root = request.output_dir.resolve() if request.output_dir is not None else bundle
+    if root != bundle:
+        if manifest["version"] == 2:
+            raise ValueError("Separate output requires a new collection-prepare installation")
+        if root.is_relative_to(project):
+            raise ValueError("Collection output must be outside the frozen installation")
+        root.mkdir(parents=True, exist_ok=False)
+        shutil.copyfile(bundle / "frozen.json", root / "frozen.json")
     if (root / "recording").exists():
         raise FileExistsError(root / "recording")
     token = uuid.uuid4().hex
@@ -241,7 +259,7 @@ def start_collection(request: CollectionStart) -> RunResult:
         with (root / "worker.log").open("xb") as log:
             process = subprocess.Popen(
                 [
-                    str(bundle_python(root / "project")),
+                    str(bundle_python(project)),
                     "-I",
                     "-B",
                     "-m",

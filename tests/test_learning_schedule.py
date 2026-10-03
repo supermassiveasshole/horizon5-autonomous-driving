@@ -470,8 +470,9 @@ def test_scheduler_binds_actual_collector_session_and_worker_to_its_manifest(tmp
     config, _, _ = configuration(tmp_path)
     folder = tmp_path / "collector"
     folder.mkdir()
-    bundle, _, _ = prepare(folder, seconds=2)
-    run_experiment(CollectionStart(bundle))
+    installation, _, _ = prepare(folder, seconds=2)
+    bundle = folder / "recording-run"
+    run_experiment(CollectionStart(installation, output_dir=bundle))
     status = {}
     try:
         deadline = time.monotonic() + 12
