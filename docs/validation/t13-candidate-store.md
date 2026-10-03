@@ -49,4 +49,6 @@ Standards 初审：0 项硬性违反、1 项非阻塞重复发布逻辑建议，
 
 计时条件下组合 **39 passed / 1 failed / 170.49 秒**（`runs/native-store-timed.xml`）：原生及终点测试通过，已有 CLI 多进程测试在重放一个量化动作时拒绝原件。父测试为单 CPU 线程，独立 CLI 默认实际为 24 线程；同一份失败原件在 CLI 使用 `OMP_NUM_THREADS=1` / `MKL_NUM_THREADS=1` 后通过，没有改写原件或增大重放容差（输出 `runs/native-store-cli-same-threads.json`）。该测试现显式对齐记录和重放的 CPU 线程条件；生产中跨线程配置的精确重放兼容性仍需独立处理。
 
+最终相关组合 **40 passed / 175.29 秒**（`runs/native-store-reviewed.xml`），包含原生/合成版本库、原生 SAC 评估及只读观测模型，采用上述计时与线程条件。不是整仓回归。独立 Standards 复审随后指出候选录制 fixture 的单线程状态仍依赖其他模块；已在 fixture 内明确设置，并在结束时恢复先前线程数，使 CLI 单独运行也使用同一条件。此修正只改变测试准备，不改变生产来源、资格或重放容差。
+
 没有启动 FH5、Steam、真实 DXGI、手柄或 CUDA。`default_changed`、`real_driving_validated` 保持 false；#14 实机验收和 #15 原生连续调度仍未完成。

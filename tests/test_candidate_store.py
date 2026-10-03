@@ -23,8 +23,15 @@ from fh5.sac_learning import SACTrain
 
 @pytest.fixture(scope="module")
 def candidates(tmp_path_factory):
+    import torch
+
     root = tmp_path_factory.mktemp("persistent-candidates")
-    return candidate_setup(root)
+    previous_threads = torch.get_num_threads()
+    torch.set_num_threads(1)
+    try:
+        yield candidate_setup(root)
+    finally:
+        torch.set_num_threads(previous_threads)
 
 
 def candidate_setup(root, *, candidate_steps=30):
