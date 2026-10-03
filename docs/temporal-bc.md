@@ -10,13 +10,12 @@ uv run --locked fh5 temporal-train --config runs/temporal-train.json --output ru
 uv run --locked fh5 temporal-replay --model runs/temporal-model --dataset runs/temporal-prepared/dataset.json --report runs/temporal-reloaded.html
 ```
 
-需要 `learning` 可选依赖。输出目录必须不存在。准备命令返回冻结 `dataset.json` 的 SHA-256；将它填入训练配置，数据路径相对该配置文件：
+需要 `learning` 可选依赖。输出目录必须不存在。训练配置只需指定准备好的 `dataset.json`，路径相对配置文件。启动时按块计算其 SHA-256 并冻结到模型配置，无需手工复制摘要：
 
 ```json
 {
   "version": 1,
   "dataset": "temporal-prepared/dataset.json",
-  "dataset_sha256": "替换为准备命令返回的64位摘要",
   "seed": 20260930,
   "steps": 200,
   "batch_size": 32,
@@ -25,6 +24,8 @@ uv run --locked fh5 temporal-replay --model runs/temporal-model --dataset runs/t
   "time_mode": "actual"
 }
 ```
+
+如需预先指定某一份快照，仍可填写 `dataset_sha256`；显式值必须匹配，错误值不会自动更新。模型、内部训练配置和续训检查点始终保存完整摘要，后续数据变化仍拒绝回放或续训。原始用户配置不改写。
 
 固定时间对照仅把 `time_mode` 改为 `fixed`，保留种子、步骤、批量、数据与结构。权重取固定最后一步，不依据留出误差选模型。CPU 使用 `device: cpu`。负面结果仍保存，不注入最低油门或修改预测幅度。
 

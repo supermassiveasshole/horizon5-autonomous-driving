@@ -83,7 +83,7 @@ uv run --locked fh5 observe runs/vision-001 --config configs/observations-naviga
 
 #38 的[数据快照](docs/collection-datasets.md)已接入封存来源筛选、关联尝试分组、数值 Δt BC 训练与冻结留出评估；采集继续追加时固定选择不变。[采集优先的学习调度](docs/learning-schedule.md)已完成合成进程验证；真实新数据、4K 游戏负载与驾驶效果仍待验收。
 
-后台训练使用 `fh5 collection-bc-train --config configs/collection-learning.example.json --output runs/scheduled-candidate-001`。v2 配置将训练参数、采集绑定和资源预算放在同一文件，不再手工维护第二份训练配置及其哈希；旧封存运行仍能重跑和续训。
+后台训练使用 `fh5 collection-bc-train --config configs/collection-learning.example.json --output runs/scheduled-candidate-001`。v2 配置将训练参数、采集绑定和资源预算放在同一文件，不再手工维护第二份训练配置及其哈希。训练只需指定数据集路径，省略的数据摘要由程序计算并冻结；显式摘要和续训绑定仍严格核验，旧封存运行仍能重跑和续训。
 
 准备新采集数据统一使用 `fh5 collection-bc-prepare --config configs/collection-bc.example.json --output runs/numeric-candidate`。v2 配置合并来源、筛选规则和观测设置，一次生成 `selection.json`、训练/开发 `dataset.json` 与独立 `evaluation.json`；质量核验和尝试分组仍由用户决定。旧 `collection-dataset` 创建入口及独立的 v1 准备配置已退役，旧选择文件继续通过 `collection-dataset-review` 离线复核。后续 `temporal-train` 的训练参数和恢复方式不变，见[准备与迁移说明](docs/collection-datasets.md)。
 

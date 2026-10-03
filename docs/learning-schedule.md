@@ -6,9 +6,9 @@
 uv run --locked fh5 collection-bc-train --config configs/collection-learning.example.json --output runs/scheduled-candidate-001
 ```
 
-v2 配置在 `training` 中直接填写数据集及其哈希、种子、更新步数、批量、学习率、设备和时间模式，与采集绑定和资源预算放在同一个文件中。无需再建立单独训练配置，也无需计算该配置文件的哈希。`collector_bundle` 指向 `collection-prepare` 生成的独立环境，哈希绑定其中 `frozen.json`。数据集和采集环境路径均相对于这份配置文件；数据与采集环境的完整性检查保留。输出必须是新目录，并位于输入数据集和采集环境之外。
+v2 配置在 `training` 中直接填写数据集路径、种子、更新步数、批量、学习率、设备和时间模式，与采集绑定和资源预算放在同一个文件中。无需单独训练配置或手工计算数据集摘要；省略 `dataset_sha256` 时，启动阶段自动计算并冻结。显式提供的摘要仍须严格匹配。`collector_bundle` 指向 `collection-prepare` 生成的独立环境，哈希绑定其中 `frozen.json`。数据集和采集环境路径均相对于这份配置文件；数据与采集环境的完整性检查保留。输出必须是新目录，并位于输入数据集和采集环境之外。
 
-旧 v1 配置及已封存运行继续可读：读取时先验证 `training_config_sha256`，按旧训练文件的位置解析数据路径，再归一为同一 v2 结构。新运行只写出 v2。手动迁移时，将原训练文件内容放进 `training`，删除 `training_config` 与 `training_config_sha256`，并调整数据相对路径；旧配置和成果无需改写。
+旧 v1 配置及已封存运行继续可读：读取时先验证 `training_config_sha256`，按旧训练文件的位置解析数据路径，再归一为同一 v2 结构。新运行只写出 v2，封存配置和 learner 始终包含实际数据摘要；继续训练使用该绑定，不能因原请求省略摘要而接受变化后的数据。手动迁移时，将原训练文件内容放进 `training`，删除 `training_config` 与 `training_config_sha256`，并调整数据相对路径；旧配置和成果无需改写。
 
 ## 调度规则
 

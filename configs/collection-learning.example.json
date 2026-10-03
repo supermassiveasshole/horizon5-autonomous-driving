@@ -3,7 +3,6 @@
   "training": {
     "version": 1,
     "dataset": "../runs/numeric-candidate/dataset.json",
-    "dataset_sha256": "REPLACE_WITH_NUMERIC_DATASET_SHA256",
     "seed": 7,
     "steps": 200,
     "batch_size": 8,

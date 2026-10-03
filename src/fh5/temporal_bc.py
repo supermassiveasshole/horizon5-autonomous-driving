@@ -73,11 +73,18 @@ _CONFIGURATION_FIELDS = {
 }
 
 
-def _checked_configuration(value: dict[str, Any]) -> dict[str, Any]:
-    if not isinstance(value, dict) or set(value) != _CONFIGURATION_FIELDS:
+def _checked_configuration(value: dict[str, Any], base: Path) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) - {"dataset_sha256"} != _CONFIGURATION_FIELDS - {
+        "dataset_sha256"
+    }:
         raise ValueError("Unsupported temporal training config")
     legacy = {k: v for k, v in value.items() if k not in ("time_mode", "dataset_sha256")}
     _checked_config(dict(legacy, image_size=[64, 36]))
+    value = dict(value)
+    if "dataset_sha256" not in value:
+        # Bind the selected snapshot once; persisted configs always carry it.
+        # A supplied hash remains an assertion, never silently refreshed.
+        value["dataset_sha256"] = sha256_file(base / value["dataset"])
     if (
         value["time_mode"] not in ("actual", "fixed")
         or not isinstance(value["dataset_sha256"], str)
@@ -94,7 +101,7 @@ def _configuration(path: Path, *, expected_sha256: str | None = None) -> dict[st
     value = read_document_fields(
         VerifiedFile(path, digest), _CONFIGURATION_FIELDS, reject_unknown=True
     )
-    return _checked_configuration(value)
+    return _checked_configuration(value, path.parent)
 
 
 def run_temporal_bc(

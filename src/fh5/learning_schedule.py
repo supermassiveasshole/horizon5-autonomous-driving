@@ -123,7 +123,7 @@ def _configuration_schedule(source: VerifiedFile) -> dict[str, Any]:
         training = _configuration(training_path, expected_sha256=config["training_config_sha256"])
         training_base = training_path.parent
     else:
-        training = _checked_configuration(config["training"])
+        training = _checked_configuration(config["training"], source.path.parent)
         training_base = source.path.parent
     return {
         **{key: config[key] for key in shared_fields},
