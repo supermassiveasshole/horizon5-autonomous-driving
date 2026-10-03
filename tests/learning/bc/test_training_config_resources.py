@@ -23,9 +23,16 @@ def preparation_config(tmp_path, **kwargs):
     return write_config(
         tmp_path / "prepare.json",
         {
-            "version": 1,
-            "dataset": "missing-selection.json",
-            "dataset_sha256": "0" * 64,
+            "version": 2,
+            "seed": 7,
+            "sources": [{"recording": "missing-recording", "review": "missing-review.json"}],
+            "rules": {
+                "max_samples_per_attempt": 100,
+                "speed_range_mps": [0, 100],
+                "steering_limit": 1.0,
+                "longitudinal_limit": 1.0,
+                "max_label_delay_ms": 50,
+            },
             "action_history_offsets_ms": [100, 50, 0],
             "max_action_age_ms": 100,
             "waypoint_distances_m": [5, 10, 20],
@@ -133,7 +140,7 @@ def test_large_preparation_config_reaches_dataset_validation_without_retention(t
         peak = tracemalloc.get_traced_memory()[1]
     finally:
         tracemalloc.stop()
-    assert missing.value.filename == str(tmp_path / "missing-selection.json")
+    assert missing.value.filename == str(tmp_path / "missing-recording/session.json")
     assert peak < config.stat().st_size
     assert not output.exists()
 
@@ -194,14 +201,16 @@ def test_training_configuration_rejects_unknown_or_malformed_fields(tmp_path, ki
 
 @pytest.mark.parametrize("kind", ["preparation", "schedule", "training"])
 def test_training_configuration_keeps_last_duplicate_field_value(tmp_path, kind):
-    _, request = configuration_request(kind, tmp_path, extra=b',"version":0,"version":1')
+    version = 2 if kind == "preparation" else 1
+    extra = f',"version":0,"version":{version}'.encode()
+    _, request = configuration_request(kind, tmp_path, extra=extra)
     if kind == "training":
         result = run_experiment(request, learning_resources=InterruptedResources())
         assert result.summary["learning_schedule"]["stop_reason"] == "interrupted"
     else:
         with pytest.raises(FileNotFoundError) as missing:
             run_experiment(request)
-        filename = "missing-selection.json" if kind == "preparation" else "train.json"
+        filename = "missing-recording/session.json" if kind == "preparation" else "train.json"
         assert missing.value.filename == str(tmp_path / filename)
 
 
@@ -213,7 +222,8 @@ def test_training_configuration_requires_every_schema_field(tmp_path, kind):
     write_config(config, settings)
     if kind == "training":
         bind_training(request.config_file, config)
-    with pytest.raises(ValueError, match="Unsupported"):
+    message = "Collection BC preparation requires v2" if kind == "preparation" else "Unsupported"
+    with pytest.raises(ValueError, match=message):
         run_experiment(request, learning_resources=InterruptedResources())
     assert not request.output_dir.exists()
 
@@ -224,8 +234,11 @@ def test_training_configuration_rejects_changed_private_bytes(
 ):
     config, request = configuration_request(kind, tmp_path)
     original = config.read_bytes()
-    with corrupt_private_reads(config, b'"version": 1', b'"version": 9') as changed:
-        with pytest.raises(ValueError, match="changed"):
+    version = 2 if kind == "preparation" else 1
+    with corrupt_private_reads(
+        config, f'"version": {version}'.encode(), b'"version": 9'
+    ) as changed:
+        with pytest.raises(ValueError, match="Artifact hash mismatch"):
             run_experiment(request, learning_resources=InterruptedResources())
     assert changed
     assert config.read_bytes() == original
