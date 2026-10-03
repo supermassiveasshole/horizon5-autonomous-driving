@@ -131,8 +131,9 @@ run_experiment(
 
 `SACRealtimeCycle` 将上述异步运行、独立经验审核和续训接成有界循环。
 它复用 `RealtimeRun` 的采集、推理、动作租期及旁路存档；学习只在采样资源全部释放之后进行。
-当前使用实际 CPU SAC 和合成外部 I/O；[连续学习循环](learning-loop.md)版本 3 已接入异步采样、
-冻结评估、保存与封存结果恢复。原生 SAC 资格仍未接入。
+当前使用实际 CPU SAC，可选择合成外部 I/O 或下述显式授权的原生采样适配器。
+[连续学习循环](learning-loop.md)版本 3 已接入异步采样、冻结评估、保存与封存结果恢复，
+但该上层调度与恢复仍限合成环境，不因独立原生采样入口开放而自动放开。
 
 ```python
 from fh5.realtime import RealtimeConfig
@@ -156,14 +157,29 @@ result = run_experiment(
 ```
 
 示例中的像素、历史长度、参考槽位及动作幅度必须与实际检查点一致；不一致时在取得输入设备前拒绝。
-`SACRealtimeEnvironment.start(identity, runtime)` 返回一次新的 `RealtimeEnvironment`；
-它须准备新的观测/控制历史并对命令产生合成反馈。`finish(recording_dir)` 在该次运行器资源全部释放后
+`SACRealtimeEnvironment.start(SACRealtimeStart(...))` 返回一次新的 `RealtimeEnvironment`；
+参数包含本轮 identity、`RealtimeRun`、冻结检查点及摘要、探索种子、录制/任务配置与停止回调。
+适配器须准备新的观测与控制历史。`finish(recording_dir)` 在该次运行器资源全部释放后
 返回独立核验文件或 `None`，`close()` 释放环境级资源。适配器示例见 `tests/test_sac_realtime_cycle.py`。
+
+原生入口使用 `fh5.sac_native.NativeSACSamplingEnvironment(configuration, event_config,
+shadow_seconds=..., handoff_timeout_s=..., review=...)`，并在 `SACRealtimeCycle` 中显式设置
+`live=True`。影子时长和交接期限由实验明确提供；默认 `initial_operation="restart_ready"`，
+首次位于赛前菜单时可选 `start_ready`，后续一律重开。未启用 live 不打开资源。
+适配器先核对原任务路线、运行契约、车型以及录制/菜单条件；每轮为当前候选及种子重新执行只读
+shadow，释放采集资源并通过既有资格检查后，才操作菜单。菜单释放并确认停车后，复用
+`ReadyHandoff` 与受保护数值驾驶入口；租期、F8、失焦和停止回调保持有效。
+
+`review` 仍是独立观察者返回证据文件的接口，不是自动生成有效性标签的开关。未提供或返回
+`None` 时，采样原件保留，经验审核不给有效奖励，循环停止学习。本切片没有自动视觉违规审核器；
+模拟外设测试只验证新候选、新影子、重开、释放与真实 CPU 学习的衔接，不证明 FH5 实际驾驶收益。
 
 每次执行保存完整命令/数值图像记录及原始遥测，封存来源后生成 v3 replay。
 一次学习的 critic 更新数不超过新接纳转移数和 `max_updates_per_attempt` 两者中的较小值。
 候选完整保存、重载且预测核验通过后，下一次尝试才换用其冻结快照；父模型和可靠默认版本不变。
-当前最多 10 次尝试、每次 600 秒，并受已有图像和经验容量限制；这些是软件上限，不是实机资格。
+异步尝试轮数与每轮更新数使用调用者指定的正整数预算，不再叠加 10 轮、1000 次更新或预测总帧
+512 MiB 的拒绝门槛。原生单次驾驶仍沿用现有最多 30 秒的控制范围；实际图像存档使用运行器的
+明确预算，其他既有存储边界并未在本切片全量清理。
 
 外部停止、`stop.request` 或停止回调会阻止后续采样和学习；发送失败、释放未确认、无合格经验同样停止循环，
 保留已启动尝试。环境级关闭成功不能覆盖某次运行的释放失败。故障记录不会生成驾驶进步结论。

@@ -42,7 +42,7 @@ class AsyncEnvironment:
         self.root, self.games, self.closed = root, [], False
         self.game_type = game_type
 
-    def start(self, identity, runtime):
+    def start(self, attempt):
         assert all(game.closed for game in self.games)
         if self.games:
             # External acquisition observes a sealed new candidate before reuse.
@@ -264,3 +264,15 @@ def test_stop_arriving_during_checkpoint_load_prevents_new_input_acquisition(
     assert result["stop_reason"] == "stop_requested", result
     assert environment.games == [] and result["attempts"] == []
     assert result["resources_released"] and environment.closed
+
+
+def test_configured_budgets_have_no_unrelated_attempt_or_update_ceiling(tmp_path, sac_policy):
+    settings = replace(request(tmp_path, sac_policy), cycles=11, max_updates_per_attempt=1001)
+    environment = AsyncEnvironment(settings.output_dir)
+    result = run_experiment(
+        settings, sac_realtime_environment=environment, sac_stop_requested=lambda _: True
+    ).summary["sac_cycle"]
+    assert result["stop_reason"] == "stop_requested", result
+    assert not environment.games and result["resources_released"]
+    protocol = json.loads((settings.output_dir / "protocol.json").read_bytes())
+    assert protocol["cycles"] == 11 and protocol["max_updates_per_attempt"] == 1001

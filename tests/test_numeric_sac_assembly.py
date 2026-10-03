@@ -143,8 +143,9 @@ class AdapterAttempt:
         self.closed = False
         self.reviewed_after_release = False
 
-    def start(self, identity, runtime):
+    def start(self, attempt):
         assert self.world is None, "The tracer requests exactly one attempt"
+        runtime = attempt.request.config
         receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         receiver.bind(("127.0.0.1", 0))
         self.world = ExternalWorld(receiver.getsockname())
