@@ -38,7 +38,7 @@ class ScheduledBCTrain:
 class ScheduledBCResume:
     run_dir: Path
     output_dir: Path
-    expected_checkpoint_sha256: str
+    expected_checkpoint_sha256: str | None = None
 
 
 class LearningResources(Protocol):
@@ -356,6 +356,7 @@ def run_scheduled_bc(
         if request.output_dir.resolve().is_relative_to(request.run_dir.resolve()):
             raise ValueError("BC continuation output must be outside its parent run")
         checkpoint_root = request.run_dir / "learner"
+        expected = request.expected_checkpoint_sha256
         if not (checkpoint_root / "learner.json").is_file():
             # Runs stopped before a new seal can still refer to their durable
             # ancestor. A newly sealed learner never depends on this report,
@@ -366,16 +367,20 @@ def run_scheduled_bc(
             ).get("learner_checkpoint")
             if (
                 not isinstance(previous, dict)
-                or previous.get("manifest_sha256") != request.expected_checkpoint_sha256
+                or not isinstance(previous.get("manifest_sha256"), str)
+                or (expected is not None and previous["manifest_sha256"] != expected)
             ):
                 raise ValueError("Scheduled BC run has no matching durable learner checkpoint")
             checkpoint_root = Path(previous["directory"])
+            expected = previous["manifest_sha256"]
+        elif expected is None:
+            expected = sha256_file(checkpoint_root / "learner.json")
         if request.output_dir.resolve().is_relative_to(checkpoint_root.resolve()):
             raise ValueError("BC continuation output must be outside its parent checkpoint")
         parent = read_bc_checkpoint(
             importlib.import_module("torch"),
             checkpoint_root,
-            expected_sha256=request.expected_checkpoint_sha256,
+            expected_sha256=expected,
             cpu_threads=config["budget"]["cpu_threads"],
         )
         effective = dict(training, dataset=str(dataset))

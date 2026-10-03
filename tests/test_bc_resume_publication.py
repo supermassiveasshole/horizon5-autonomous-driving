@@ -75,7 +75,6 @@ def test_published_bc_learner_resumes_without_a_readable_schedule_report(
     manifest_path = parent / "learner/learner.json"
     manifest = json.loads(manifest_path.read_bytes())
     assert manifest["steps_completed"] == 3
-    expected = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
     assert (parent / "candidate").is_dir()
     if report_state == "truncated":
         (parent / "schedule.json").write_bytes(b'{"unfinished":')
@@ -86,7 +85,7 @@ def test_published_bc_learner_resumes_without_a_readable_schedule_report(
     from fh5.learning_schedule import ScheduledBCResume
 
     continued = run_experiment(
-        ScheduledBCResume(parent, tmp_path / "continued", expected),
+        ScheduledBCResume(parent, tmp_path / "continued"),
         learning_resources=Resources(),
     ).summary["learning_schedule"]
     assert continued["state"] == "completed"

@@ -169,12 +169,22 @@ def test_scheduled_bc_pressure_stop_resumes_exact_remaining_updates_without_loss
             dataset.write_bytes(original_dataset)
 
     continued = run_experiment(
-        ScheduledBCResume(tmp_path / "stopped", tmp_path / "continued", parent["manifest_sha256"]),
+        ScheduledBCResume(
+            tmp_path / "stopped",
+            tmp_path / "continued",
+            parent["manifest_sha256"] if sealed_schedule_version == 1 else None,
+        ),
         learning_resources=Resources(),
     ).summary["learning_schedule"]
     assert continued["state"] == "completed"
     assert continued["steps_completed"] == continued["durable_steps_completed"] == 6
     assert continued["steps_this_run"] == 4
+    assert (
+        json.loads((tmp_path / "continued/learner/learner.json").read_bytes())[
+            "parent_checkpoint_sha256"
+        ]
+        == parent["manifest_sha256"]
+    )
     assert json.loads((tmp_path / "continued/schedule-config.json").read_bytes())["version"] == 2
     assert continued["config"]["training"]["dataset_sha256"] == dataset_sha256
     assert (

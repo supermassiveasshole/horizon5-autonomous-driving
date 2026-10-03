@@ -345,7 +345,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     scheduled_resume.add_argument("--run", type=Path, required=True)
     scheduled_resume.add_argument("--output", type=Path, required=True)
-    scheduled_resume.add_argument("--checkpoint-sha256", required=True)
+    scheduled_resume.add_argument("--checkpoint-sha256", help="Optional expected learner digest")
     for name in ("collection-status", "collection-stop", "collection-review"):
         collection = commands.add_parser(
             name, help="Inspect, stop or verify a passive collection session"
