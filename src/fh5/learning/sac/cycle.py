@@ -14,7 +14,7 @@ from fh5.artifacts.document import replay_document
 from fh5.artifacts.io import VerifiedFile, encode, read_bounded, read_json, write_file
 from fh5.driving.realtime.model import RealtimeConfig, RealtimeRun
 from fh5.learning.diagnostics import prediction_identity
-from fh5.learning.loop.runtime import preserve_torch_state
+from fh5.learning.runtime import preserve_torch_state
 from fh5.learning.sac.actor import FrozenSAC
 from fh5.learning.sac.realtime_experience import SACRealtimePrepare
 from fh5.learning.sac.realtime_sampler import (

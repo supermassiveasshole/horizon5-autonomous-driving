@@ -27,6 +27,6 @@
 
 保留 `fh5.experiment` 的 `Packet`、`Record`、`Replay`、`RunResult`、`run_experiment`，以及 `fh5.cli:main` 和已有命令。其他内部 Python 路径已按职责迁移，当前示例使用新路径；录制、像素、模型及检查点格式未因此升级。
 
-`tests/` 按同样职责组织，公共测试数据生成器在 `tests/support/`。功能测试仍通过实验入口和 CLI；迁包还需核对后台进程模块名、相邻 HTML 模板、源码指纹覆盖与安装后的入口。软件测试不替代 FH5 驾驶验收。
+`tests/` 按同样职责组织，独立测试辅助程序在 `tests/support/`，其余 fixture 贴近对应行为测试。功能测试仍通过实验入口和 CLI；迁包还需核对后台进程模块名、相邻 HTML 模板、源码指纹覆盖与安装后的入口。软件测试不替代 FH5 驾驶验收。
 
 文档从 [索引](README.md) 进入：`guides/` 写当前操作，`design/` 写约定，`research/` 保留来源调查，`archive/` 保留历史范围及旧资产迁移，`validation/` 保留实际证据。新实现修订所属指南；避免为同一能力不断增加平行说明。

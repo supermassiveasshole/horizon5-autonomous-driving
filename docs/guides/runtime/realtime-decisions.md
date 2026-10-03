@@ -158,6 +158,6 @@ uv run --locked fh5 realtime-replay runs/shadow-10hz --model runs/t35-temporal-2
 
 ## 验证与剩余工作
 
-`uv run --locked pytest tests/test_realtime.py` 覆盖 5%/10% 源帧丢失、100 ms 缺图恢复、300 ms 断图锁止、重复旧帧、源槽复用、采集边界、迟到/挂起推理、部分发送失败，以及真实线程下 400 ms 推理暂停、1 秒写盘暂停。
+`uv run --locked pytest tests/driving/test_realtime.py` 覆盖 5%/10% 源帧丢失、100 ms 缺图恢复、300 ms 断图锁止、重复旧帧、源槽复用、采集边界、迟到/挂起推理、部分发送失败，以及真实线程下 400 ms 推理暂停、1 秒写盘暂停。
 
 独立数值重放已由实验入口和实际冻结 Δt 网络的合成记录验证。尚待完成：真实负载 10/20 Hz 的阶段/资源尾延迟与页面交互验收。影子适配器已通过合成原始像素和回环 UDP 组合测试，不能据此声明 Windows DXGI 的实际游戏性能已达标。需要游戏运行的证据待用户方便时收集，不阻塞 #37 持续采集等独立软件工作。

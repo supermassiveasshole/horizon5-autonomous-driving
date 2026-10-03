@@ -14,7 +14,7 @@ from typing import TYPE_CHECKING, Any
 from fh5.learning.bc.legacy import BCReplay
 from fh5.learning.bc.losses import read_bc_manifest
 from fh5.learning.bc.network import make_actor
-from fh5.learning.loop.runtime import preserve_torch_state
+from fh5.learning.runtime import preserve_torch_state
 
 if TYPE_CHECKING:
     from fh5.result import RunResult

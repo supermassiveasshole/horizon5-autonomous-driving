@@ -18,7 +18,7 @@ from fh5.artifacts.io import VerifiedFile, copy_evidence, encode
 from fh5.learning.bc.actor import FrozenNumericActor
 from fh5.learning.checkpoint_history import HistorySource, empty_history
 from fh5.learning.diagnostics import PredictionRecorder, RecordJournal
-from fh5.learning.loop.runtime import preserve_torch_state
+from fh5.learning.runtime import preserve_torch_state
 from fh5.learning.sac.actions import ActionBounds
 from fh5.learning.sac.actor import FrozenSAC
 from fh5.learning.sac.checkpoint import (

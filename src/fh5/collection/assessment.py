@@ -15,9 +15,9 @@ from fh5.artifacts.io import VerifiedFile, sha256_file, write_file
 from fh5.learning.bc.actor import FrozenNumericActor
 from fh5.learning.bc.data import temporal_snapshot
 from fh5.learning.bc.features import describe_time
-from fh5.learning.loop.runtime import preserve_torch_state
 from fh5.learning.prediction_metrics import assessment_metrics
 from fh5.learning.prediction_records import prediction_spool
+from fh5.learning.runtime import preserve_torch_state
 from fh5.observation.recording import _result
 from fh5.reporting.numeric import preview_png
 

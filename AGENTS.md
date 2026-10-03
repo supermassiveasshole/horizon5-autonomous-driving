@@ -5,7 +5,7 @@
 - `src/fh5/experiment.py` is the public experiment interface; `cli.py` and `commands/` assemble CLI operations.
 - `telemetry/`, `observation/`, `capture/`, and `collection/` own packets, model inputs, image capture, and independent recording. `driving/` owns control and realtime execution; `learning/` contains BC, SAC, and the learning loop; `evaluation/` owns validity and candidate selection.
 - `artifacts/` owns shared file operations; `reporting/` renders results. Keep low-level types and storage independent of workflow dispatch. See [architecture](docs/architecture.md) for dependency rules.
-- `tests/` mirrors these responsibilities; shared fixtures live in `tests/support/`. `configs/` keeps stable versioned examples.
+- `tests/` mirrors these responsibilities; standalone test helpers live in `tests/support/`. `configs/` keeps stable versioned examples.
 - `runs/` holds ignored local recordings. Keep recordings, credentials, model checkpoints, and machine tooling out of commits.
 - Read `docs/design/PRD.md` before scope changes, `docs/design/driving-learning-design.md` before driving/learning changes, and `docs/guides/runtime/control.md` before live control. Terminology lives in `CONTEXT.md`; decisions live in `docs/adr/`.
 - Read `docs/design/resource-policy.md` before resource, storage, or recovery changes. Base limits on measured capacity, interface requirements, or explicit budgets; handle growth structurally and preserve completed work when diagnostics fail.

@@ -45,7 +45,7 @@ uv run --locked --extra control --extra events fh5 event --config runs/t03-menu-
 
 驾驶模板应选固定文字，避开圈数、计时、车速及大片场景背景。本机曾将起跑的“0/1”和明亮背景纳入模板，导致行驶中失配；修订模板使用左下固定 HUD 文字。移动 HUD 也可能出现在自由漫游中，因此它不证明赛事身份或道路有效性；蓝图条件和起点遥测仍须独立核验。校准材料、未命中帧和新采实机检查见 [HUD 修复记录](../../validation/t03-hud-recognition.md)。
 
-显式 `purpose: "restart_probe"` 允许在条件仍未核验时测试菜单：最多三次尝试、每次最多 10 秒、准备/重开各最多 30 秒；仍须提供本地证据及起跑、完成、重开模板和步骤。逐包检查活动遥测，速度超过 3 km/h 或出现非零驾驶输入立即退出，包括同批中间短暂出现的异常。不会把配置快照升级为已核验，也不发送驾驶动作。完整配置形状见 `tests/test_event_run.py`；其中合成图块不能用于真实游戏。
+显式 `purpose: "restart_probe"` 允许在条件仍未核验时测试菜单：最多三次尝试、每次最多 10 秒、准备/重开各最多 30 秒；仍须提供本地证据及起跑、完成、重开模板和步骤。逐包检查活动遥测，速度超过 3 km/h 或出现非零驾驶输入立即退出，包括同批中间短暂出现的异常。不会把配置快照升级为已核验，也不发送驾驶动作。完整配置形状见 `tests/driving/test_event_run.py`；其中合成图块不能用于真实游戏。
 
 实测重开步骤为 `driving: START → pause_map: RIGHT → pause_exit: DOWN → pause_restart: A → confirm: A → ready: A`；成绩页则为 `finish: X → confirm: A → ready: A`。每步的页面名称对应独立模板；菜单布局或初始选中项不同会停止。`ready` 只证明页面类型，不能证明所选蓝图、辅助或调校正确，这些条件须另外核对。
 

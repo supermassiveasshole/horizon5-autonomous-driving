@@ -15,7 +15,7 @@ uv sync --locked --extra learning
 uv run --locked --extra learning fh5 bc-replay --model runs/bc-first --dataset runs/t27-dataset-reviewed/dataset.json --report runs/bc-reload.html --device cuda
 ```
 
-回放使用新报告路径，保留旧模型、数据和源录制。检查使用 `uv run --locked --extra learning pytest tests/test_bc.py`，未安装 PyTorch 的基础环境会跳过模型测试。普通遥测录制/回放入口不导入 PyTorch。
+回放使用新报告路径，保留旧模型、数据和源录制。检查使用 `uv run --locked --extra learning pytest tests/learning/bc/test_bc.py`，未安装 PyTorch 的基础环境会跳过模型测试。普通遥测录制/回放入口不导入 PyTorch。
 
 ### 迁移新训练
 

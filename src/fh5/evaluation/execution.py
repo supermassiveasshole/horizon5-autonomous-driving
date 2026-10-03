@@ -14,7 +14,7 @@ from fh5.driving.realtime.model import RealtimeNumericReplay
 from fh5.driving.realtime.numeric_replay import read_realtime_journal, read_realtime_recording
 from fh5.evaluation.metrics import execution_metrics
 from fh5.evaluation.model import evaluation_actor
-from fh5.learning.loop.runtime import preserve_torch_state
+from fh5.learning.runtime import preserve_torch_state
 from fh5.observation.numeric import DecisionActor, PixelContract
 
 if TYPE_CHECKING:

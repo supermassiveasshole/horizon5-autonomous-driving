@@ -23,7 +23,7 @@ from fh5.evaluation.metrics import combine_execution_metrics
 from fh5.evaluation.model import asset_limit, model_payloads, validate_model
 from fh5.evaluation.start import event_payloads, review_start
 from fh5.learning.bc.legacy_training import VIEWS
-from fh5.learning.loop.runtime import preserve_torch_state
+from fh5.learning.runtime import preserve_torch_state
 from fh5.observation.numeric import PixelContract
 from fh5.observation.routes import load_route
 

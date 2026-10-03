@@ -24,7 +24,7 @@ result = run_experiment(
 )
 ```
 
-路径须指向已有且一致的实验资产；`environment` 是调用方提供的 `SACEnvironment`，当前必须声明 `source_kind="synthetic"`。软件测试适配器见 `tests/test_sac_cycle.py`。不把任意实机适配器改一个来源标签后用于此入口。
+路径须指向已有且一致的实验资产；`environment` 是调用方提供的 `SACEnvironment`，当前必须声明 `source_kind="synthetic"`。软件测试适配器见 `tests/learning/sac/test_sac_cycle.py`。不把任意实机适配器改一个来源标签后用于此入口。
 
 - `start(epoch, pixels)` 返回新的 `SACStart`：新尝试的 `SACSample`、已确认执行的中立命令及其时刻；适配器负责重置自己的合成状态并准备属于新 epoch 的图像历史。
 - `step(command)` 同步应用命令，返回随后真实产生的合成遥测及数值观测；程序使用模型实际输出，环境必须响应该命令。成功返回表示这一合成接口已应用输入，不能将这个同步时间口径搬到原生发送函数。
@@ -160,7 +160,7 @@ result = run_experiment(
 `SACRealtimeEnvironment.start(SACRealtimeStart(...))` 返回一次新的 `RealtimeEnvironment`；
 参数包含本轮 identity、`RealtimeRun`、冻结检查点及摘要、探索种子、录制/任务配置与停止回调。
 适配器须准备新的观测与控制历史。`finish(recording_dir)` 在该次运行器资源全部释放后
-返回独立核验文件或 `None`，`close()` 释放环境级资源。适配器示例见 `tests/test_sac_realtime_cycle.py`。
+返回独立核验文件或 `None`，`close()` 释放环境级资源。适配器示例见 `tests/learning/sac/test_sac_realtime_cycle.py`。
 
 原生入口使用 `fh5.learning.sac.native.NativeSACSamplingEnvironment(configuration, event_config,
 shadow_seconds=..., handoff_timeout_s=..., review=...)`，并在 `SACRealtimeCycle` 中显式设置
