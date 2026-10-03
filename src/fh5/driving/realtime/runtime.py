@@ -169,7 +169,12 @@ def run_realtime(
             started = time.perf_counter_ns()
             end = started + int(request.seconds * 1e9)
             next_tick = started
+            prepare_control = getattr(environment, "prepare_control", None)
             while not done.is_set() and time.perf_counter_ns() < end:
+                if callable(prepare_control):
+                    prepare_control()
+                if done.is_set() or time.perf_counter_ns() >= end:
+                    break
                 with lock:
                     work = state.begin(time.perf_counter_ns(), latest)
                     if work:

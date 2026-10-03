@@ -39,6 +39,9 @@ class NumericDrivingEnvironment:
         self._lock = threading.Lock()
         self._closed = False
         self._result: dict[str, Any] | None = None
+        self._acquiring = False
+        self._prepared_ns: int | None = None
+        self._preparation_fault: str | None = None
         self.sent_count = self.failed_count = 0
 
     def authorize(
@@ -56,12 +59,14 @@ class NumericDrivingEnvironment:
             raise ValueError("Native observation adapter differs from qualified conditions")
         self.authorized = True
 
-    def _check_ready(self, *, creating: bool = False) -> None:
+    def _check_ready(self, *, creating: bool = False) -> bool:
         value, cfg = self.latest, self.observations.request.config
         focused, stop = self.signals()
         if stop or not focused:
             raise OSError("user_stop" if stop else "focus_lost")
         if value is None or not self.observations.ready:
+            if creating:
+                return False
             raise OSError("Driving observation is not ready")
         safety = value.safety
         if self.observations.fault or safety.fault or safety.task_fault or not safety.active:
@@ -70,16 +75,43 @@ class NumericDrivingEnvironment:
             )
         now = time.perf_counter_ns()
         if not 0 <= now - safety.received_ns <= cfg.max_telemetry_age_ms * 1_000_000:
+            if creating:
+                return False
             raise OSError("stale_telemetry")
         if creating:
             if value.observation is None:
-                raise OSError("Driving observation is not ready")
+                return False
             if (
                 not 0
                 <= now - value.observation.frames[-1].source_time_ns
                 <= cfg.max_image_age_ms * 1_000_000
             ):
-                raise OSError("stale_image")
+                return False
+        return True
+
+    def prepare_control(self) -> None:
+        """Acquire once on the runtime caller while its input worker keeps reading."""
+        with self._lock:
+            if self._closed:
+                raise OSError("Numerical driving environment closed")
+            if self.controller is not None or self._acquiring:
+                return
+            if self.latest is None or self.latest.observation is None:
+                return
+            if not self._check_ready(creating=True):
+                return
+            self._acquiring = True
+        try:
+            controller = self.controller_factory()
+            with self._lock:
+                # Preserve ownership even if starting the device supervisor fails.
+                self.controller = controller
+                self.control = LiveEnvironment(
+                    None, controller, self.observations.desktop, monitor_idle=True
+                )
+                self._prepared_ns = time.perf_counter_ns()
+        finally:
+            self._acquiring = False
 
     def read(self, period_s: float) -> TimelineInput:
         if self.source_kind == "native" and not self.authorized:
@@ -89,23 +121,39 @@ class NumericDrivingEnvironment:
             if self._closed:
                 raise OSError("Numerical driving environment closed")
             self.latest = value
-            if self.control is None and value.observation is not None:
-                self._check_ready(creating=True)
-                self.controller = self.controller_factory()
-                # Keep ownership even if watchdog thread creation fails. close()
-                # must still release this acquired device and preserve errors.
-                self.control = LiveEnvironment(
-                    None, self.controller, self.observations.desktop, monitor_idle=True
+            self.signals()
+            if self._acquiring or self.controller is not None:
+                if value.safety.stop_requested:
+                    self._preparation_fault = "user_stop"
+                elif not value.safety.focused:
+                    self._preparation_fault = self._preparation_fault or "focus_lost"
+            if self._preparation_fault:
+                return replace(
+                    value,
+                    safety=replace(value.safety, fault=self._preparation_fault),
+                    observation=None,
                 )
-                # Device creation can be slow. No prediction precedes this call,
-                # and the runner will check the returned observation's age again.
-                self._check_ready(creating=True)
             if self.control and self.control.fault:
                 return replace(value, safety=replace(value.safety, fault=self.control.fault))
+            if (
+                self._prepared_ns is None
+                or value.safety.received_ns <= self._prepared_ns
+                or value.observation is not None
+                and value.observation.frames[-1].source_time_ns <= self._prepared_ns
+            ):
+                return replace(value, observation=None)
         return value
 
     def signals(self) -> tuple[bool, bool]:
-        return self.observations.signals()
+        focused, stop = self.observations.signals()
+        if self._acquiring and (stop or not focused):
+            self._preparation_fault = (
+                "user_stop" if stop else self._preparation_fault or "focus_lost"
+            )
+        return (
+            focused and self._preparation_fault != "focus_lost",
+            stop or self._preparation_fault == "user_stop",
+        )
 
     def send(self, command: Command) -> None:
         with self._lock:

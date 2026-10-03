@@ -46,7 +46,16 @@ class Controller:
         self.closed = True
 
 
-def setup_drive(tmp_path, *, desktop=None, factory=None, source_kind="synthetic"):
+def setup_drive(
+    tmp_path,
+    *,
+    desktop=None,
+    factory=None,
+    source_kind="synthetic",
+    capture=None,
+    telemetry=None,
+    seconds=1.5,
+):
     task_file = route(tmp_path)
     task = LocalTask(
         task_file, hashlib.sha256(task_file.read_bytes()).hexdigest(), end_margin_m=0.5
@@ -54,9 +63,9 @@ def setup_drive(tmp_path, *, desktop=None, factory=None, source_kind="synthetic"
     request = RealtimeRun(
         tmp_path / "drive",
         RealtimeConfig(pixels=PixelContract(size=(64, 36)), reference_count=1),
-        seconds=1.5,
+        seconds=seconds,
     )
-    capture, telemetry, controller = Capture(), Telemetry(), Controller()
+    capture, telemetry, controller = capture or Capture(), telemetry or Telemetry(), Controller()
     observations = ShadowEnvironment(
         request,
         CaptureConfig(pixels=request.config.pixels),
@@ -151,11 +160,13 @@ def test_desktop_stop_releases_actual_model_commands(tmp_path, numeric_driving_m
     assert sum(c != NEUTRAL for c in controller.commands) == 1
 
 
-def test_slow_device_creation_never_sends_an_expired_prediction(tmp_path, numeric_driving_model):
+def test_slow_device_creation_waits_for_fresh_input_then_drives(tmp_path, numeric_driving_model):
     controller = Controller()
+    created_ns = []
 
     def create():
         time.sleep(0.15)
+        created_ns.append(time.perf_counter_ns())
         return controller
 
     request, env, _, capture, telemetry = setup_drive(tmp_path, factory=create)
@@ -166,10 +177,18 @@ def test_slow_device_creation_never_sends_an_expired_prediction(tmp_path, numeri
             numeric_driving_model, request.config.pixels
         ),
     ).summary["realtime"]
-    assert not controller.active.is_set()
+    assert r["stop_reason"] == "time_limit"
+    assert len(created_ns) == 1 and controller.active.is_set()
     assert controller.closed and capture.closed and telemetry.closed and r["resources_released"]
-    assert "stale_telemetry" in r["stop_reason"]
-    assert r["environment"]["controller_sends"] == len(controller.commands) == 1
+    accepted = [row for row in r["decisions"] if row["status"] == "accepted"]
+    assert accepted
+    for row in accepted:
+        assert row["telemetry_received_ns"] > created_ns[0]
+        assert row["frames"][-1]["source_time_ns"] > created_ns[0]
+        assert row["inference_returned_ns"] < row["deadline_ns"]
+        assert row["inference_returned_ns"] - row["frames"][-1]["source_time_ns"] <= 100_000_000
+    assert all(row["issued_ns"] > created_ns[0] for row in r["commands"])
+    assert controller.commands[-1] == NEUTRAL
 
 
 def test_native_control_requires_explicit_opt_in_before_opening_devices(

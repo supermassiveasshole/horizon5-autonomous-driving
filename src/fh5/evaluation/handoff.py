@@ -84,6 +84,25 @@ class ReadyHandoff:
     def signals(self) -> tuple[bool, bool]:
         return self.environment.signals()
 
+    def prepare_control(self) -> None:
+        with self.lock:
+            if not self.started:
+                if self.deadline_ns is not None and time.perf_counter_ns() > self.deadline_ns:
+                    self.error = "handoff_expired"
+                if self.error:
+                    raise ValueError(self.error)
+                if not self.confirmed:
+                    return
+        prepare = getattr(self.environment, "prepare_control", None)
+        if callable(prepare):
+            prepare()
+        with self.lock:
+            if not self.started:
+                if self.deadline_ns is not None and time.perf_counter_ns() > self.deadline_ns:
+                    self.error = "handoff_expired"
+                if self.error:
+                    raise ValueError(self.error)
+
     def send(self, command: Command) -> None:
         with self.lock:
             nonzero = command != Command(0, 0, 0)

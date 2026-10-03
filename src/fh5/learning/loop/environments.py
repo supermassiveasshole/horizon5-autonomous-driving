@@ -157,6 +157,15 @@ class StoppingDrive:
         focused, stop = self.source.signals()
         return focused, stop or self.stopped()
 
+    def prepare_control(self) -> None:
+        if self.stopped():
+            raise InterruptedError("Learning stop requested before control preparation")
+        prepare = getattr(self.source, "prepare_control", None)
+        if callable(prepare):
+            prepare()
+        if self.stopped():
+            raise InterruptedError("Learning stop requested during control preparation")
+
     def send(self, command: Command) -> None:
         if command != Command(0, 0, 0) and self.stopped():
             raise InterruptedError("Learning stop requested before policy command")
