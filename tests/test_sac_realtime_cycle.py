@@ -135,6 +135,10 @@ def test_async_results_reference_originals_without_repeating_frame_diagnostics(
     assert result["stop_reason"] == "budget_completed", result
     attempt = result["attempts"][0]
     assert "decisions" not in attempt
+    assert "excluded" not in attempt and "observation_errors" not in attempt
+    replay = json.loads((settings.output_dir / attempt["replay"]).read_bytes())
+    assert attempt["excluded_transitions"] == len(replay["excluded"])
+    assert attempt["observation_error_count"] == len(replay["observation_errors"])
     assert attempt["source_assets"]["kind"] == "sampling-source-index-v1"
     execution = json.loads((settings.output_dir / "attempt-000/execution/report.json").read_bytes())
     assert attempt["decision_count"] == len(execution["decisions"])

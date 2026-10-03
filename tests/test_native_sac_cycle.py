@@ -1,6 +1,7 @@
 """Native sampling orchestration with real learners and external device fixtures."""
 
 import json
+import struct
 from dataclasses import asdict, replace
 
 import pytest
@@ -103,6 +104,47 @@ class SamplingDevices(Devices):
         return path
 
 
+class ParkedAwayDevices(SamplingDevices):
+    """A persistent external location which only a successful menu restart resets."""
+
+    def __init__(self):
+        super().__init__()
+        self.parked_x = 3.0
+
+    def menu(self, event_file, plan):
+        menu = super().menu(event_file, plan)
+        pulse = menu.pulse
+
+        def apply(button):
+            pulse(button)
+            if menu.screen == "driving":
+                self.parked_x = 0.0
+
+        menu.pulse = apply
+        return menu
+
+    def shadow(self, plan):
+        environment = super().shadow(plan)
+        read = environment.telemetry.read
+
+        def located(period_s):
+            batch = read(period_s)
+            packet = batch.packets[0]
+            payload = bytearray(packet.payload)
+            struct.pack_into("<f", payload, 244, self.parked_x)
+            return replace(batch, packets=(replace(packet, payload=bytes(payload)),))
+
+        environment.telemetry.read = located
+        return environment
+
+    def review(self, recording):
+        path = super().review(recording)
+        # Independent external scenario: after this short segment the car is
+        # stopped elsewhere on the route, not magically back at its start.
+        self.parked_x = 3.0
+        return path
+
+
 @pytest.mark.parametrize("reviewed", [True, False])
 def test_two_native_attempts_requalify_updated_snapshot_before_restart(
     tmp_path, native_candidate, reviewed
@@ -157,6 +199,30 @@ def test_two_native_attempts_requalify_updated_snapshot_before_restart(
         devices.cleanup()
 
 
+def test_restart_resets_external_position_before_each_candidates_shadow(tmp_path, native_candidate):
+    request, config, event = settings(tmp_path, native_candidate)
+    devices = ParkedAwayDevices()
+    environment = NativeSACSamplingEnvironment(
+        config,
+        event,
+        shadow_seconds=2,
+        handoff_timeout_s=5,
+        initial_operation="start_ready",
+        review=devices.review,
+        shadow_factory=devices.shadow,
+        menu_factory=devices.menu,
+        driving_factory=devices.drive,
+    )
+    try:
+        result = run_experiment(request, sac_realtime_environment=environment).summary["sac_cycle"]
+        assert result["stop_reason"] == "budget_completed", result
+        assert len(devices.worlds) == len(devices.shadows) == 2
+        assert all(row["learner_updates"] == 2 for row in result["attempts"])
+        assert result["resources_released"]
+    finally:
+        devices.cleanup()
+
+
 def test_native_cycle_requires_live_before_any_device(tmp_path, native_candidate):
     request, config, event = settings(tmp_path, native_candidate)
 
@@ -201,7 +267,7 @@ def test_failed_native_restart_retains_learning_without_opening_another_driver(
         result = run_experiment(request, sac_realtime_environment=environment).summary["sac_cycle"]
         assert result["stop_reason"] == "sampling_fault", result
         assert result["resources_released"]
-        assert len(devices.worlds) == 1 and len(devices.shadows) == 2
+        assert len(devices.worlds) == 1 and len(devices.shadows) == 1
         assert all(menu.closed for menu in devices.menus)
         assert result["attempts"][0]["learner_updates"] == 2
         assert result["attempts"][1]["error"]
@@ -233,7 +299,7 @@ def test_native_sampling_condition_mismatch_opens_no_capture_or_menu(tmp_path, n
 
 
 @pytest.mark.parametrize("stop_source", ["file", "desktop"])
-def test_stop_during_shadow_prevents_menu_and_learning(tmp_path, native_candidate, stop_source):
+def test_stop_during_shadow_prevents_driving_and_learning(tmp_path, native_candidate, stop_source):
     request, config, event = settings(tmp_path, native_candidate)
     devices = SamplingDevices()
 
@@ -260,13 +326,15 @@ def test_stop_during_shadow_prevents_menu_and_learning(tmp_path, native_candidat
         event,
         shadow_seconds=2,
         handoff_timeout_s=5,
+        initial_operation="start_ready",
         shadow_factory=shadow,
         menu_factory=devices.menu,
         driving_factory=devices.drive,
     )
     result = run_experiment(request, sac_realtime_environment=environment).summary["sac_cycle"]
     assert result["stop_reason"] == "stop_requested", result
-    assert result["resources_released"] and not result["commands_sent_to_game"]
+    assert result["resources_released"] and result["commands_sent_to_game"]
     assert devices.shadows and all(capture.closed for _, capture in devices.shadows)
-    assert not devices.menus and not devices.worlds
+    assert len(devices.menus) == 1 and devices.menus[0].closed
+    assert not devices.worlds
     assert not (request.output_dir / "candidate-000").exists()

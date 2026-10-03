@@ -1,4 +1,4 @@
-"""Requalify each frozen SAC candidate, then restart and acquire its driving lease."""
+"""Restart, requalify the frozen SAC candidate, then acquire its driving lease."""
 
 from __future__ import annotations
 
@@ -145,34 +145,6 @@ class NativeSACSamplingEnvironment:
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 write_file(destination, payload)
             event_file = root / "start/event.json"
-            shadow_plan = NumericDriveConfiguration(
-                config_file, root / "shadow", self.shadow_seconds, False, mode="shadow"
-            )
-            check_stop()
-            try:
-                shadow_source = self.shadow_factory(shadow_plan)
-            except (Exception, KeyboardInterrupt) as error:
-                self.errors.append(f"Shadow acquisition cleanup unconfirmed: {error}")
-                raise
-            shadow = _AttemptDrive(shadow_source, start.stopped)
-            self.observations.append(shadow)
-            if shadow.source_kind != "shadow":
-                raise ValueError("Native sampling requires a read-only shadow adapter")
-            shadow_result = run_experiment(
-                shadow_plan.request,
-                realtime_environment=shadow,
-                numeric_actor_factory=shadow_plan.actor,
-            ).summary["realtime"]
-            if not shadow_result["resources_released"]:
-                raise ValueError("Shadow resources were not released before menu acquisition")
-            if shadow_result["stop_reason"] == "user_stop":
-                raise InterruptedError("Native sampling stopped during shadow qualification")
-            check_stop()
-            document["shadow"] = {"directory": str((root / "shadow").resolve())}
-            config_file = root / "drive.json"
-            write_file(config_file, encode(document))
-            plan = self._plan(start, config_file)
-            plan.require_eligible()
             check_stop()
             try:
                 menu_source = self.menu_factory(event_file, plan)
@@ -205,12 +177,40 @@ class NativeSACSamplingEnvironment:
             check_stop()
             previous_bindings = plan.bindings
             plan = self._plan(start, config_file)
-            plan.require_eligible()
             if (
                 plan.bindings != previous_bindings
                 or event_payloads(event_file) != self.event_assets
             ):
                 raise ValueError("Native sampling conditions changed during preparation")
+            shadow_plan = NumericDriveConfiguration(
+                config_file, root / "shadow", self.shadow_seconds, False, mode="shadow"
+            )
+            check_stop()
+            try:
+                shadow_source = self.shadow_factory(shadow_plan)
+            except (Exception, KeyboardInterrupt) as error:
+                self.errors.append(f"Shadow acquisition cleanup unconfirmed: {error}")
+                raise
+            shadow = _AttemptDrive(shadow_source, start.stopped)
+            self.observations.append(shadow)
+            if shadow.source_kind != "shadow":
+                raise ValueError("Native sampling requires a read-only shadow adapter")
+            shadow_result = run_experiment(
+                shadow_plan.request,
+                realtime_environment=shadow,
+                numeric_actor_factory=shadow_plan.actor,
+            ).summary["realtime"]
+            if not shadow_result["resources_released"]:
+                raise ValueError("Shadow resources were not released before driving acquisition")
+            if shadow_result["stop_reason"] == "user_stop":
+                raise InterruptedError("Native sampling stopped during shadow qualification")
+            check_stop()
+            document["shadow"] = {"directory": str((root / "shadow").resolve())}
+            config_file = root / "drive.json"
+            write_file(config_file, encode(document))
+            plan = self._plan(start, config_file)
+            plan.require_eligible()
+            check_stop()
             try:
                 driving_source = self.driving_factory(plan)
             except (Exception, KeyboardInterrupt) as error:

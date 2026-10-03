@@ -47,7 +47,12 @@ def native_event_environment(path: Path, plan: NumericDriveConfiguration) -> Eve
     from fh5.live import WindowsDesktop, XboxController
     from fh5.live_event import BoundedFrames, LiveEventEnvironment
 
-    plan.require_eligible()
+    if not plan.request.live:
+        raise ValueError("Native menu requires explicit live opt-in")
+    # Menu recovery establishes the parked state needed by a fresh shadow run.
+    # Only driving requires that shadow to have completed already.
+    if any(reason != "missing_shadow_evidence" for reason in plan.qualification["reasons"]):
+        plan.require_eligible()
     config = validate_event_file(path)["event_run"]
     with ExitStack() as cleanup:
         receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)

@@ -164,7 +164,7 @@ def run_sac_cycle(
                             "runtime": asdict(request.runtime),
                             "seconds_per_attempt": request.seconds_per_attempt,
                             "max_updates_per_attempt": request.max_updates_per_attempt,
-                            "live": request.live,
+                            **({"live": True} if request.live else {}),
                         }
                         if isinstance(request, SACRealtimeCycle)
                         else {"steps_per_attempt": request.steps_per_attempt}
@@ -288,7 +288,18 @@ def run_sac_cycle(
                             review,
                         )
                     ).summary["sac_replay"]
-                result.update(prepared)
+                if isinstance(request, SACRealtimeCycle):
+                    result.update(
+                        {
+                            key: value
+                            for key, value in prepared.items()
+                            if key not in ("excluded", "observation_errors")
+                        },
+                        excluded_transitions=len(prepared["excluded"]),
+                        observation_error_count=len(prepared["observation_errors"]),
+                    )
+                else:
+                    result.update(prepared)
                 verify_sampling_sources(result["source_assets"])
                 replay = attempt_dir / "prepared/replay.json"
                 result["replay"] = replay.relative_to(root).as_posix()
