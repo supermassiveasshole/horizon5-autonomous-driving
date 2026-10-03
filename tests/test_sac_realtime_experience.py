@@ -19,10 +19,14 @@ from fh5.sac_learning import SACResume
 from fh5.sac_sampling_actor import SACSamplingActor
 
 
-def recorded_attempt(tmp_path, policy, *, observation_gap=False, conflicting_feedback=False):
+def recorded_attempt(
+    tmp_path, policy, *, observation_gap=False, conflicting_feedback=False, actor_factory=None
+):
     pixels = PixelContract(size=(64, 36))
 
     def factory():
+        if actor_factory is not None:
+            return actor_factory()
         return SACSamplingActor(policy, pixels, sha(policy / "policy.json"), exploration_seed=9)
 
     class DelayedSender(ResponsiveGame):

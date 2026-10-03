@@ -390,6 +390,7 @@ def _run(
         raise ValueError("Critic warm-up changed the frozen actor")
     summary = {
         "stage": "critic_warmup",
+        "source_kind": replay["source_kind"],
         "steps_requested": request.steps if isinstance(request, SACCriticWarmup) else 0,
         "steps_completed": updates,
         "total_steps": start_step + updates,
@@ -433,6 +434,7 @@ def _run(
         manifest = {
             "version": 2,
             "stage": "critic_warmup",
+            "source_kind": replay["source_kind"],
             "bounds": asdict(bounds),
             "command_quantization": "clamp-then-round-nearest-even-v1",
             "replay_sha256": expected,

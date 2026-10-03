@@ -63,6 +63,7 @@ def _expand(
         raise ValueError("SAC expansion requires sealed replay additions")
     sources = chain(((parent, parent_sha),), additions)
     added = 0
+    source_kinds = set()
     combined: dict[str, Any] | None = None
     for number, (path, sha) in enumerate(sources):
         with ExitStack() as resources:
@@ -75,6 +76,7 @@ def _expand(
                 resources=parent_resources if number == 0 else resources,
             )
             replay = data.replay
+            source_kinds.add(replay["source_kind"])
             if combined is None:
                 replaced = {"transitions", "source_inventory", "excluded", "observation_errors"}
                 # Keep the parent's index alive for extension arrays copied to
@@ -119,7 +121,9 @@ def _expand(
                 added += int(number > 0)
     assert combined is not None
     combined.update(
-        transitions=union.array("transitions"), source_inventory=union.array("source_inventory")
+        transitions=union.array("transitions"),
+        source_inventory=union.array("source_inventory"),
+        source_kind=next(iter(source_kinds)) if len(source_kinds) == 1 else "mixed",
     )
     if combined["version"] in (2, 3):
         combined["source_role"] = "mixed"

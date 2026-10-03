@@ -636,7 +636,7 @@ def _train(
         predictions.unavailable(error)
     summary = {
         "stage": "sac_updates",
-        "source_kind": "synthetic",
+        "source_kind": data.replay["source_kind"],
         "device": "cpu",
         "update_duration_s": update_duration_s,
         "steps_requested": request.steps,
@@ -701,7 +701,7 @@ def _train(
         "density_coordinates": summary["density_coordinates"],
         "q_action_coordinates": summary["q_action_coordinates"],
         "device": "cpu",
-        "source_kind": "synthetic",
+        "source_kind": data.replay["source_kind"],
         "real_driving_validated": False,
         "experience": experience,
         "continuation": continuation,

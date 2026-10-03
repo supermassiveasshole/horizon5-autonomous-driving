@@ -70,13 +70,23 @@ def _validate_document(replay: dict[str, Any], roles: ReplayRoles) -> None:
             (2, "sac-numeric-replay-v2"),
             (3, "sac-numeric-replay-v3"),
         )
-        or replay.get("source_kind") != "synthetic"
+        or replay.get("source_kind") not in ("synthetic", "native", "mixed")
         or not isinstance(replay.get("transitions"), (list, ReplayArray))
         or not len(replay["transitions"])
         or replay.get("version") in (2, 3)
         and not isinstance(replay.get("task_contract"), dict)
     ):
-        raise ValueError("SAC requires a nonempty prepared synthetic replay")
+        raise ValueError("SAC requires a nonempty prepared replay with known sources")
+    if not replay.get("source_inventory") and (
+        replay["source_kind"] == "mixed"
+        or replay["source_kind"] == "native"
+        and (
+            replay["version"] != 3
+            or replay.get("source_role") != "online"
+            or not replay.get("source_hashes", {}).get("execution")
+        )
+    ):
+        raise ValueError("Native SAC experience requires an asynchronous execution source")
     required = {"id", "current", "next", "action", "reward", "discount", "bootstrap", "terminated"}
     roles.begin_document()
     for row in replay["transitions"]:
@@ -101,16 +111,21 @@ def replay_roles(root: Path, replay: dict[str, Any]) -> Iterator[ReplayRoles]:
             for _ in replay["transitions"]:
                 roles.add_role(role)
         else:
+            source_kinds = set()
             with closing(source_replays(root, replay)) as sources:
                 for entry in sources:
                     source = entry.document
                     if source.get("source_inventory"):
                         raise ValueError("SAC source inventory must contain original leaf replays")
                     _validate_document(source, roles)
+                    source_kinds.add(source["source_kind"])
                     role = _leaf_role(source)
                     check_compatible(replay, source)
                     for row in source["transitions"]:
                         roles.add_original(entry.file.sha256, row, role)
+            expected_kind = next(iter(source_kinds)) if len(source_kinds) == 1 else "mixed"
+            if replay["source_kind"] != expected_kind:
+                raise ValueError("SAC replay source kind differs from its sealed originals")
             for row in replay["transitions"]:
                 provenance = row.get("provenance", {})
                 original, role = roles.take_original(
