@@ -34,15 +34,17 @@
 
 ```powershell
 uv run --locked fh5 sac-prepare --recording runs/synthetic/recording --trace runs/synthetic/trace.json --task runs/synthetic/task.json --reward runs/synthetic/reward.json --evidence runs/synthetic/evidence.json --output runs/sac-replay
-uv run --locked fh5 sac-warmup --model runs/temporal-bc --replay runs/sac-replay/replay.json --replay-sha256 <prepare返回的摘要> --output runs/critic-first --steps 100
+uv run --locked fh5 sac-warmup --model runs/temporal-bc --replay runs/sac-replay/replay.json --output runs/critic-first --steps 100
 uv run --locked fh5 sac-warmup-resume --checkpoint runs/critic-first --output runs/critic-continued
-uv run --locked fh5 sac-critic-replay --checkpoint runs/critic-first --replay runs/sac-replay/replay.json --report runs/critic-reloaded.html
+uv run --locked fh5 sac-critic-replay --checkpoint runs/critic-first --report runs/critic-reloaded.html
 uv run --locked fh5 sac-train --config configs/sac-learning.example.json --output runs/sac-candidate
 uv run --locked fh5 sac-resume --checkpoint runs/sac-candidate --output runs/sac-continued --steps 100
-uv run --locked fh5 sac-policy-replay --checkpoint runs/sac-candidate --replay runs/sac-replay/replay.json --report runs/sac-policy.html
+uv run --locked fh5 sac-policy-replay --checkpoint runs/sac-candidate --report runs/sac-policy.html
 ```
 
 `sac-prepare` 无可用转移时返回 4；输入错误返回 2；成功返回 0。报告展示资格、排除原因、Q 更新量与 BC 不变检查。loss 或 Q 变化不等于驾驶进步。
+
+`sac-warmup` 自动计算并绑定选中经验的摘要，可用 `--replay-sha256` 断言预期原件。两种冻结回放默认使用检查点内的 `experience/replay.json`，仍按保存的摘要核验；可用 `--replay` 显式指定原经验。指定原件缺失或摘要不符时直接报错，不回退到其他文件。未封存经验的旧检查点须显式给出原经验；Python 请求参数及检查点格式保持不变。
 
 ## 策略、温度与共享编码器更新
 

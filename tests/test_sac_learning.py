@@ -160,14 +160,17 @@ def test_cli_trains_and_replays_the_updated_sac_policy(tmp_path, capsys, explici
     assert trained["steps_completed"] == 2
     assert trained["commands_sent"] is False
     assert (tmp_path / "candidate/experience/replay.json").read_bytes() == replay.read_bytes()
+    if not explicit_replay:
+        # The learned candidate retains its own experience and no longer needs
+        # the preheating checkpoint or the original dataset to replay.
+        (tmp_path / "warm").rename(tmp_path / "old-warm")
     assert (
         main(
             [
                 "sac-policy-replay",
                 "--checkpoint",
                 str(tmp_path / "candidate"),
-                "--replay",
-                str(replay),
+                *(["--replay", str(replay)] if explicit_replay else []),
                 "--report",
                 str(tmp_path / "cli.html"),
             ]
@@ -205,6 +208,38 @@ def test_cli_rejects_unavailable_or_changed_experience_without_fallback(tmp_path
     if fault != "explicit_missing":
         assert "hash mismatch" in failure["message"]
     assert not output.exists()
+    assert all(path.read_bytes() == payload for path, payload in preserved.items())
+
+
+@pytest.mark.parametrize("mode", ["sac-critic-replay", "sac-policy-replay"])
+@pytest.mark.parametrize("fault", ["explicit_missing", "explicit_changed", "sealed_changed"])
+def test_cli_frozen_replay_never_substitutes_other_experience(tmp_path, capsys, mode, fault):
+    from fh5.cli import main
+    from fh5.sac_learning import SACTrain
+
+    replay = warm_start(tmp_path)
+    checkpoint = tmp_path / "warm"
+    if mode == "sac-policy-replay":
+        checkpoint = tmp_path / "candidate"
+        run_experiment(SACTrain(tmp_path / "warm", replay, checkpoint, steps=1))
+    report = tmp_path / "rejected.html"
+    args = [mode, "--checkpoint", str(checkpoint), "--report", str(report)]
+    if fault.startswith("explicit"):
+        args += ["--replay", str(replay)]
+    else:
+        replay = checkpoint / "experience/replay.json"
+    if fault == "explicit_missing":
+        replay.rename(replay.with_suffix(".saved"))
+    else:
+        replay.write_text("{}")
+    preserved = {p: p.read_bytes() for p in checkpoint.rglob("*") if p.is_file()}
+    assert main(args) == 2
+    failure = json.loads(capsys.readouterr().err)
+    assert failure["status"] == "error"
+    if fault != "explicit_missing":
+        assert "hash mismatch" in failure["message"]
+    assert not report.exists()
+    assert not report.with_suffix(".json").exists()
     assert all(path.read_bytes() == payload for path, payload in preserved.items())
 
 

@@ -31,6 +31,7 @@ from fh5.vision import VisionRecord
 
 
 def _sac(args: argparse.Namespace) -> int:
+    from fh5.artifact_io import sha256_file
     from fh5.sac import SACCriticReplay, SACCriticResume, SACCriticWarmup
     from fh5.sac_actions import ActionBounds
     from fh5.sac_learning import SACPolicyReplay, SACResume, SACTrain
@@ -74,9 +75,12 @@ def _sac(args: argparse.Namespace) -> int:
         print(json.dumps(summary, ensure_ascii=False))
         return 0 if summary["stop_reason"] == "budget_completed" else 4
     if args.mode == "sac-policy-replay":
+        replay = (
+            args.replay if args.replay is not None else args.checkpoint / "experience/replay.json"
+        )
         replayed = run_experiment(
             SACPolicyReplay(
-                args.checkpoint, args.replay, args.report, raw_cache_bytes=args.raw_cache_bytes
+                args.checkpoint, replay, args.report, raw_cache_bytes=args.raw_cache_bytes
             )
         )
         print(json.dumps(replayed.summary["sac_policy"], ensure_ascii=False))
@@ -104,7 +108,7 @@ def _sac(args: argparse.Namespace) -> int:
             SACCriticWarmup(
                 args.model,
                 args.replay,
-                args.replay_sha256,
+                sha256_file(args.replay) if args.replay_sha256 is None else args.replay_sha256,
                 args.output,
                 args.steps,
                 args.batch_size,
@@ -114,7 +118,10 @@ def _sac(args: argparse.Namespace) -> int:
             )
         )
     else:
-        result = run_experiment(SACCriticReplay(args.checkpoint, args.replay, args.report))
+        replay = (
+            args.replay if args.replay is not None else args.checkpoint / "experience/replay.json"
+        )
+        result = run_experiment(SACCriticReplay(args.checkpoint, replay, args.report))
     print(json.dumps(result.summary["sac"], ensure_ascii=False))
     return (
         4
@@ -258,8 +265,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         help="Append compatible sealed experience with explicit digest; repeat up to 10 times",
     )
     sac_policy = commands.add_parser("sac-policy-replay", help="Replay a frozen learned SAC policy")
-    for name in ("checkpoint", "replay", "report"):
+    for name in ("checkpoint", "report"):
         sac_policy.add_argument("--" + name, type=Path, required=True)
+    sac_policy.add_argument(
+        "--replay", type=Path, help="Experience file; omitted uses the checkpoint's sealed replay"
+    )
     sac_policy.add_argument(
         "--raw-cache-bytes",
         type=int,
@@ -276,7 +286,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     for name in ("model", "replay", "output"):
         sac_warmup.add_argument("--" + name, type=Path, required=True)
-    sac_warmup.add_argument("--replay-sha256", required=True)
+    sac_warmup.add_argument(
+        "--replay-sha256", help="Require this exact replay digest; omitted binds the selected file"
+    )
     sac_warmup.add_argument("--steps", type=int, default=100)
     sac_warmup.add_argument("--batch-size", type=int, default=32)
     sac_warmup.add_argument("--learning-rate", type=float, default=0.0001)
@@ -296,8 +308,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     sac_replay = commands.add_parser(
         "sac-critic-replay", help="Reload frozen BC and warmed critics without updating"
     )
-    for name in ("checkpoint", "replay", "report"):
+    for name in ("checkpoint", "report"):
         sac_replay.add_argument("--" + name, type=Path, required=True)
+    sac_replay.add_argument(
+        "--replay", type=Path, help="Experience file; omitted uses the checkpoint's sealed replay"
+    )
     prepare = commands.add_parser(
         "collection-prepare", help="Freeze a separate passive collector; no devices"
     )
