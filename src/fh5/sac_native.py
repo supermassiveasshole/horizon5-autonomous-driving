@@ -74,9 +74,17 @@ class NativeSACSamplingEnvironment:
         self.errors: list[str] = []
         self.resources_released = True
         self.commands_sent = 0
+        self.menu_sends = 0
         self.attempts = 0
 
-    def _plan(self, start: SACRealtimeStart, path: Path) -> NumericDriveConfiguration:
+    def _plan(
+        self,
+        start: SACRealtimeStart,
+        path: Path,
+        *,
+        exploratory: bool,
+        expected_conditions: dict[str, Any] | None,
+    ) -> NumericDriveConfiguration:
         from fh5.experiment import _validate_config
 
         plan = NumericDriveConfiguration(
@@ -89,7 +97,7 @@ class NativeSACSamplingEnvironment:
             not start.request.live
             or plan.request != start.request
             or plan.model_hash != start.expected_sha256
-            or plan.exploration_seed != start.seed
+            or plan.exploration_seed != (start.seed if exploratory else None)
             or record["control_source"] != "policy"
             or task["control_owner"] != "policy"
             or record["snapshot"] != self.event["snapshot"]
@@ -103,6 +111,8 @@ class NativeSACSamplingEnvironment:
             )
         ):
             raise ValueError("Native sampling runtime, route or event/record conditions differ")
+        if expected_conditions is not None and plan.bindings["conditions"] != expected_conditions:
+            raise ValueError("Native preparation differs from frozen input conditions")
         if task["version"] == 2 and (
             sha256_file(start.task_file.parent / task["automatic_start"]["event_file"])
             != task["automatic_start"]["event_sha256"]
@@ -113,7 +123,14 @@ class NativeSACSamplingEnvironment:
             raise ValueError("Native sampling differs from the automatic start task")
         return plan
 
-    def start(self, start: SACRealtimeStart) -> RealtimeEnvironment:
+    def prepare(
+        self,
+        start: SACRealtimeStart,
+        *,
+        exploratory: bool = True,
+        expected_conditions: dict[str, Any] | None = None,
+    ) -> tuple[NumericDriveConfiguration, dict[str, Any]]:
+        """Restart and qualify this exact candidate before opening its driving lease."""
         from fh5.experiment import run_experiment
 
         root = start.request.output_dir.parent
@@ -132,12 +149,17 @@ class NativeSACSamplingEnvironment:
                 "directory": str(start.checkpoint.resolve()),
                 "device": "cpu",
                 "manifest_sha256": start.expected_sha256,
-                "exploration_seed": start.seed,
+                **({"exploration_seed": start.seed} if exploratory else {}),
             }
             document["shadow"] = None
             config_file = root / "shadow-config.json"
             write_file(config_file, encode(document))
-            plan = self._plan(start, config_file)
+            plan = self._plan(
+                start,
+                config_file,
+                exploratory=exploratory,
+                expected_conditions=expected_conditions,
+            )
             if plan.qualification["reasons"] != ["missing_shadow_evidence"]:
                 plan.require_eligible()
             for name, payload in self.event_assets.items():
@@ -176,7 +198,12 @@ class NativeSACSamplingEnvironment:
                 raise ValueError("Native sampling restart was not confirmed")
             check_stop()
             previous_bindings = plan.bindings
-            plan = self._plan(start, config_file)
+            plan = self._plan(
+                start,
+                config_file,
+                exploratory=exploratory,
+                expected_conditions=expected_conditions,
+            )
             if (
                 plan.bindings != previous_bindings
                 or event_payloads(event_file) != self.event_assets
@@ -208,8 +235,32 @@ class NativeSACSamplingEnvironment:
             document["shadow"] = {"directory": str((root / "shadow").resolve())}
             config_file = root / "drive.json"
             write_file(config_file, encode(document))
-            plan = self._plan(start, config_file)
+            plan = self._plan(
+                start,
+                config_file,
+                exploratory=exploratory,
+                expected_conditions=expected_conditions,
+            )
             plan.require_eligible()
+            if not self.close()["resources_released"]:
+                raise ValueError("Native preparation resources remain unreleased")
+            return plan, prepared
+        except (Exception, KeyboardInterrupt) as error:
+            released = self.close()
+            if isinstance(error, LearningUnavailable):
+                error.resources_released &= released["resources_released"]
+                raise
+            raise LearningUnavailable(
+                str(error), resources_released=released["resources_released"]
+            ) from error
+
+    def start(self, start: SACRealtimeStart) -> RealtimeEnvironment:
+        def check_stop() -> None:
+            if start.stopped():
+                raise InterruptedError("Native sampling stopped before driving acquisition")
+
+        try:
+            plan, prepared = self.prepare(start)
             check_stop()
             try:
                 driving_source = self.driving_factory(plan)
@@ -231,6 +282,9 @@ class NativeSACSamplingEnvironment:
             )
         except (Exception, KeyboardInterrupt) as error:
             released = self.close()
+            if isinstance(error, LearningUnavailable):
+                error.resources_released &= released["resources_released"]
+                raise
             raise LearningUnavailable(
                 str(error), resources_released=released["resources_released"]
             ) from error
@@ -256,8 +310,10 @@ class NativeSACSamplingEnvironment:
             except (Exception, KeyboardInterrupt) as error:
                 self.errors.append(str(error))
             self.commands_sent += menu.sends
+            self.menu_sends += menu.sends
         return {
             "resources_released": self.resources_released and not self.errors,
             "commands_sent_to_game": self.commands_sent > 0,
+            "menu_sends": self.menu_sends,
             "errors": list(self.errors),
         }

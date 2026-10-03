@@ -35,25 +35,43 @@ def seal_evaluation(root: Path) -> None:
     atomic_json(root / "completion.json", {"version": 1, "files": _digests(root)})
 
 
-def completed_evaluation(request: EvaluationRun) -> dict[str, Any]:
+def completed_evaluation(
+    request: EvaluationRun, *, expected_native: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """Recover against parent-authenticated native bindings, never the child's declaration."""
     from fh5.experiment import run_experiment
 
+    if request.live != (expected_native is not None):
+        raise ValueError("Evaluation recovery requires matching parent native qualification")
     root = request.output_dir
     seal = _read(root / "completion.json", 4096)[0]
     if seal != {"version": 1, "files": _digests(root)}:
         raise ValueError("Completed evaluation publication changed")
     batch, _, _ = read_evaluation_batch(root / "frozen", request.batch_sha256)
     read_evaluation_batch(request.batch_dir, request.batch_sha256)
+    if expected_native is not None and (
+        batch["version"] != 3
+        or expected_native.get("qualification", {}).get("eligible") is not True
+        or expected_native.get("qualification", {}).get("reasons") != []
+        or expected_native.get("bindings", {}).get("model_manifest_sha256")
+        != batch["config"]["model"]["manifest_sha256"]
+        or expected_native.get("bindings", {}).get("inference_device")
+        != batch["config"]["model"]["device"]
+        or expected_native.get("bindings", {}).get("conditions")
+        != batch["config"]["conditions"]["numeric_input_conditions"]
+    ):
+        raise ValueError("Parent native qualification differs from the frozen evaluation")
     events = event_payloads(request.event_config_file)
     expected_protocol = {
-        "version": 1,
+        "version": 2 if request.live else 1,
         "batch_sha256": request.batch_sha256,
         "seconds_per_attempt": request.seconds,
         "event_files": {
             name.removeprefix("start/"): hashlib.sha256(raw).hexdigest()
             for name, raw in events.items()
         },
-        "source_kind": "synthetic",
+        "source_kind": "native" if request.live else "synthetic",
+        **({"native": expected_native} if request.live else {}),
         "exploration": False,
         "rewind": False,
         "initial_operation": request.initial_operation,
@@ -77,7 +95,9 @@ def completed_evaluation(request: EvaluationRun) -> dict[str, Any]:
         result.get("version") != 1
         or result.get("stop_reason") not in ("plan_complete", "execution_stopped")
         or result.get("resources_released") is not True
-        or result.get("commands_sent_to_game") is not False
+        or type(result.get("commands_sent_to_game")) is not bool
+        or not request.live
+        and result["commands_sent_to_game"] is not False
         or result.get("environment", {}).get("resources_released") is not True
         or not 0 < count <= len(slots)
         or started != slots[:count]
@@ -98,6 +118,14 @@ def completed_evaluation(request: EvaluationRun) -> dict[str, Any]:
     for index, slot in enumerate(started):
         directory = root / f"attempt-{index:04d}"
         execution = read_realtime_recording(directory / "execution")
+        if execution["evidence_kind"] != ("native" if request.live else "synthetic") or (
+            expected_native is not None
+            and (
+                execution["environment"].get("input_conditions") != expected_native["bindings"]
+                or execution["environment"].get("qualification") != expected_native["qualification"]
+            )
+        ):
+            raise ValueError("Completed evaluation execution differs from its requested source")
         read_realtime_journal(directory / "execution", execution, time_limit_s=request.seconds)
         preparation = _read(directory / "ready/event-run.json")[0]["summary"]
         if preparation.get("operation") != (

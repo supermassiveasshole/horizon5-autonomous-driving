@@ -1,4 +1,4 @@
-"""Serial, bounded sample/learn/evaluate/retain orchestration over synthetic I/O."""
+"""Serial sample/learn/evaluate/retain orchestration over declared external I/O."""
 
 from __future__ import annotations
 
@@ -58,18 +58,20 @@ _Lease = TypeVar("_Lease", bound=SACEnvironment | SACRealtimeEnvironment | Evalu
 class LearningLoop:
     config_file: Path
     output_dir: Path
+    live: bool = False
 
 
 @dataclass(frozen=True)
 class LearningContinue:
     run_dir: Path
     expected_state_sha256: str | None = None
+    live: bool = False
 
 
 class LearningEnvironment(Protocol):
     """One backend, serial leases. Review supplies independent raw evidence, or None."""
 
-    source_kind: Literal["synthetic"]
+    source_kind: Literal["synthetic", "native"]
 
     def sampling(self, identity: str) -> SACEnvironment | SACRealtimeEnvironment: ...
     def evaluation(self, identity: str) -> EvaluationEnvironment: ...
@@ -83,11 +85,11 @@ def _sha(path: Path) -> str:
 
 def _configuration(path: Path) -> dict[str, Any]:
     config: dict[str, Any] = json.loads(read_bounded(path, 1024**2))
-    asynchronous = config.get("version") == 3
+    asynchronous = config.get("version") in (3, 4)
     if (
         set(config)
         - {"acquisition_retry", "sampling_retry"}
-        - ({"storage", "storage_monitor"} if config.get("version") in (2, 3) else set())
+        - ({"storage", "storage_monitor"} if config.get("version") in (2, 3, 4) else set())
         != {
             "version",
             "store",
@@ -101,7 +103,7 @@ def _configuration(path: Path) -> dict[str, Any]:
             "seed",
         }
         or type(config["version"]) is not int
-        or config["version"] not in (1, 2, 3)
+        or config["version"] not in (1, 2, 3, 4)
     ):
         raise ValueError("Unsupported learning loop configuration")
     if config["version"] == 2 or "storage" in config:
@@ -117,9 +119,9 @@ def _configuration(path: Path) -> dict[str, Any]:
             or set(sampling) != {"runtime", "seconds", "max_updates"}
             or type(sampling["seconds"]) not in (int, float)
             or not math.isfinite(sampling["seconds"])
-            or not 0.1 <= sampling["seconds"] <= 600
+            or sampling["seconds"] <= 0
             or type(sampling["max_updates"]) is not int
-            or not 1 <= sampling["max_updates"] <= 1000
+            or sampling["max_updates"] < 1
         ):
             raise ValueError("Learning async sampling requires finite duration and updates")
         runtime = _sampling_runtime(sampling)
@@ -132,10 +134,10 @@ def _configuration(path: Path) -> dict[str, Any]:
             not isinstance(retry, dict)
             or set(retry) != {"max_retries", "delay_seconds"}
             or type(retry["max_retries"]) is not int
-            or not 0 <= retry["max_retries"] <= 3
+            or retry["max_retries"] < 0
             or type(retry["delay_seconds"]) not in (int, float)
             or not math.isfinite(retry["delay_seconds"])
-            or not 0 <= retry["delay_seconds"] <= 5
+            or retry["delay_seconds"] < 0
         ):
             raise ValueError("Learning acquisition retries require explicit finite bounds")
     if "sampling_retry" in config:
@@ -144,16 +146,18 @@ def _configuration(path: Path) -> dict[str, Any]:
             not isinstance(retry, dict)
             or set(retry) != {"max_retries"}
             or type(retry["max_retries"]) is not int
-            or not 0 <= retry["max_retries"] <= 3
+            or retry["max_retries"] < 0
         ):
-            raise ValueError("Learning sampling retries require an integer bound from 0 to 3")
-    for key, low, high in (
-        ("rounds", 1, 10),
-        ("seed", 0, 2**32 - 11),
-        *(() if asynchronous else (("steps_per_attempt", 1, 1000),)),
+            raise ValueError("Learning sampling retries require a nonnegative integer budget")
+    for key, low in (
+        ("rounds", 1),
+        ("seed", 0),
+        *(() if asynchronous else (("steps_per_attempt", 1),)),
     ):
-        if type(config[key]) is not int or not low <= config[key] <= high:
+        if type(config[key]) is not int or config[key] < low:
             raise ValueError("Invalid learning loop bound: " + key)
+    if config["seed"] >= 2**32:
+        raise ValueError("Learning seed must fit the sampler's unsigned 32-bit seed")
     seconds = config["evaluation_seconds"]
     if type(seconds) not in (int, float) or not math.isfinite(seconds) or not 0.1 <= seconds <= 600:
         raise ValueError("Learning evaluation requires a finite duration")
@@ -198,6 +202,8 @@ def _learner(path: Path, expected: str) -> dict[str, Any]:
 class _Loop:
     def __init__(self, root: Path, config: dict[str, Any], environment: LearningEnvironment):
         self.root, self.config, self.environment = root, config, environment
+        self.native = config["version"] == 4
+        self.source_kind: Literal["synthetic", "native"] = "native" if self.native else "synthetic"
         self.monitor: StorageMonitor | None = None
         self.requested_stop_reason: str | None = None
         self.stop_lock = Lock()
@@ -206,7 +212,7 @@ class _Loop:
         self.stages = StageHistory(root)
         self.state: dict[str, Any] = {
             "version": 1,
-            "scope": "synthetic_development_only",
+            "scope": "native_development_only" if self.native else "synthetic_development_only",
             "rounds": [],
             "rounds_completed": 0,
             "eligible_transitions": 0,
@@ -251,12 +257,16 @@ class _Loop:
         history = run_experiment(CandidateHistory(self.store, limit=0)).summary["candidate_store"]
         if history["revision"] != self.config["store"]["revision"]:
             raise ValueError("Learning store revision changed before initialization")
+        if history["scope"] != self.state["scope"]:
+            raise ValueError("Learning store scope differs from the frozen configuration")
         self.state["store_revision"] = history["revision"]
         self.state["incumbent"] = _qualification(history)
         self.state["source_files"] = {
             self.config[key]: _sha(Path(self.config[key]))
             for key in ("recording", "task", "reward")
         }
+        if self.native:
+            self.state["environment_protocol"] = getattr(self.environment, "protocol")
         self.state["config_sha256"] = _sha(self.root / "config.json")
         self.state["initialized"] = False
         self.save("initializing")
@@ -338,6 +348,9 @@ class _Loop:
                     previous = self.state["child_resources_released"]
                     self.state["child_resources_released"] = False
                     released = source.close()
+                    self.state["commands_sent_to_game"] |= released.get(
+                        "commands_sent_to_game", False
+                    )
                     self.state.setdefault("acquisition_closes", []).append(
                         {"kind": kind, "round": number, "release": released}
                     )
@@ -378,10 +391,12 @@ class _Loop:
         state = read_json(path, expected_sha256=current)
         if (
             state["version"] != 1
-            or state["scope"] != "synthetic_development_only"
+            or state["scope"] != self.state["scope"]
             or _sha(self.root / "config.json") != state["config_sha256"]
         ):
             raise ValueError("Learning continuation configuration changed")
+        if self.native and getattr(self.environment, "protocol") != state["environment_protocol"]:
+            raise ValueError("Frozen native learning environment changed")
         self.state = state
         self.stages = StageHistory(self.root, state["stages"])
         if state["child_resources_released"] is not True:
@@ -477,12 +492,20 @@ class _Loop:
     def verify(self) -> None:
         from fh5.experiment import run_experiment
 
+        if (
+            self.native
+            and getattr(self.environment, "protocol") != self.state["environment_protocol"]
+        ):
+            raise ValueError("Frozen native learning environment changed")
         if any(
             _sha(Path(path)) != expected for path, expected in self.state["source_files"].items()
         ):
             raise ValueError("Frozen learning inputs changed")
         history = run_experiment(CandidateHistory(self.store, limit=0)).summary["candidate_store"]
-        if history["revision"] != self.state["store_revision"]:
+        if (
+            history["revision"] != self.state["store_revision"]
+            or history["scope"] != self.state["scope"]
+        ):
             raise ValueError("Learning store changed outside this loop")
         _input(self.root, self.state["incumbent"]).verify()
 
@@ -490,7 +513,7 @@ class _Loop:
         count: int = row.get("eligible_transitions", 0)
         return sampling_update_budget(
             count,
-            self.config["sampling"]["max_updates"] if self.config["version"] == 3 else None,
+            self.config["sampling"]["max_updates"] if self.config["version"] in (3, 4) else None,
         )
 
     def sampling_request(self, number: int) -> SACCycle | SACRealtimeCycle:
@@ -502,7 +525,7 @@ class _Loop:
         )
         learner = self.state["latest_learner"]
         seed = (self.config["seed"] + number + attempt * self.config["rounds"]) % 2**32
-        if self.config["version"] == 3:
+        if self.config["version"] in (3, 4):
             sampling = self.config["sampling"]
             return SACRealtimeCycle(
                 Path(learner["directory"]),
@@ -516,6 +539,7 @@ class _Loop:
                 cycles=1,
                 seed=seed,
                 expected_checkpoint_sha256=learner["sha256"],
+                live=self.native,
             )
         return SACCycle(
             Path(learner["directory"]),
@@ -594,6 +618,7 @@ class _Loop:
             proposed["candidate_sha256"] = learner["sha256"]
         row.update(proposed)
         self.state["child_resources_released"] &= summary["resources_released"]
+        self.state["commands_sent_to_game"] |= summary.get("commands_sent_to_game", False)
         self.state["eligible_transitions"] += row["eligible_transitions"]
         self.state["learner_updates"] += row["learner_updates"]
         if learner is not None:
@@ -680,7 +705,7 @@ class _Loop:
             summary = run_experiment(
                 request,
                 sac_realtime_environment=RealtimeSamplingLease(
-                    cast(SACRealtimeEnvironment, source), self.save
+                    cast(SACRealtimeEnvironment, source), self.save, self.source_kind
                 ),
                 sac_stop_requested=lambda _: self.stopped(),
             ).summary["sac_cycle"]
@@ -834,16 +859,50 @@ class _Loop:
                 self.config["evaluation_seconds"],
                 self.registry,
                 initial_operation="restart_ready",
-            )
+                live=self.native,
+            ),
+            expected_native=self.native_evaluation_binding(root, row, batch),
         )
         if "evaluation_run" in row and row["evaluation_run"] != execution:
             raise ValueError("Acknowledged evaluation summary changed")
         row["evaluation_run"] = execution
         row["evaluation_completion_sha256"] = _sha(completion)
+        self.state["commands_sent_to_game"] |= execution.get("commands_sent_to_game", False)
         if acknowledged is None:
             self.state.setdefault("recoveries", []).append(
                 {"kind": "sealed_evaluation", "round": number}
             )
+
+    def native_evaluation_binding(
+        self, root: Path, row: dict[str, Any], batch: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        if not self.native:
+            return None
+        from fh5.numeric_drive_config import NumericDriveConfiguration
+
+        saved = row["native_evaluation"]
+        plan = NumericDriveConfiguration(
+            Path(saved["configuration"]),
+            root / "evaluation",
+            self.config["evaluation_seconds"],
+            True,
+        )
+        plan.require_eligible()
+        binding = {"bindings": plan.bindings, "qualification": plan.qualification}
+        runtime = json.loads(
+            encode({**asdict(plan.request.config), "pixels": plan.capture.pixels.metadata()})
+        )
+        if (
+            binding != saved["binding"]
+            or plan.model_hash != batch["config"]["model"]["manifest_sha256"]
+            or plan.device != batch["config"]["model"]["device"]
+            or runtime != batch["config"]["runtime"]
+            or plan.exploration_seed is not None
+            or plan.task.expected_route_sha256
+            != read_json(root / "batch/task.json")["route_sha256"]
+        ):
+            raise ValueError("Frozen native evaluation qualification changed")
+        return binding
 
     def review_ledger(self, root: Path, row: dict[str, Any]) -> Path:
         child = root / "evaluation"
@@ -884,8 +943,9 @@ class _Loop:
             "kind": "sac",
             "directory": learner["directory"],
             "manifest_sha256": learner["sha256"],
+            **({"device": basis.batch["config"]["model"]["device"]} if self.native else {}),
         }
-        config["version"] = 2
+        config["version"] = 3 if self.native else 2
         config["task"]["file"] = str(basis.batch_dir / "task.json")
         path = root / "evaluation.json"
         batch = root / "batch"
@@ -928,6 +988,14 @@ class _Loop:
                     row[field] = True
                 return reason is not None
 
+            def evaluation_prepared(binding: dict[str, Any]) -> None:
+                row["native_evaluation"] = {
+                    "configuration": str(getattr(source, "configuration")),
+                    "binding": binding,
+                }
+                self.native_evaluation_binding(root, row, frozen)
+                self.save("evaluating")
+
             execution = run_experiment(
                 EvaluationRun(
                     batch,
@@ -937,11 +1005,14 @@ class _Loop:
                     self.config["evaluation_seconds"],
                     self.registry,
                     initial_operation="restart_ready",
+                    live=self.native,
                 ),
                 evaluation_environment=EvaluationLease(
                     source,
                     self.save,
                     evaluation_stopped,
+                    self.source_kind,
+                    evaluation_prepared if self.native else None,
                 ),
             ).summary["evaluation_run"]
             completion = root / "evaluation/completion.json"
@@ -949,6 +1020,7 @@ class _Loop:
                 row["evaluation_completion_sha256"] = _sha(completion)
         row["evaluation_run"] = execution
         self.state["child_resources_released"] &= execution["resources_released"]
+        self.state["commands_sent_to_game"] |= execution.get("commands_sent_to_game", False)
         attempt = 0
         review_output = root / "reviewed"
         while review_output.exists() or review_output.is_symlink() or review_output.is_junction():
@@ -987,7 +1059,7 @@ class _Loop:
             comparison: payload,
             root / "retain.json": encode(
                 {
-                    "version": 1,
+                    "version": 2 if self.native else 1,
                     "comparison": {
                         "file": str(comparison.resolve()),
                         "sha256": hashlib.sha256(payload).hexdigest(),
@@ -1031,6 +1103,7 @@ class _Loop:
             or not all(row["complete"] for row in rows[:-1])
             or history["parent"] != self.state["store_revision"]
             or history["operation"] != "selection"
+            or history["scope"] != self.state["scope"]
             or history["selection"] not in ("prefer_candidate_locally", "retain_incumbent")
         ):
             raise ValueError("Learning store changed outside the pending candidate commit")
@@ -1184,6 +1257,13 @@ def run_learning_loop(
     else:
         root = request.output_dir.resolve()
         config = _configuration(request.config_file)
+    native = config["version"] == 4
+    if type(request.live) is not bool or request.live != native:
+        raise ValueError(
+            "Native learning requires explicit live opt-in; synthetic learning forbids it"
+        )
+    if environment.source_kind != ("native" if native else "synthetic"):
+        raise ValueError("Learning source differs from its frozen configuration")
     if not continuing:
         if root.exists():
             raise FileExistsError(root)
@@ -1195,8 +1275,6 @@ def run_learning_loop(
     began = time.monotonic()
     publish = not continuing
     try:
-        if environment.source_kind != "synthetic":
-            raise ValueError("Learning loop currently requires synthetic external I/O")
         lease.acquire()
         if isinstance(request, LearningContinue):
             ready = loop.restore(request.expected_state_sha256)
@@ -1216,16 +1294,27 @@ def run_learning_loop(
             raise
         if isinstance(error, RejectedLease):
             loop.state["rejected_lease"] = error.released
+            loop.state["commands_sent_to_game"] |= error.released.get(
+                "commands_sent_to_game", False
+            )
             loop.state["child_resources_released"] &= (
                 error.released.get("resources_released") is True
             )
+        interrupted = isinstance(error, (InterruptedError, KeyboardInterrupt)) or isinstance(
+            error.__cause__, (InterruptedError, KeyboardInterrupt)
+        )
         loop.state.update(
-            stop_reason="user_stop" if isinstance(error, KeyboardInterrupt) else "interface_error",
+            stop_reason=(loop.stopping_reason() or "user_stop")
+            if interrupted
+            else "interface_error",
             error=f"{type(error).__name__}: {error}",
         )
     finally:
         try:
             loop.state["environment"] = environment.close()
+            loop.state["commands_sent_to_game"] |= loop.state["environment"].get(
+                "commands_sent_to_game", False
+            )
             loop.state["resources_released"] = (
                 loop.state["environment"].get("resources_released") is True
             ) and loop.state["child_resources_released"]
@@ -1246,7 +1335,7 @@ def run_learning_loop(
             loop.stages.close()
     report = optional_report(
         root / "report.html",
-        "合成自主学习循环（循环运行不等于驾驶能力提升）",
+        "自主学习循环（循环运行不等于驾驶能力提升）",
         loop.state,
         fallback=root / "state.json",
     )

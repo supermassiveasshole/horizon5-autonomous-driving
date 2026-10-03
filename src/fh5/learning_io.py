@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
 from fh5.control import Command
-from fh5.evaluation_run import EvaluationEnvironment
+from fh5.evaluation_run import EvaluationEnvironment, EvaluationRun
 from fh5.events import EventEnvironment, EventInput
 from fh5.numeric_images import PixelContract
 from fh5.realtime import RealtimeEnvironment, RealtimeRun, TimelineInput
@@ -28,14 +28,15 @@ class LearningUnavailable(RuntimeError):
 
 class RejectedLease(ValueError):
     def __init__(self, released: dict[str, Any]):
-        super().__init__("Learning lease must use synthetic external I/O")
+        super().__init__("Learning lease source differs from its frozen configuration")
         self.released = released
 
 
-def _require_synthetic(
+def _require_source(
     source: SACEnvironment | SACRealtimeEnvironment | EvaluationEnvironment,
+    expected: Literal["synthetic", "native"],
 ) -> None:
-    if source.source_kind != "synthetic":
+    if source.source_kind != expected:
         try:
             released = source.close()
         except Exception as error:
@@ -44,10 +45,16 @@ def _require_synthetic(
 
 
 class _SamplingLease[Sampling: SACEnvironment | SACRealtimeEnvironment]:
-    source_kind: Literal["synthetic"] = "synthetic"
+    source_kind: Literal["synthetic", "native"]
 
-    def __init__(self, source: Sampling, phase: Callable[[str], None]):
-        _require_synthetic(source)
+    def __init__(
+        self,
+        source: Sampling,
+        phase: Callable[[str], None],
+        expected: Literal["synthetic", "native"] = "synthetic",
+    ):
+        _require_source(source, expected)
+        self.source_kind = expected
         self.source = source
         self.phase = phase
         self.released: dict[str, Any] | None = None
@@ -72,6 +79,8 @@ class _SamplingLease[Sampling: SACEnvironment | SACRealtimeEnvironment]:
 
 
 class SamplingLease(_SamplingLease[SACEnvironment]):
+    source_kind: Literal["synthetic"] = "synthetic"
+
     def start(self, epoch: str, pixels: PixelContract) -> SACStart:
         self.phase("restarting_sampling")
         result = self.source.start(epoch, pixels)
@@ -158,16 +167,35 @@ class StoppingDrive:
 
 
 class EvaluationLease:
-    source_kind: Literal["synthetic"] = "synthetic"
+    source_kind: Literal["synthetic", "native"]
 
     def __init__(
         self,
         source: EvaluationEnvironment,
         phase: Callable[[str], None],
         stopped: Callable[[], bool],
+        expected: Literal["synthetic", "native"] = "synthetic",
+        prepared: Callable[[dict[str, Any]], None] | None = None,
     ):
-        _require_synthetic(source)
+        _require_source(source, expected)
+        self.source_kind, self.prepared = expected, prepared
         self.source, self.phase, self.stopped = source, phase, stopped
+
+    def prepare(self, request: EvaluationRun, batch: dict[str, Any]) -> dict[str, Any]:
+        interruptible = getattr(self.source, "prepare_stopped", None)
+        qualify = getattr(self.source, "prepare", None)
+        if not callable(qualify):
+            raise ValueError("Native evaluation requires frozen policy qualification")
+        if self.stopped():
+            raise InterruptedError("Learning stopped before evaluation qualification")
+        result: dict[str, Any] = (
+            interruptible(request, batch, self.stopped)
+            if callable(interruptible)
+            else qualify(request, batch)
+        )
+        if self.prepared is not None:
+            self.prepared(result)
+        return result
 
     def event(self, slot_id: str) -> EventEnvironment:
         self.phase("restarting_evaluation")

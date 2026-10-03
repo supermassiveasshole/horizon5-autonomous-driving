@@ -1,6 +1,6 @@
-# 连续合成学习循环（T14 / #15）
+# 连续学习循环（T14 / #15）
 
-`LearningLoop` 将已交付的 SAC 采样与续训、冻结评估、候选保存串成有限轮次的运行。外部环境响应模型实际命令，Torch 实际更新网络；常规轮次不需要新增示范、人工重开或逐轮批准。当前只支持显式合成环境，不能用于连接 FH5，也不能据此宣称驾驶能力改善。#15 保持开放，实机及剩余故障恢复验收另行记录。
+`LearningLoop` 将 SAC 采样与续训、冻结评估、候选保存串成按配置轮数执行的运行。外部环境响应模型实际命令，Torch 实际更新网络；常规轮次不需要新增示范、人工重开或逐轮批准。版本 1–3 使用合成环境；版本 4 接入原生短段适配器，启动和接续均须显式 `live=True`。软件运行通过不代表 FH5 驾驶能力改善；#15 保持开放，实机验收另行记录。
 
 ## 启动
 
@@ -32,7 +32,7 @@ result = run_experiment(
 )
 ```
 
-输出目录必须全新且在版本库之外。轮数限 1–10，单次采样限 1–1000 个动作；每个新接纳转移至多获得一次更新。评估沿用当前默认版的冻结条件、门槛、任务、原始起跑模板和无参考输入协议，关闭探索；当前重复执行器限每批 1–10 次。配置和原始依赖必须保留，不支持悄悄换奖励、路线或像素契约后继续原会话。
+输出目录必须全新且在版本库之外。轮数由调用方给定正整数预算，不再额外限制为 10；每个新接纳转移至多获得一次更新。旧同步采样器仍有单次 1–1000 个动作的实现限制，当前重复评估器仍限每批 1–10 次，尚未在本切片清理。评估沿用默认版的冻结条件、门槛、任务、原始起跑模板和无参考输入协议，关闭探索。配置和原始依赖必须保留，不支持悄悄换奖励、路线或像素契约后继续原会话。
 
 ## 一个外部环境，顺序交接
 
@@ -75,15 +75,15 @@ config["sampling"] = {
 
 `runtime` 是包含 `pixels` 和 `action_offsets_ms` 等运行参数的对象。
 加载时补齐并冻结运行器默认值，保存到会话配置；后续接续不得悄悄改变它们。
-采样限 0.1–600 秒，更新上限 1–1000；每轮实际更新预算取新合格转移数与 `max_updates` 的较小值。
+采样时长须为正有限值，并满足所用执行器的运行条件；`max_updates` 是调用方给定的正整数预算，不再额外限制为 1000。每轮实际更新预算取新合格转移数与 `max_updates` 的较小值。
 合格经验数量与更新预算分别记录，完成低更新比训练后不会自动补到全部经验数量。
 
 版本 3 的 `LearningEnvironment.sampling(identity)` 返回 `SACRealtimeEnvironment`，其
-`start(identity, runtime)` 返回一次异步 `RealtimeEnvironment`。图像、遥测、推理与动作监督使用
+`start(SACRealtimeStart)` 接收当前候选、摘要、探索种子和协议，返回一次异步 `RealtimeEnvironment`。图像、遥测、推理与动作监督使用
 现有数值运行器；`finish(recording_dir)` 仍提供独立任务依据。只有运行器与采样租约都确认释放，
 才进入经验准备和学习；冻结评估继续使用 `evaluation(identity)`，两类资源不同时持有。
 
-当前仍限合成外部 I/O、实际 CPU 模型；没有启用原生 SAC、游戏重置、倒带或 CUDA。
+版本 3 仍限合成外部 I/O、实际 CPU 模型；原生适配使用下述版本 4，不会悄悄改变旧配置的执行来源。
 版本 1/2 继续使用同步适配器，不能把旧记录改标签后当作异步记录。
 版本 3 可选 `storage` 和 `storage_monitor`（后者要求前者），支持既有有限获取重试和采样重试设置。
 
@@ -109,6 +109,41 @@ SQLite 原件索引先分块复制到私有临时快照，校验该快照后以�
 这次修改不宣称所有采集、BC 或评估页面均已隔离。
 
 实际软件验证及限制见[异步连续学习记录](validation/t14-asynchronous-learning.md)。
+
+### 版本 4：原生短段循环
+
+版本 4 沿用版本 3 的配置字段，但要求 `native_development_only` 候选版本库，以及
+`NativeLearningEnvironment`。合成版本库不能改标签后复用。调用示例：
+
+```python
+from fh5.learning_native import NativeLearningEnvironment
+from fh5.learning_loop import LearningLoop, LearningContinue
+
+environment = NativeLearningEnvironment(
+    Path("configs/numeric-drive.json"),
+    Path("configs/event.json"),
+    shadow_seconds=shadow_budget_s,
+    handoff_timeout_s=task_handoff_s,
+    review=independent_review,
+)
+result = run_experiment(
+    LearningLoop(Path("configs/native-learning.json"), Path("runs/learning-native"), live=True),
+    learning_environment=environment,
+)
+```
+
+采样使用最新完整探索版：完整重开 → 当前模型与探索种子的只读检查 → 有界驾驶 →
+释放输入 → 独立结算 → SAC 更新。随后对新候选另做关闭探索的只读检查，再按冻结批次
+重复评估并保留版本；失败或未胜出不丢弃学习进度。菜单、采集与手柄沿用既有原生适配器。
+本入口仍受既有低速短段控制条件约束，未扩展为全程驾驶或自主倒带。
+
+`review` 必须返回独立观察证据。省略它时保留原始采样，但不产生合格经验、不更新模型；
+软件没有自动识别 FH5 蹭墙、捷径等全部违规的能力。测试外设提供的独立世界状态不能当作游戏识别结果。
+
+接续使用新的同配置环境和 `LearningContinue(run_dir, live=True)`；`expected_state_sha256` 仍为可选精确断言。
+父状态绑定部署配置、采集配置、路线、菜单原件及检查预算；评估还绑定新模型的确定性
+资格原件。恢复重新核对这些绑定、实际执行与完整 learner；已封存子任务可以接纳，不重复采样。
+实际发送命令与资源释放据实汇总，正式驾驶能力和驾驶改善标志继续保持未验证。
 
 ### 同步适配器与公共评估接口
 
@@ -137,7 +172,7 @@ SQLite 原件索引先分块复制到私有临时快照，校验该快照后以�
 "acquisition_retry": {"max_retries": 2, "delay_seconds": 0.2}
 ```
 
-`max_retries` 为 0–3 的整数，表示首次请求之外的重试次数；`delay_seconds` 为 0–5 秒的有限等待。预算分别作用于每一轮的采样、评估获取过程。等待期间持有零个驾驶租约，检查用户停止；每次重试前重新核对冻结输入、版本库与容量。失败记录保存在 `acquisition_failures`，含阶段、轮次、次数、原因、资源释放状态及接续序号。
+`max_retries` 为调用方给定的非负整数，表示首次请求之外的重试次数；`delay_seconds` 为非负有限等待。两者不再额外套用 3 次和 5 秒上限。预算分别作用于每一轮的采样、评估获取过程。等待期间持有零个驾驶租约，检查用户停止；每次重试前重新核对冻结输入、版本库与容量。失败记录保存在 `acquisition_failures`，含阶段、轮次、次数、原因、资源释放状态及接续序号。
 
 只有 `LearningEnvironment.sampling()` / `.evaluation()` 明确抛出 `fh5.learning_io.LearningUnavailable(reason, resources_released=True)` 才自动重试。适配器须先释放失败获取中已分配的资源，再作该报告；普通异常和释放不确定的错误直接停止。后端整体关闭成功不能覆盖子资源的释放失败。该机制限制次数和等待，不会抢占一个不返回的外部获取调用；适配器自身仍须遵守响应期限。
 
@@ -149,7 +184,7 @@ SQLite 原件索引先分块复制到私有临时快照，校验该快照后以�
 
 ## 已封存采样失败的有限重采样
 
-版本 1、2 可额外配置 `"sampling_retry": {"max_retries": 1}`。范围为 0–3，表示每一轮首次采样之外允许的新尝试次数；省略或 0 保持原行为。额度覆盖该轮的全部显式接续，不因进程重启或调用 `LearningContinue` 而重置。它与尚未打开环境时的 `acquisition_retry` 分别计量。
+各版本可额外配置 `"sampling_retry": {"max_retries": 1}`。非负整数预算表示每轮首次采样之外允许的新尝试次数，不再额外限制为 3；省略或 0 保持原行为。额度覆盖该轮的全部显式接续，不因进程重启或调用 `LearningContinue` 而重置。它与尚未打开环境时的 `acquisition_retry` 分别计量。
 
 仅在子任务已经返回并封存失败摘要、明确释放全部资源、没有任何 learner 更新或候选输出时重采样。适用失败为 `sampling_fault` 和 `no_eligible_experience`；用户/资源停止先结束本次运行，解除条件并显式接续后才可消耗同一额度再尝试。存在部分候选目录、存档损坏或释放不明时仍拒绝自动重采样，不能把已发生但尚未确认的训练丢弃后重做。
 

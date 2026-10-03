@@ -75,16 +75,21 @@ def verify_archived_sampling(binding: dict[str, Any]) -> None:
     verify_sampling_sources(VerifiedFile(path, digest), root=root)
 
 
+def _source_kind(request: SACCycle | SACRealtimeCycle) -> str:
+    return "native" if isinstance(request, SACRealtimeCycle) and request.live else "synthetic"
+
+
 def _expected_protocol(request: SACCycle | SACRealtimeCycle) -> dict[str, Any]:
     files = (request.recording_config_file, request.task_file, request.reward_file)
     result = {
-        "source_kind": "synthetic",
+        "source_kind": _source_kind(request),
         "cycles": 1,
         **(
             {
                 "runtime": asdict(request.runtime),
                 "seconds_per_attempt": request.seconds_per_attempt,
                 "max_updates_per_attempt": request.max_updates_per_attempt,
+                **({"live": True} if request.live else {}),
             }
             if isinstance(request, SACRealtimeCycle)
             else {"steps_per_attempt": request.steps_per_attempt}
@@ -109,13 +114,16 @@ def retryable_sampling(
     if _sha(root / "summary.json") != expected_summary:
         raise ValueError("Retained sampling result changed")
     summary = read_json(root / "summary.json")
+    source_kind = _source_kind(request)
     reason = summary.get("stop_reason")
     attempts = summary.get("attempts", [])
     if (
         reason not in ("sampling_fault", "no_eligible_experience", "stop_requested")
-        or summary.get("source_kind") != "synthetic"
+        or summary.get("source_kind") != source_kind
         or summary.get("resources_released") is not True
-        or summary.get("commands_sent_to_game") is not False
+        or type(summary.get("commands_sent_to_game")) is not bool
+        or source_kind == "synthetic"
+        and summary["commands_sent_to_game"] is not False
         or summary.get("latest_candidate")
         or summary.get("error")
         or summary.get("release_error")
@@ -193,6 +201,11 @@ def _require_originals(
         if name == "trace.json" and (not trace_required or asynchronous is not None):
             continue
         require(root / name, sources[key] if sources is not None else None)
+    session_path = root / "recording/session.json"
+    session = read_json(session_path, expected_sha256=inventory[str(session_path.resolve())])
+    source_kind = _source_kind(asynchronous) if asynchronous is not None else "synthetic"
+    if session.get("source_kind") != ("udp" if source_kind == "native" else "synthetic"):
+        raise ValueError("Pending sampling recording differs from its requested source")
     if asynchronous is not None:
         execution = root / "execution"
         require(execution / "realtime-manifest.json", sources["execution"] if sources else None)
@@ -204,7 +217,7 @@ def _require_originals(
             )
         )
         if (
-            report["evidence_kind"] != "synthetic"
+            report["evidence_kind"] != source_kind
             or report["actor_kind"] != "frozen-numeric-sac-sampling-v1"
             or report["configuration"] != runtime
             or report["model"].get("sac_manifest_sha256") != asynchronous.expected_checkpoint_sha256
@@ -266,8 +279,9 @@ def completed_sampling(
     root = request.output_dir
     protocol = json.loads(read_bounded(root / "protocol.json", 1024**2))
     summary: dict[str, Any] = read_json(root / "summary.json")
+    source_kind = _source_kind(request)
     if protocol != _expected_protocol(request) or not (
-        summary.get("source_kind") == "synthetic"
+        summary.get("source_kind") == source_kind
         and summary.get("stop_reason")
         in (
             ("budget_completed", "stop_requested", "training_data_unavailable")
@@ -275,7 +289,8 @@ def completed_sampling(
             else ("budget_completed",)
         )
         and summary.get("resources_released") is True
-        and summary.get("commands_sent_to_game") is False
+        and type(summary.get("commands_sent_to_game")) is bool
+        and (source_kind == "native" or summary["commands_sent_to_game"] is False)
         and summary.get("latest_candidate") == "candidate-000"
         and not summary.get("error")
         and not summary.get("release_error")
@@ -301,6 +316,8 @@ def completed_sampling(
     verify_sampling_sources(attempt.get("source_assets", {}))
     replay_path = root / attempt["replay"]
     with replay_document(VerifiedFile(replay_path, attempt["replay_sha256"])) as replay:
+        if replay["source_kind"] != source_kind:
+            raise ValueError("Pending sampling replay differs from its requested source")
         source_hashes = replay["source_hashes"]
         transition_count = len(replay["transitions"])
     originals = {
