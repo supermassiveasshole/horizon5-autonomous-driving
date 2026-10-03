@@ -16,6 +16,7 @@ from typing import Any, TextIO, overload
 from fh5.artifacts.io import VerifiedFile
 
 _NON_WHITESPACE = re.compile(r"[^ \t\r\n]")
+_STRING_SPECIAL = re.compile(r'["\\\x00-\x1f]')
 _NON_SCALAR = object()
 
 
@@ -169,9 +170,49 @@ class _JSONInput:
         self.take("]")
         return ReplayArray(index, section, count)
 
+    def _discard_string(self) -> None:
+        """Validate a discarded string without accumulating or decoding its text."""
+        self.take('"')
+        while True:
+            special = _STRING_SPECIAL.search(self.buffer, self.position)
+            if special is None:
+                self.position = len(self.buffer)
+                if self.eof:
+                    raise ValueError("Unterminated discarded JSON string")
+                self.more()
+                continue
+            self.position = special.end()
+            token = special.group()
+            if token == '"':
+                return
+            if token != "\\":
+                raise ValueError("Control character in discarded JSON string")
+            if self.position == len(self.buffer):
+                self.more()
+            if self.position == len(self.buffer):
+                raise ValueError("Incomplete discarded JSON string escape")
+            escape = self.buffer[self.position]
+            self.position += 1
+            if escape in '"\\/bfnrt':
+                continue
+            if escape != "u":
+                raise ValueError("Invalid discarded JSON string escape")
+            remaining = 4
+            while remaining:
+                if self.position == len(self.buffer):
+                    self.more()
+                digits = self.buffer[self.position : self.position + remaining]
+                if not digits or any(c not in "0123456789abcdefABCDEF" for c in digits):
+                    raise ValueError("Invalid discarded JSON Unicode escape")
+                self.position += len(digits)
+                remaining -= len(digits)
+
     def discard(self) -> None:
-        """Validate an unused value without retaining its growing containers."""
+        """Validate unused strings and containers without retaining their payloads."""
         token = self.peek()
+        if token == '"':
+            self._discard_string()
+            return
         if token not in ("[", "{"):
             self.value()
             return
@@ -180,8 +221,9 @@ class _JSONInput:
         if self.peek() != end:
             while True:
                 if token == "{":
-                    if not isinstance(self.value(), str):
+                    if self.peek() != '"':
                         raise ValueError("JSON object keys must be strings")
+                    self._discard_string()
                     self.take(":")
                 self.discard()
                 if self.peek() != ",":

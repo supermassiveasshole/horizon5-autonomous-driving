@@ -1,6 +1,7 @@
 """Independent BC references grow through the public preparation interface."""
 
 import hashlib
+import io
 import json
 import tracemalloc
 from pathlib import Path
@@ -43,7 +44,19 @@ def prepare_with_peak(config, output):
     return result, peak
 
 
-@pytest.mark.parametrize("growth", ["manifest", "asset", "asset_diagnostics", "bundle"])
+@pytest.mark.parametrize(
+    "growth",
+    [
+        "manifest",
+        "asset",
+        "asset_diagnostics",
+        "bundle",
+        "manifest_string",
+        "asset_string",
+        "manifest_key",
+        "asset_key",
+    ],
+)
 def test_independent_reference_growth_preserves_causal_inputs_without_payload_residency(
     tmp_path, growth, record_testsuite_property
 ):
@@ -53,23 +66,30 @@ def test_independent_reference_growth_preserves_causal_inputs_without_payload_re
     manifest_path = route / "route.json"
     manifest = json.loads(manifest_path.read_text())
     block = b" " * 1024**2
-    if growth in ("manifest", "asset_diagnostics"):
+    if growth not in ("asset", "bundle"):
         # Diagnostic history is valid old-format JSON but has no navigation role.
         target = (
             manifest_path
-            if growth == "manifest"
+            if growth.startswith("manifest")
             else route / manifest["assets"]["reference"]["path"]
         )
         original = json.loads(target.read_text())
         with target.open("w", encoding="utf-8") as stream:
-            stream.write(json.dumps(original)[:-1] + ',"diagnostics":[')
-            entry = json.dumps({"note": "x" * 1024})
-            for index in range(5000):
-                stream.write(("," if index else "") + entry)
-            stream.write("]}")
+            stream.write(json.dumps(original)[:-1] + ',"diagnostics":')
+            if growth.endswith(("_string", "_key")):
+                stream.write('{"' if growth.endswith("_key") else '"')
+                for _ in range(5):
+                    stream.write("x" * 1024**2)
+                stream.write('":null}}' if growth.endswith("_key") else '"}')
+            else:
+                stream.write("[")
+                entry = json.dumps({"note": "x" * 1024})
+                for index in range(5000):
+                    stream.write(("," if index else "") + entry)
+                stream.write("]}")
         assert target.stat().st_size > 4 * 1024**2
         added_bytes = target.stat().st_size
-        if growth == "asset_diagnostics":
+        if growth.startswith("asset"):
             manifest["assets"]["reference"]["sha256"] = digest(target)
             manifest_path.write_text(json.dumps(manifest))
     elif growth == "asset":
@@ -185,3 +205,64 @@ def test_reference_copy_io_failure_keeps_sources_and_does_not_publish_dataset(
     assert not (output / "evaluation.json").exists()
     retry = run_experiment(CollectionBCPrepare(config, tmp_path / "retry"))
     assert retry.summary["collection_bc"]["reference"]["status"] == "loaded"
+
+
+@pytest.mark.parametrize("location", ["value", "key"])
+@pytest.mark.parametrize("boundary_offset", range(7))
+def test_discarded_reference_strings_validate_escapes_across_buffer_boundaries(
+    tmp_path, location, boundary_offset
+):
+    config, route = independent_reference(tmp_path)
+    path = route / "route.json"
+    prefix = path.read_text().rstrip()[:-1] + ',"diagnostics":'
+    if location == "key":
+        prefix += "{"
+    prefix += '"'
+    padding = (io.DEFAULT_BUFFER_SIZE - 1 - len(prefix) - boundary_offset) % io.DEFAULT_BUFFER_SIZE
+    # Place every character in the six-character Unicode escape at a read edge,
+    # followed by all simple escapes, surrogate escapes, and raw Unicode text.
+    text = prefix + "x" * padding + r"\u4e2d\"\\\/\b\f\n\r\t\ud83d\ude00道路 😀"
+    text += '":null}}' if location == "key" else '"}'
+    json.loads(text)  # Independent standard-library syntax oracle for the fixture.
+    path.write_text(text, encoding="utf-8")
+    output = tmp_path / "escaped"
+    result = run_experiment(CollectionBCPrepare(config, output))
+    assert result.summary["collection_bc"]["reference"]["status"] == "loaded"
+    assert digest(output / "reference/route.json") == digest(path)
+    decisions = json.loads((output / "dataset.json").read_text())["decisions"]
+    assert any(any(row["views"]["reference_assisted"]["reference"]["mask"]) for row in decisions)
+
+
+@pytest.mark.parametrize("location", ["value", "key"])
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        '"raw\ncontrol"',
+        '"raw\x00control"',
+        r'"bad\q"',
+        r'"bad\u12"',
+        r'"bad\u12G4"',
+        '"open',
+        '"open\\',
+    ],
+    ids=["newline", "nul", "escape", "short_unicode", "invalid_unicode", "open", "open_escape"],
+)
+def test_discarded_reference_strings_still_reject_invalid_json(tmp_path, location, invalid):
+    config, route = independent_reference(tmp_path)
+    path = route / "route.json"
+    prefix = path.read_text().rstrip()[:-1] + ',"diagnostics":'
+    if location == "key":
+        prefix += "{"
+    # Exercise the same malformed text after a consumed block, rather than only
+    # errors in the initial buffer. Whitespace here is outside the string.
+    padding = (io.DEFAULT_BUFFER_SIZE - 1 - len(prefix)) % io.DEFAULT_BUFFER_SIZE
+    suffix = "" if invalid.endswith("\\") else ":null}}" if location == "key" else "}"
+    text = prefix + " " * padding + invalid + suffix
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(text)
+    path.write_text(text, encoding="utf-8")
+    output = tmp_path / "invalid-string"
+    with pytest.raises(ValueError):
+        run_experiment(CollectionBCPrepare(config, output))
+    assert not (output / "dataset.json").exists()
+    assert not (output / "evaluation.json").exists()
