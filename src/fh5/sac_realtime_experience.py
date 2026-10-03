@@ -66,6 +66,7 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
         qualification = environment.get("qualification") or {}
         if (
             report["actor_kind"] != "frozen-numeric-temporal-bc-v2"
+            and report["model"].get("source_kind") not in ("native", "mixed")
             or report["model"].get("diagnostic_only") is not False
             or provenance.get("kind") != "continuous_numeric_collection"
             or environment.get("mode") != "numeric_driving"
@@ -76,7 +77,7 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
             or conditions != provenance.get("input_conditions")
             or not report["commands_sent_to_game"]
         ):
-            raise ValueError("Native SAC experience requires qualified frozen BC driving")
+            raise ValueError("Native SAC experience requires qualified frozen BC or SAC driving")
     pixels = PixelContract.from_metadata(report["configuration"]["pixels"])
     if pixels.origin != "direct_numeric":
         raise ValueError("Asynchronous SAC experience requires direct numerical pixels")

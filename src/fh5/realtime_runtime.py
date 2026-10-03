@@ -116,7 +116,14 @@ def run_realtime(
             state.stop(time.perf_counter_ns(), "model_startup_failed")
         else:
             if environment.source_kind == "native" and (
-                worker.kind != "frozen-numeric-temporal-bc-v2"
+                worker.kind
+                not in (
+                    "frozen-numeric-temporal-bc-v2",
+                    "frozen-numeric-sac-v1",
+                    "frozen-numeric-sac-sampling-v1",
+                )
+                or worker.kind != "frozen-numeric-temporal-bc-v2"
+                and worker.manifest.get("source_kind") not in ("native", "mixed")
                 or worker.manifest.get("diagnostic_only") is not False
                 or worker.manifest.get("explicit_dt_model") is not True
                 or request.config.pixels.origin != "direct_numeric"
@@ -127,7 +134,9 @@ def run_realtime(
                     "reference_count": request.config.reference_count,
                 }
             ):
-                raise ValueError("Native driving requires compatible non-diagnostic temporal BC")
+                raise ValueError(
+                    "Native driving requires a compatible non-diagnostic temporal actor"
+                )
             if environment.source_kind == "native":
                 authorize = getattr(environment, "authorize", None)
                 if not callable(authorize):
@@ -141,12 +150,11 @@ def run_realtime(
                 state.command_bounds = ActionBounds(**worker.manifest["bounds"])
             if state.counterfactual_context and environment.source_kind != "shadow":
                 raise ValueError("Counterfactual proposals require a read-only shadow environment")
-            if (
-                worker.manifest.get("command_context") == SEND_CONTEXT
-                and environment.source_kind != "synthetic"
-            ):
+            if worker.manifest.get(
+                "command_context"
+            ) == SEND_CONTEXT and environment.source_kind not in ("synthetic", "native"):
                 raise ValueError(
-                    "Command-conditioned evaluation currently requires synthetic sends"
+                    "Command-conditioned execution requires synthetic or qualified native sends"
                 )
             threads = [
                 threading.Thread(target=receive, name="fh5-runtime-input", daemon=True),

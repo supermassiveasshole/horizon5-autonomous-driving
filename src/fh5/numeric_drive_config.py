@@ -13,7 +13,7 @@ from fh5.capture_config import parse_capture_config
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import DecisionActor
 from fh5.realtime import RealtimeConfig, RealtimeRun
-from fh5.realtime_model import ShadowNumericActor, sac_shadow_contract, shadow_model_contract
+from fh5.realtime_model import ShadowNumericActor, sac_model_contract, shadow_model_contract
 from fh5.realtime_numeric_replay import (
     read_realtime_decision,
     read_realtime_journal,
@@ -21,6 +21,8 @@ from fh5.realtime_numeric_replay import (
 )
 from fh5.realtime_shadow import LocalTask
 from fh5.realtime_udp import UDPTelemetry
+from fh5.sac_actions import ActionBounds
+from fh5.sac_context import PROPOSAL_CONTEXT, SEND_CONTEXT
 
 
 class NumericDriveConfiguration:
@@ -89,20 +91,24 @@ class NumericDriveConfiguration:
         self.model_dir = base / model["directory"]
         self.exploration_seed = model.get("exploration_seed")
         if self.model_kind == "sac":
-            if mode != "shadow" or model["device"] != "cpu":
-                raise ValueError(
-                    "SAC requires read-only shadow on CPU with its exact source contract"
-                )
+            if mode == "legacy-shadow" or model["device"] != "cpu":
+                raise ValueError("SAC requires CPU with its exact source contract")
             if "exploration_seed" in model and (
                 type(self.exploration_seed) is not int or not 0 <= self.exploration_seed < 2**64
             ):
                 raise ValueError("SAC exploration seed must be an unsigned 64-bit integer")
-            self.metadata, self.model_hash = sac_shadow_contract(
+            self.metadata, self.sac_policy, self.model_hash = sac_model_contract(
                 self.model_dir, self.capture.pixels, model.get("expected_sha256")
             )
             if "manifest_sha256" in model and model["manifest_sha256"] != self.model_hash:
                 raise ValueError("Frozen SAC policy manifest changed")
             self.training_pixels = self.capture.pixels
+            bounds = ActionBounds(**self.sac_policy["bounds"])
+            if any(
+                getattr(bounds, key) != getattr(self.request.config, key)
+                for key in ("max_steer", "max_throttle", "max_brake")
+            ):
+                raise ValueError("SAC action bounds differ from the configured runtime")
         else:
             self.metadata, self.training_pixels, self.model_hash = shadow_model_contract(
                 self.model_dir,
@@ -139,6 +145,11 @@ class NumericDriveConfiguration:
             return
         provenance = self.metadata.get("provenance", {})
         reasons = []
+        if self.model_kind == "sac" and self.sac_policy.get("source_kind") not in (
+            "native",
+            "mixed",
+        ):
+            reasons.append("synthetic_sac_model")
         if provenance.get("diagnostic_only") is not False:
             reasons.append("diagnostic_model")
         if provenance.get("kind") != "continuous_numeric_collection":
@@ -201,10 +212,21 @@ class NumericDriveConfiguration:
             or report["commands_sent_to_game"]
         ):
             reasons.append("shadow_not_native")
-        if report["actor_kind"] != ShadowNumericActor.kind or any(
+        shadow_kind = (
+            (
+                "frozen-numeric-sac-sampling-v1"
+                if self.exploration_seed is not None
+                else "frozen-numeric-sac-v1"
+            )
+            if self.model_kind == "sac"
+            else ShadowNumericActor.kind
+        )
+        if report["actor_kind"] != shadow_kind or any(
             report["model"].get(key) != value for key, value in self._candidate_identity().items()
         ):
             reasons.append("shadow_candidate_mismatch")
+        if self.model_kind == "sac" and report["model"].get("command_context") != PROPOSAL_CONTEXT:
+            reasons.append("shadow_context_mismatch")
         expected = {**asdict(self.request.config), "pixels": self.capture.pixels.metadata()}
         if report["configuration"] != json.loads(json.dumps(expected)):
             reasons.append("shadow_decision_configuration_mismatch")
@@ -280,10 +302,13 @@ class NumericDriveConfiguration:
                     self.capture.pixels,
                     self.model_hash,
                     exploration_seed=self.exploration_seed,
-                    counterfactual=True,
+                    counterfactual=self.mode != "drive",
                 )
             return SACEvaluationActor(
-                self.model_dir, self.capture.pixels, self.model_hash, counterfactual=True
+                self.model_dir,
+                self.capture.pixels,
+                self.model_hash,
+                counterfactual=self.mode != "drive",
             )
         if self.mode != "drive":
             return ShadowNumericActor(
@@ -308,6 +333,23 @@ class NumericDriveConfiguration:
             )
 
     def _candidate_identity(self) -> dict[str, Any]:
+        if self.model_kind == "sac":
+            return {
+                "sac_manifest_sha256": self.model_hash,
+                "numeric_contract": self.capture.pixels.metadata(),
+                "model_contract": self.metadata["contract"],
+                "provenance": self.metadata.get("provenance"),
+                "source_kind": self.sac_policy.get("source_kind"),
+                "bounds": self.sac_policy["bounds"],
+                "exploration": self.exploration_seed is not None,
+                "noise": {
+                    "scheme": "sha256-box-muller-decision-v1",
+                    "seed": self.exploration_seed,
+                    "key": ["epoch", "decision_id", "decision_ns"],
+                }
+                if self.exploration_seed is not None
+                else [0.0, 0.0],
+            }
         return {
             "weights_sha256": self.metadata["weights_sha256"],
             "numeric_contract": self.capture.pixels.metadata(),
@@ -325,3 +367,5 @@ class NumericDriveConfiguration:
             raise ValueError("Loaded inference device differs from qualified timing evidence")
         if any(manifest.get(key) != value for key, value in self._candidate_identity().items()):
             raise ValueError("Loaded driving candidate differs from qualified model")
+        if self.model_kind == "sac" and manifest.get("command_context") != SEND_CONTEXT:
+            raise ValueError("Native SAC driving requires successful-send command context")

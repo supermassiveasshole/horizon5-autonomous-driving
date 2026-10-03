@@ -9,14 +9,15 @@ from pathlib import Path
 from typing import Any
 
 from fh5.artifact_io import VerifiedFile
+from fh5.bc_losses import read_bc_manifest
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import NumericFrame, PixelContract
 from fh5.replay_document import read_document_fields
 
 
-def sac_shadow_contract(
+def sac_model_contract(
     directory: Path, source: PixelContract, expected_sha256: str | None = None
-) -> tuple[dict[str, Any], str]:
+) -> tuple[dict[str, Any], dict[str, Any], str]:
     """Bind the SAC policy and its BC pixel metadata before creating native resources."""
     raw = (directory / "policy.json").read_bytes()
     digest = hashlib.sha256(raw).hexdigest()
@@ -28,17 +29,22 @@ def sac_shadow_contract(
         or policy.get("architecture") != "conditional-temporal-sac-v1"
         or policy.get("stage") != "sac_updates"
     ):
-        raise ValueError("Shadow requires a sealed SAC policy checkpoint")
-    metadata = read_document_fields(
-        VerifiedFile(directory / "bc/model.json", policy["bc_manifest_sha256"]),
-        {"version", "numeric_contract", "contract"},
-    )
+        raise ValueError("Numerical inference requires a sealed SAC policy checkpoint")
+    if policy.get("source_kind") in ("native", "mixed"):
+        metadata, bc_digest = read_bc_manifest(directory / "bc/model.json")
+        if bc_digest != policy["bc_manifest_sha256"]:
+            raise ValueError("Frozen SAC parent BC manifest changed")
+    else:
+        metadata = read_document_fields(
+            VerifiedFile(directory / "bc/model.json", policy["bc_manifest_sha256"]),
+            {"version", "numeric_contract", "contract"},
+        )
     if (
         metadata.get("version") != 2
         or PixelContract.from_metadata(metadata["numeric_contract"]) != source
     ):
-        raise ValueError("SAC shadow requires its exact numerical pixel contract")
-    return metadata, digest
+        raise ValueError("SAC requires its exact numerical pixel contract")
+    return metadata, policy, digest
 
 
 def shadow_model_contract(

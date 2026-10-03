@@ -40,6 +40,13 @@ class SACEvaluationActor:
         }
         if counterfactual:
             self.manifest["inference_device"] = self.device
+        if self.frozen.manifest.get("source_kind") in ("native", "mixed"):
+            self.manifest.update(
+                source_kind=self.frozen.manifest["source_kind"],
+                provenance=self.frozen.bc.manifest["provenance"],
+                explicit_dt_model=self.frozen.bc.manifest["explicit_dt_model"],
+                diagnostic_only=self.frozen.bc.manifest["diagnostic_only"],
+            )
 
     def input_features(
         self, actor: dict[str, Any], frames: tuple[NumericFrame, ...]
