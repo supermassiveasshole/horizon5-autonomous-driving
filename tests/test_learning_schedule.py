@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+from pathlib import Path
 
 import pytest
 from test_collection_bc import prepare_inputs
@@ -162,6 +163,51 @@ def test_pressure_pauses_actual_training_without_changing_the_frozen_candidate(t
         r["prediction"] for r in plain["decisions"]
     ]
     assert dataset.read_bytes() == frozen
+
+
+def test_large_candidate_manifest_does_not_block_publication(tmp_path, monkeypatch):
+    from fh5.learning_schedule import ScheduledBCTrain
+    from fh5.temporal_bc import TemporalBCReplay
+
+    config, _, dataset = configuration(tmp_path)
+    output = tmp_path / "scheduled"
+    manifest = output / ".candidate/model.json"
+    write_text = Path.write_text
+    expanded = []
+
+    def write_large_manifest(path, text, *args, **kwargs):
+        written = write_text(path, text, *args, **kwargs)
+        if path == manifest and '"verification":' in text:
+            # Real training/reload has finished. Grow only its final JSON file,
+            # preserving every field and tensor; this is a filesystem substitution.
+            with path.open("ab") as stream:
+                block = b" " * 1024**2
+                for _ in range(129):
+                    stream.write(block)
+            expanded.append(path.stat().st_size)
+        return written
+
+    resources = Resources()
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "write_text", write_large_manifest)
+        result = run_experiment(
+            ScheduledBCTrain(config, output), learning_resources=resources
+        ).summary["learning_schedule"]
+
+    assert len(expanded) == 1 and expanded[0] > 128 * 1024**2
+    assert result["state"] == "completed"
+    assert result["steps_completed"] == result["durable_steps_completed"] == 3
+    assert resources.closed and not result["commands_sent"]
+    assert (output / "learner/learner.json").is_file()
+    assert not manifest.exists()
+    with (output / "candidate/model.json").open("rb") as stream:
+        assert (
+            hashlib.file_digest(stream, "sha256").hexdigest() == result["candidate_manifest_sha256"]
+        )
+    replay = run_experiment(
+        TemporalBCReplay(output / "candidate", dataset, tmp_path / "replayed.html")
+    ).summary["temporal_bc"]
+    assert replay["verification"]["max_abs_error"] <= 1e-6
 
 
 def test_recent_collector_heartbeat_uses_image_age_at_its_actual_poll(tmp_path):

@@ -13,7 +13,7 @@ from typing import TYPE_CHECKING, Any, Protocol
 
 from fh5.artifact_io import VerifiedFile, sha256_file
 from fh5.bc_checkpoint import BCRecovery, read_bc_checkpoint
-from fh5.collection_store import encode, read_bounded, write_file
+from fh5.collection_store import encode, write_file
 from fh5.learning_diagnostics import RecordJournal
 from fh5.learning_observation import resource_observation
 from fh5.replay_document import read_document_fields
@@ -430,9 +430,7 @@ def run_scheduled_bc(
             config["budget"]["cpu_threads"],
             recovery,
         )
-        candidate_hash = hashlib.sha256(
-            read_bounded(partial / "model.json", 128 * 1024**2)
-        ).hexdigest()
+        candidate_hash = sha256_file(partial / "model.json")
         schedule.checkpoint("publish", training["steps"])
         state = "completed"
         diagnostic = (

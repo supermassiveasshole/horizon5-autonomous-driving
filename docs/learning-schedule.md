@@ -41,7 +41,7 @@ session 写入、离线消费者及候选清单中的剩余限制仍列在资源
 `events_unverified` 表示已追加、但无法确认完整保存的条数。刷新失败时不能用“未遗漏”推断已保存。
 资源检查、停止请求和必要训练状态不依赖这份日志。未知诊断文本不进入此契约，错误的存在仍参与准入判断。
 
-`schedule.json` 记录等待、压力原因、已完成及已持久化更新数、最长工作单元、输入配置和候选哈希。`requested-schedule.json` 保留提交的调度配置；`schedule-config.json` 冻结归一后的 v2 参数与绝对路径，可直接在新目录重跑。`training.json` 是供既有数值 BC 学习器使用的内部训练输入，不再需要用户编写，也不再生成重复的 `requested-training.json`。工作区原配置的后续修改不影响冻结运行；原数据与采集环境仍须保留。CPU 数值 BC 另可通过[完整 learner 检查点](bc-resume.md)继续剩余更新。完整训练和重载验证结束后，才把 `.candidate` 发布为 `candidate/`，其中仍是标准 BC 模型和联动画面报告；随报告发布的预览使用相对链接。停止时不发布候选，可能留下 `.candidate` 诊断文件；它不是 learner 检查点，也不证明可以续训。
+`schedule.json` 记录等待、压力原因、已完成及已持久化更新数、最长工作单元、输入配置和候选哈希。`requested-schedule.json` 保留提交的调度配置；`schedule-config.json` 冻结归一后的 v2 参数与绝对路径，可直接在新目录重跑。`training.json` 是供既有数值 BC 学习器使用的内部训练输入，不再需要用户编写，也不再生成重复的 `requested-training.json`。工作区原配置的后续修改不影响冻结运行；原数据与采集环境仍须保留。CPU 数值 BC 另可通过[完整 learner 检查点](bc-resume.md)继续剩余更新。完整训练和重载验证结束后，才把 `.candidate` 发布为 `candidate/`，其中仍是标准 BC 模型和联动画面报告；随报告发布的预览使用相对链接。发布前逐块计算候选清单哈希，不再为哈希整份载入文件，也不因清单超过旧 128 MiB 门槛而拒绝发布。停止时不发布候选，可能留下 `.candidate` 诊断文件；它不是 learner 检查点，也不证明可以续训。
 
 CPU 恢复优先读取运行目录的 `learner/learner.json`，不要求 `schedule.json` 可读；训练和数据依赖仍须完整。只有没有发布新 learner 时，才通过调度报告定位仍有效的祖先检查点。`steps_completed` 与 `durable_steps_completed` 分别表示已计算和已封存更新，保存失败不得混同两者。调度报告写入发生 OS/内存错误时，返回摘要记录 `learning_schedule.schedule_report.status = unavailable`；已完成结果保持完成，`report_path` 指向已封存 learner。该错误状态只保证出现在返回摘要中。可选 loss 日志或累计统计缺失不阻止接续；不完整统计明确标记为 `partial`。
 
