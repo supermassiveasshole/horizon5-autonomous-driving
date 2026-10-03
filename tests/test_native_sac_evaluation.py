@@ -6,6 +6,7 @@ import struct
 from dataclasses import asdict, replace
 
 import pytest
+from native_device_timing import native_device_timing as native_device_timing
 from test_attempts import evidence
 from test_evaluation import sha
 from test_native_evaluation import ExternalDevices, native_request

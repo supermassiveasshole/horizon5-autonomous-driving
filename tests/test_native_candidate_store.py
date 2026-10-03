@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from native_device_timing import native_device_timing as native_device_timing
 from test_candidate_store import candidates as candidates
 from test_candidate_store import record_config
 from test_evaluation import sha

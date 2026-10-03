@@ -41,4 +41,10 @@ Standards 初审：0 项硬性违反、1 项非阻塞重复发布逻辑建议，
 
 固定差异 `c34cf26...7a0480a` 独立只读审查：Standards 0 项、Spec 0 项。审查不替代失败后的回归复测。
 
+第二次组合为 **39 passed / 1 failed / 166.06 秒**（`runs/native-store-final.xml`）：同一测试在此前 2 秒只读阶段停止，尚未创建驾驶输入。5 次推理约 1.5–2.3 ms，结果领取另外等待约 13 ms；历史缺口、命令上下文过期及旧帧拒绝后按时触发看门狗，缩短模拟驾驶本身并未解决原因。
+
+定时探针连续 60 次请求 `Event.wait(1/60)`：默认等待中位 **31.0587 ms**、最大 **32.6439 ms**；查询本机接口支持的最小周期（1 ms）并临时申请后，中位 **17.4665 ms**、最大 **18.474 ms**。两个原生测试模块因此增加仅用于测试的计时前提：调用 `timeGetDevCaps` 取支持值，`timeBeginPeriod` 成功后运行，并在 `finally` 以同值 `timeEndPeriod` 恢复。它会改善同进程所有线程的等待精度，包括生产预处理/监督线程；不修改 QPC、deadline、租期或看门狗，不保证调度期限。[Microsoft 接口说明](https://learn.microsoft.com/en-us/windows/win32/api/timeapi/nf-timeapi-timebeginperiod)
+
+后续通过结果须明确包含这个测试条件，不能据此宣称默认 Windows 原生采集调度已经解决。默认等待粒度与真实采集时效仍是后续可独立测量和优化的工作。
+
 没有启动 FH5、Steam、真实 DXGI、手柄或 CUDA。`default_changed`、`real_driving_validated` 保持 false；#14 实机验收和 #15 原生连续调度仍未完成。
