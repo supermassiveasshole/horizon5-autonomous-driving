@@ -82,13 +82,11 @@ def test_old_shadow_configuration_explains_shared_configuration_migration(
     config = drive_config(tmp_path, numeric_driving_model)
     document = json.loads(config.read_text())
     del document["shadow"]
-    del document["model"]["manifest_sha256"]
     config.write_text(json.dumps(document))
     output = tmp_path / "not-created"
     assert main(["realtime-shadow", "--config", str(config), "--output", str(output)]) == 2
     error = json.loads(capsys.readouterr().err)
     assert "realtime-drive.example.json" in error["message"]
-    assert "model.manifest_sha256" in error["message"]
     assert "shadow" in error["message"] and "null" in error["message"]
     assert not output.exists()
 

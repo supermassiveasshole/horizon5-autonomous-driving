@@ -8,8 +8,8 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
 
+from fh5.artifact_io import sha256_file
 from fh5.capture_config import parse_capture_config
-from fh5.collection_store import read_bounded
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.realtime import RealtimeConfig, RealtimeRun
 from fh5.realtime_model import ShadowNumericActor, shadow_model_contract
@@ -44,7 +44,7 @@ class NumericDriveConfiguration:
         ):
             raise ValueError(
                 "Use the shared configs/realtime-drive.example.json configuration; "
-                "old shadow-only configurations must add model.manifest_sha256 and shadow: null"
+                "old shadow-only configurations must add shadow: null"
             )
         base = config_file.parent
         capture_bytes = (base / root["capture_config"]).read_bytes()
@@ -67,26 +67,27 @@ class NumericDriveConfiguration:
             raise ValueError("Numerical driving is limited to 30 seconds")
         task = dict(root["task"])
         task["route_file"] = base / task["route_file"]
+        if "expected_route_sha256" not in task:
+            task["expected_route_sha256"] = sha256_file(task["route_file"])
         self.task = LocalTask(**task)
         self.task.load()
         model = root["model"]
-        if set(model) != {"directory", "expected_sha256", "manifest_sha256", "device"} or model[
-            "device"
-        ] not in ("cpu", "cuda"):
-            raise ValueError("Driving requires frozen model manifest and weight hashes")
+        if (
+            not {"directory", "device"}
+            <= set(model)
+            <= {"directory", "device", "expected_sha256", "manifest_sha256"}
+            or not all(isinstance(value, str) for value in model.values())
+            or model["device"] not in ("cpu", "cuda")
+        ):
+            raise ValueError("Driving requires model directory/device and optional string hashes")
         self.model_dir = base / model["directory"]
-        model_bytes = (self.model_dir / "model.json").read_bytes()
-        self.model_hash = hashlib.sha256(model_bytes).hexdigest()
-        if self.model_hash != model["manifest_sha256"]:
-            raise ValueError("Driving model manifest changed")
-        self.metadata, self.training_pixels = shadow_model_contract(
+        self.metadata, self.training_pixels, self.model_hash = shadow_model_contract(
             self.model_dir,
             self.capture.pixels,
-            model["expected_sha256"],
+            model.get("expected_sha256"),
             allow_legacy_source_diagnostic=mode == "legacy-shadow",
+            expected_manifest_sha256=model.get("manifest_sha256"),
         )
-        if json.loads(model_bytes) != self.metadata:
-            raise ValueError("Driving model changed during validation")
         cfg = self.request.config
         if self.metadata["contract"]["actor_shape"] != {
             "action_count": len(cfg.action_offsets_ms),
@@ -153,13 +154,18 @@ class NumericDriveConfiguration:
         }
 
     def _shadow(self, base: Path, entry: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
-        if not isinstance(entry, dict) or set(entry) != {"directory", "manifest_sha256"}:
+        if (
+            not isinstance(entry, dict)
+            or not {"directory"} <= set(entry) <= {"directory", "manifest_sha256"}
+            or not all(isinstance(value, str) for value in entry.values())
+        ):
             raise ValueError("Driving requires a bound shadow recording manifest")
         root = base / entry["directory"]
-        raw = read_bounded(root / "realtime-manifest.json", 4096)
-        if hashlib.sha256(raw).hexdigest() != entry["manifest_sha256"]:
+        raw = (root / "realtime-manifest.json").read_bytes()
+        digest = hashlib.sha256(raw).hexdigest()
+        if "manifest_sha256" in entry and digest != entry["manifest_sha256"]:
             raise ValueError("Shadow evidence manifest changed")
-        report = read_realtime_recording(root)
+        report = read_realtime_recording(root, expected_manifest_sha256=digest)
         read_realtime_journal(root, report)
         for row in report["decisions"]:
             if "actor" in row:
@@ -233,7 +239,7 @@ class NumericDriveConfiguration:
             reasons.append("shadow_timing_outside_runtime_budget")
         return {
             "directory": str(root),
-            "manifest_sha256": entry["manifest_sha256"],
+            "manifest_sha256": digest,
             "report_sha256": json.loads(raw)["report_sha256"],
             "accepted_decisions": len(accepted),
             "active_span_s": span,

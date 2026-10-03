@@ -28,8 +28,10 @@ if TYPE_CHECKING:
     from fh5.experiment import RunResult
 
 
-def read_realtime_recording(root: Path) -> dict[str, Any]:
-    manifest = read_json(root / "realtime-manifest.json")
+def read_realtime_recording(
+    root: Path, *, expected_manifest_sha256: str | None = None
+) -> dict[str, Any]:
+    manifest = read_json(root / "realtime-manifest.json", expected_sha256=expected_manifest_sha256)
     path = root / "report.json"
     if (
         not isinstance(manifest, dict)

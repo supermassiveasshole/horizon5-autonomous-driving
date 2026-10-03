@@ -20,7 +20,9 @@
 
 ## 有界驾驶命令与条件绑定
 
-只读预测和驾驶共用 `configs/realtime-drive.example.json`，填写一次采集、模型、任务、节拍和端口。模板默认沿用 4K 采集配置，初始 `shadow: null`。`model.expected_sha256` 是 `actor.pt` 哈希，`model.manifest_sha256` 是完整 `model.json` 哈希；路径相对于配置文件。先用这份配置运行下文的 `realtime-shadow`；取得对应实测记录后，仅将 `shadow` 改为 `{"directory":"<影子录制目录>","manifest_sha256":"<realtime-manifest.json 的 SHA-256>"}`，再检查驾驶资格。
+只读预测和驾驶共用 `configs/realtime-drive.example.json`，填写一次采集、模型目录和设备、局部路线、节拍与端口；路径相对于配置文件。模板默认沿用 4K 采集配置，初始 `shadow: null`。先用这份配置运行下文的 `realtime-shadow`；取得对应实测记录后，仅将 `shadow` 改为 `{"directory":"<影子录制目录>"}`，再检查驾驶资格，无需手工计算或复制文件哈希。
+
+配置加载时绑定所选模型清单、路线和只读记录；权重身份取自模型清单，实际权重仍由 worker 验证。绑定保存在运行记录中，不改写配置。替换模型或路线后，旧只读记录会因绑定不匹配失效；加载配置后也不能悄悄换成另一份模型。原有 `model.expected_sha256`、`model.manifest_sha256`、`task.expected_route_sha256`、`shadow.manifest_sha256` 仍可作为严格断言：提供时必须匹配，省略才自动绑定；空值不表示省略。
 
 ```powershell
 uv run --locked fh5 realtime-drive --config runs/drive-config.json --output runs/numeric-drive-001 --seconds 15
@@ -50,7 +52,7 @@ uv run --locked fh5 realtime-shadow --config runs/drive-config.json --output run
 
 此命令只校验配置、模型清单绑定和路线，不打开采集、UDP、CUDA 或手柄。权重文件与内嵌元数据由启动后的冻结模型 worker 再验证。重新录制影子时不读取配置里的旧 `shadow` 证据；旧证据缺失或失效不会妨碍重新采集，只在驾驶资格检查时使用。
 
-旧的独立影子配置及 `realtime-shadow.example.json` 已退役，不再维护第二套解析。迁移时保留原采集、模型、任务、决策和端口，补入 `model.manifest_sha256` 及 `shadow: null`；旧模型和记录不改写。若模型来自 `legacy_offline`，仍须显式加 `--allow-legacy-source-diagnostic`；尺寸、预处理和历史契约不匹配即使有参数也会拒绝。报告保留训练与当前像素契约，不能修改旧模型元数据冒充新来源训练，也不能据此豁免驾驶资格。
+旧的独立影子配置及 `realtime-shadow.example.json` 已退役，不再维护第二套解析。迁移时保留原采集、模型、任务、决策和端口，补入 `shadow: null`；旧模型和记录不改写。若模型来自 `legacy_offline`，仍须显式加 `--allow-legacy-source-diagnostic`；尺寸、预处理和历史契约不匹配即使有参数也会拒绝。报告保留训练与当前像素契约，不能修改旧模型元数据冒充新来源训练，也不能据此豁免驾驶资格。
 
 游戏可配合时，在已核验局部起点停稳，然后分别运行：
 
