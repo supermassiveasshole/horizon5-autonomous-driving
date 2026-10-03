@@ -9,10 +9,9 @@ from pathlib import Path
 from typing import Any
 
 from fh5.artifact_io import VerifiedFile
-from fh5.bc_losses import read_bc_manifest
 from fh5.numeric_actor import FrozenNumericActor
 from fh5.numeric_images import NumericFrame, PixelContract
-from fh5.replay_document import read_document_fields
+from fh5.replay_document import read_document_fields, read_document_paths
 
 
 def sac_model_contract(
@@ -30,14 +29,15 @@ def sac_model_contract(
         or policy.get("stage") != "sac_updates"
     ):
         raise ValueError("Numerical inference requires a sealed SAC policy checkpoint")
-    if policy.get("source_kind") in ("native", "mixed"):
-        metadata, bc_digest = read_bc_manifest(directory / "bc/model.json")
-        if bc_digest != policy["bc_manifest_sha256"]:
-            raise ValueError("Frozen SAC parent BC manifest changed")
-    else:
-        metadata = read_document_fields(
-            VerifiedFile(directory / "bc/model.json", policy["bc_manifest_sha256"]),
-            {"version", "numeric_contract", "contract"},
+    bc_manifest = VerifiedFile(directory / "bc/model.json", policy["bc_manifest_sha256"])
+    fields = {"version", "numeric_contract", "contract"}
+    native = policy.get("source_kind") in ("native", "mixed")
+    if native:
+        fields.add("provenance")
+    metadata = read_document_fields(bc_manifest, fields)
+    if native:
+        metadata.update(
+            read_document_paths(bc_manifest, {("training", "train_by_view", "no_reference")})
         )
     if (
         metadata.get("version") != 2

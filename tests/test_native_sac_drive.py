@@ -3,6 +3,7 @@
 import json
 import socket
 import time
+import tracemalloc
 from dataclasses import asdict
 
 import pytest
@@ -345,3 +346,45 @@ def test_native_sac_commands_feed_the_next_learning_update(
     finally:
         world.stop()
         telemetry.close()
+
+
+def test_native_sac_configuration_does_not_materialize_bc_source_history(
+    tmp_path, native_candidate, capsys, record_property
+):
+    # Metadata-only dry-run fixture. It cannot drive and never loads weights.
+    checkpoint = tmp_path / "checkpoint"
+    (checkpoint / "bc").mkdir(parents=True)
+    manifest = checkpoint / "bc/model.json"
+    manifest.write_bytes((native_candidate / "bc/model.json").read_bytes())
+    config = drive_config(tmp_path, checkpoint / "bc")
+    data = json.loads(config.read_bytes())
+    data["model"] = {"kind": "sac", "directory": str(checkpoint), "device": "cpu"}
+    config.write_text(json.dumps(data))
+    metadata = json.loads(manifest.read_bytes())
+    metadata.pop("source_ranges", None)
+    entry = json.dumps({"source": "archived-block", "start": 0, "end": 32})
+    with manifest.open("w", encoding="utf-8") as stream:
+        stream.write(json.dumps(metadata)[:-1] + ',"source_ranges":[')
+        for index in range(131072):
+            stream.write(("," if index else "") + entry)
+        stream.write("]}")
+    history_bytes = len(entry) * 131072
+    policy = json.loads((native_candidate / "policy.json").read_bytes())
+    policy["bc_manifest_sha256"] = sha(manifest)
+    (checkpoint / "policy.json").write_text(json.dumps(policy))
+    output = tmp_path / "not-created"
+    tracemalloc.start()
+    try:
+        code = main(["realtime-drive", "--config", str(config), "--output", str(output)])
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    console = capsys.readouterr()
+    assert code == 0, console.out + console.err
+    checked = json.loads(console.out)
+    assert not checked["devices_opened"] and not checked["qualification"]["eligible"]
+    assert checked["qualification"]["reasons"] == ["missing_shadow_evidence"]
+    assert not output.exists()
+    record_property("source_history_bytes", history_bytes)
+    record_property("peak_python_bytes", peak)
+    assert peak < history_bytes, "Configuration retained archived source ranges"
