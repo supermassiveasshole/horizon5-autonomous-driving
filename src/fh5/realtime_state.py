@@ -78,7 +78,7 @@ class DecisionState:
                 self.safety_fault = "game_clock_discontinuity"
         self.safety = safety
         # An observed hard fault must survive a newer healthy sample and a
-        # later signals() poll. Only the supervisor sends the resulting stop.
+        # later signals() poll. Supervision sends the resulting stop.
         if self.last_accepted_ns is not None or self.pending is not None or safety.stop_requested:
             reason = self.safety_reason(self.clock() if self.clock else safety.received_ns)
             if reason is not None:
@@ -297,6 +297,10 @@ class DecisionState:
         return None
 
     def begin(self, now: int, observation: RealtimeObservation | None) -> Work | None:
+        # A decision tick can win the lock before the supervisor after a pause.
+        # Settle expired output before freezing its context, including send time.
+        self.supervise(now)
+        now = self.clock() if self.clock else now
         prior = self.last_proposal if self.counterfactual_context else self.last_action
         time_key = "proposed_ns" if self.counterfactual_context else "returned_ns"
         if observation:

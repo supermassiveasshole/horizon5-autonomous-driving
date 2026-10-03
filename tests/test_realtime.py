@@ -3,7 +3,7 @@
 import random
 import threading
 import time
-from dataclasses import replace
+from dataclasses import asdict, replace
 
 import pytest
 
@@ -19,6 +19,7 @@ from fh5.realtime import (
     TimelineInput,
 )
 from fh5.sac_actions import ActionBounds
+from fh5.sac_context import SEND_CONTEXT
 
 BASE = 1_000_000_000
 MS = 1_000_000
@@ -292,6 +293,72 @@ class PausingActor:
 class FastActor(PausingActor):
     def predict(self, actor, frames):
         return [0.2, 0.3]
+
+
+def test_new_decision_settles_expired_action_before_binding_context(tmp_path):
+    resumed = threading.Event()
+
+    class DelayedSignals(ThreadedGame):
+        def __init__(self):
+            super().__init__()
+            self.first_policy_ns = None
+
+        def send(self, command):
+            super().send(command)
+            if command.throttle_u8 and self.first_policy_ns is None:
+                self.first_policy_ns = time.perf_counter_ns()
+
+        def signals(self):
+            # An external signal read delays supervision while input and the
+            # decision schedule remain active. No policy call can renew the lease.
+            if self.first_policy_ns is not None:
+                assert resumed.wait(2), "Decision did not resume after fresh input"
+            return True, False
+
+        def read(self, period_s):
+            point = super().read(period_s)
+            if self.first_policy_ns is not None and point.at_ns - self.first_policy_ns < 100 * MS:
+                return replace(point, observation=None)
+            return point
+
+    game = DelayedSignals()
+
+    class ContextActor:
+        kind = "synthetic-command-context"
+        manifest = {
+            "command_context": SEND_CONTEXT,
+            "bounds": asdict(ActionBounds(max_steer=0.4, max_throttle=0.25, max_brake=0.5)),
+        }
+        resumed_decision = None
+
+        def predict_decision(self, decision, command_context):
+            if game.first_policy_ns is not None and self.resumed_decision is None:
+                self.resumed_decision = decision.decision_id
+                resumed.set()
+            return [0.2, 0.2]
+
+    actor = ContextActor()
+    try:
+        result = run_experiment(
+            RealtimeRun(
+                tmp_path / "expired-context",
+                RealtimeConfig(pixels=PixelContract(size=(2, 1)), action_lease_ms=50),
+                seconds=0.45,
+            ),
+            realtime_environment=game,
+            numeric_actor_factory=lambda: actor,
+        ).summary["realtime"]
+    finally:
+        resumed.set()
+    assert actor.resumed_decision is not None, result
+    decision = next(d for d in result["decisions"] if d["decision_id"] == actor.resumed_decision)
+    context = decision["command_context"]
+    assert context["owner"] == "lease_expiry", decision
+    assert context["sent"] == {"steer_i16": 0, "throttle_u8": 0, "brake_u8": 0}
+    assert context["returned_ns"] < decision["decision_ns"]
+    assert decision["status"] == "accepted"
+    assert any(c["decision_id"] == actor.resumed_decision for c in result["commands"])
+    assert result["resources_released"] and game.closed
 
 
 def test_persistent_worker_cannot_block_independent_action_expiry(tmp_path):
