@@ -109,6 +109,14 @@ def bind_native_validity(operation, devices):
     return ledger_file
 
 
+class ShortCourseWorld(ExternalWorld):
+    def speed_for(self, command):
+        # This endpoint test uses a prompt, bounded external response, not FH5
+        # physics. Keep the full 3 m task and actual UDP/command feedback; avoid
+        # making endpoint coverage depend on ten seconds of host scheduling.
+        return min(3.5, command.throttle_u8 / 255 * 20)
+
+
 @pytest.mark.parametrize("end_margin_m", [0, 0.5], ids=["endpoint", "early-stop"])
 def test_native_completion_requires_recorded_endpoint_not_early_stop(
     tmp_path, native_candidate, end_margin_m
@@ -123,7 +131,7 @@ def test_native_completion_requires_recorded_endpoint_not_early_stop(
         end_margin_m=end_margin_m,
     )
     original = sha(native_candidate / "policy.pt")
-    devices = Devices()
+    devices = Devices(world_factory=ShortCourseWorld)
     environment = NativeEvaluationEnvironment(
         config, menu_factory=devices.menu, driving_factory=devices.drive
     )
