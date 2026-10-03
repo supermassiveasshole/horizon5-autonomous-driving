@@ -53,6 +53,8 @@ uv run --locked fh5 collection-review runs/collection-001/recording --report run
 
 直接查询 recording 目录只读取最新心跳/最终状态，标记 `process_liveness=not_checked`；查询其 bundle 则额外向操作系统核对实际进程。停止请求使采集退出并封存尾块。数据是否完整与进程是否存活分别报告。
 
+采集、封存审核和 BC 数据准备共用流式 HTML 展示。先保存必要的 JSON 结果，再独占创建新报告；HTML 的写入或内存故障在返回摘要的 `presentation` 中注明，返回路径改为已保存的 `final.json` 或审核/准备 JSON。后台采集仍按实际封存结果结束，已有同名报告不会被覆盖。原件与必要 JSON 的写入失败仍按原有错误处理；这项退让只适用于 HTML 展示。
+
 状态读取按字段逐步解析，不再因 session 超过 1 MiB、status/final 超过 4 MiB、
 process 超过 16 KiB 或 worker/启动失败状态超过 64 KiB 拒绝查询。
 返回结果保留状态、行数/块数/积压、时钟、错误与释放证据，以及进程和软件绑定。

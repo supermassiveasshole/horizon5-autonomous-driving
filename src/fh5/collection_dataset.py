@@ -12,10 +12,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fh5.collection_review import _references, collection_result
+from fh5.collection_review import _references
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.demonstrations import _profile
 from fh5.numeric_images import PixelContract
+from fh5.presentation import optional_report
 
 if TYPE_CHECKING:
     from fh5.experiment import RunResult
@@ -305,8 +306,14 @@ def review_collection_dataset(request: CollectionDatasetReview) -> RunResult:
     if build_snapshot(data["config"], data["sources"]) != data:
         raise ValueError("Dataset differs from canonical frozen source reconstruction")
     summary = _summary(data, hashlib.sha256(read_bounded(path, 128 * 1024**2)).hexdigest())
-    collection_result(report, summary, title="持续采集数据快照")
     write_file(report.with_suffix(".json"), encode(summary))
+    report = optional_report(
+        report,
+        "持续采集数据快照（完整封存不等于优质示范）",
+        summary,
+        fallback=report.with_suffix(".json"),
+        exclusive=True,
+    )
     return RunResult({}, [], [], {"collection_dataset": summary}, report)
 
 

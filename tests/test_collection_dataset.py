@@ -127,9 +127,20 @@ def test_freeze_binds_sealed_sources_reviews_and_independent_groups(tmp_path):
     before = (output / "selection.json").read_bytes()
     for source in json.loads(config.read_bytes())["sources"]:
         Path(source["review"]).write_text("changed later review")
-    verified = run_experiment(
-        CollectionDatasetReview(output / "selection.json", tmp_path / "reviewed.html")
-    )
+    report = tmp_path / "reviewed.html"
+    open_file = Path.open
+
+    def unavailable_html(path, *args, **kwargs):
+        if path == report:
+            raise OSError("optional HTML unavailable")
+        return open_file(path, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "open", unavailable_html)
+        verified = run_experiment(CollectionDatasetReview(output / "selection.json", report))
+    assert verified.report_path == report.with_suffix(".json")
+    assert json.loads(verified.report_path.read_bytes())["verified"]
+    assert verified.summary["collection_dataset"]["presentation"]["status"] == "unavailable"
     assert verified.summary["collection_dataset"]["verified"]
     assert (output / "selection.json").read_bytes() == before
 

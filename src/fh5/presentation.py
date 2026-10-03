@@ -15,6 +15,7 @@ def optional_report(
     *,
     fallback: Path,
     diagnostic: Path | None = None,
+    exclusive: bool = False,
 ) -> Path:
     """Stream display data; resource failure returns the existing durable artifact."""
     if diagnostic is not None:
@@ -31,7 +32,7 @@ def optional_report(
             }
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        with path.open("w", encoding="utf-8") as stream:
+        with path.open("x" if exclusive else "w", encoding="utf-8") as stream:
             stream.write('<!doctype html><meta charset="utf-8"><h1>' + html.escape(title))
             stream.write("</h1><pre>")
             for chunk in json.JSONEncoder(ensure_ascii=False, indent=2, allow_nan=False).iterencode(

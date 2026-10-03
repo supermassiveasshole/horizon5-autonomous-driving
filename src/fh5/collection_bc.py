@@ -20,11 +20,11 @@ from fh5.collection_dataset import (
     _summary,
     build_snapshot,
 )
-from fh5.collection_review import collection_result
 from fh5.collection_selection import sealed_rows
 from fh5.collection_store import encode, read_bounded, write_file
 from fh5.numeric_images import NumericDecision, PixelContract, asset, validate_decision
 from fh5.numeric_recording import read_numeric_frame
+from fh5.presentation import optional_report
 from fh5.replay_document import read_document_fields
 from fh5.temporal_features import actor_shape
 
@@ -404,8 +404,14 @@ def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
         "evaluation": {"metrics": "withheld", "path": "evaluation.json"},
     }
     report = request.output_dir / "report.html"
-    collection_result(report, summary, title="数值 BC 数据准备")
     write_file(report.with_suffix(".json"), encode(summary))
+    report = optional_report(
+        report,
+        "数值 BC 数据准备（完整封存不等于优质示范）",
+        summary,
+        fallback=report.with_suffix(".json"),
+        exclusive=True,
+    )
     return RunResult(
         {}, [], [], {"collection_bc": summary, "collection_dataset": selection_summary}, report
     )

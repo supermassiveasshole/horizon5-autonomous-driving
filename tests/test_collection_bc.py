@@ -65,7 +65,19 @@ def test_exported_collection_trains_and_reloads_without_final_holdout_feedback(t
     example["sources"] = json.loads(config.read_text())["sources"]
     config.write_text(json.dumps(example))
     output = tmp_path / "numeric"
-    run_experiment(CollectionBCPrepare(config, output))
+    open_file = Path.open
+
+    def unavailable_html(path, *args, **kwargs):
+        if path == output / "report.html":
+            raise OSError("optional HTML unavailable")
+        return open_file(path, *args, **kwargs)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(Path, "open", unavailable_html)
+        prepared = run_experiment(CollectionBCPrepare(config, output))
+    assert prepared.report_path == output / "report.json"
+    assert prepared.report_path.is_file()
+    assert prepared.summary["collection_bc"]["presentation"]["status"] == "unavailable"
     dataset = output / "dataset.json"
     train_config = tmp_path / "train.json"
     train_config.write_text(
