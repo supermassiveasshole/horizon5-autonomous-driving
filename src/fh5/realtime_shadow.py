@@ -56,7 +56,7 @@ class LocalTask:
         if not route["low_speed_ready"] or not 1 <= route["length_m"] <= 60:
             raise ValueError("Shadow task requires a verified local route, at most 60 metres")
         for value, lo, hi in (
-            (self.end_margin_m, 0.1, route["length_m"] / 2),
+            (self.end_margin_m, 0, route["length_m"] / 2),
             (self.start_tolerance_m, 0, 1),
             (self.start_station_m, 0, route["length_m"] - self.end_margin_m - 0.5),
         ):

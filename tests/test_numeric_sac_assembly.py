@@ -44,6 +44,9 @@ class ExternalWorld:
         self.thread.start()
         return Camera(self)
 
+    def speed_for(self, command):
+        return command.throttle_u8 / 255 * 4.0
+
     def publish(self):
         previous = time.perf_counter_ns()
         try:
@@ -52,7 +55,7 @@ class ExternalWorld:
                     now = time.perf_counter_ns()
                     with self.lock:
                         command = self.command
-                        speed = command.throttle_u8 / 255 * 4.0
+                        speed = self.speed_for(command)
                         self.position += speed * (now - previous) / 1e9
                         position = self.position
                         raw = bytearray(324)

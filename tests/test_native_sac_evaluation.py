@@ -2,9 +2,11 @@
 
 import json
 import socket
+import struct
 from dataclasses import asdict, replace
 
 import pytest
+from test_attempts import evidence
 from test_evaluation import sha
 from test_native_evaluation import ExternalDevices, native_request
 from test_native_sac_drive import native_candidate as native_candidate
@@ -40,9 +42,10 @@ def sac_evaluation(tmp_path, candidate):
 
 
 class Devices(ExternalDevices):
-    def __init__(self, fail_restart=False):
+    def __init__(self, fail_restart=False, world_factory=ExternalWorld):
         super().__init__(fail_restart)
         self.worlds = []
+        self.world_factory = world_factory
 
     def drive(self, plan):
         assert self.menus[-1].closed
@@ -50,7 +53,7 @@ class Devices(ExternalDevices):
         receiver = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         receiver.bind(("127.0.0.1", 0))
         telemetry = UDPTelemetry(receiver.getsockname()[1], receiver=receiver)
-        world = ExternalWorld(receiver.getsockname())
+        world = self.world_factory(receiver.getsockname())
         world.steer_feedback_scale = 0.4
         self.worlds.append(world)
         self.telemetry.append(telemetry)
@@ -76,6 +79,91 @@ class Devices(ExternalDevices):
             world.stop()
         for telemetry in self.telemetry:
             telemetry.close()
+
+
+def bind_native_validity(operation, devices):
+    """Bind the external world's raw observations, never execution outcome labels."""
+    ledger_file = operation.output_dir / "ledger.json"
+    ledger = json.loads(ledger_file.read_bytes())
+    assert len(ledger["entries"]) == len(devices.worlds)
+    for index, (entry, world) in enumerate(zip(ledger["entries"], devices.worlds)):
+        assert world.actuator_closed and world.capture_closed and world.failure is None
+        root = operation.output_dir / f"observer-{index:04d}"
+        root.mkdir()
+        observer = root / "observations.json"
+        observer.write_text(
+            json.dumps(
+                {
+                    "scope": "Simulated straight unobstructed world; NOT FH5 recognition",
+                    "commands": world.commands,
+                    "observations": world.observations,
+                }
+            )
+        )
+        proof = evidence(root, operation.output_dir / entry["recording"])
+        reviewed = json.loads(proof.read_bytes())
+        reviewed["items"] = [{"id": "review", "path": observer.name, "sha256": sha(observer)}]
+        proof.write_text(json.dumps(reviewed))
+        entry["evidence"] = {"file": str(proof), "sha256": sha(proof)}
+    ledger_file.write_text(json.dumps(ledger))
+    return ledger_file
+
+
+@pytest.mark.parametrize("end_margin_m", [0, 0.5], ids=["endpoint", "early-stop"])
+def test_native_completion_requires_recorded_endpoint_not_early_stop(
+    tmp_path, native_candidate, end_margin_m
+):
+    operation = replace(sac_evaluation(tmp_path, native_candidate), seconds=20)
+    folder = tmp_path / "drive"
+    folder.mkdir()
+    config = qualified_sac_config(
+        folder,
+        native_candidate,
+        route_file=operation.batch_dir / "route/route.json",
+        end_margin_m=end_margin_m,
+    )
+    original = sha(native_candidate / "policy.pt")
+    devices = Devices()
+    environment = NativeEvaluationEnvironment(
+        config, menu_factory=devices.menu, driving_factory=devices.drive
+    )
+    try:
+        outcome = run_experiment(operation, evaluation_environment=environment)
+        result = outcome.summary["evaluation_run"]
+        assert result["stop_reason"] == "plan_complete", result
+        assert result["resources_released"]
+        assert all(row["stop_reason"] == "local_end" for row in result["attempts"])
+        for world in devices.worlds:
+            assert world.commands[-1]["command"] == asdict(NEUTRAL)
+        ledger = bind_native_validity(operation, devices)
+        for entry in json.loads(ledger.read_bytes())["entries"]:
+            packets = operation.output_dir / entry["recording"] / "packets.jsonl"
+            positions = [
+                struct.unpack_from("<f", bytes.fromhex(json.loads(line)["payload_hex"]), 244)[0]
+                for line in packets.read_text().splitlines()
+            ]
+            if end_margin_m == 0:
+                assert max(positions) >= 3
+            else:
+                assert 2.5 <= max(positions) < 3
+        reviewed = run_experiment(
+            EvaluationReview(operation.output_dir / "frozen", ledger, tmp_path / "reviewed")
+        ).summary["evaluation"]
+        assert reviewed["verified_starts"] == 2
+        assert reviewed["execution_metrics"]["bound_runs"] == 2
+        assert not reviewed["automatic_promotion_allowed"]
+        for attempt in reviewed["attempts"]:
+            if end_margin_m == 0:
+                assert attempt["outcome"] == "valid_complete", attempt
+                assert attempt["confirmed_progress_m"] == 3
+                assert attempt["valid_duration_s"] > 0
+            else:
+                assert attempt["outcome"] == "driving_failed", attempt
+                assert "task_not_completed" in attempt["reasons"]
+                assert attempt["confirmed_progress_m"] < 3
+        assert sha(native_candidate / "policy.pt") == original
+    finally:
+        devices.cleanup()
 
 
 def test_native_sac_repeats_frozen_driving_with_automatic_restart(tmp_path, native_candidate):

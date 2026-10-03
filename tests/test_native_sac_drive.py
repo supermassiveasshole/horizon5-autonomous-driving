@@ -50,12 +50,14 @@ def native_candidate(tmp_path_factory, eligible_model):
     return root / "candidate"
 
 
-def qualified_sac_config(root, candidate, seed=None, route_file=None):
+def qualified_sac_config(root, candidate, seed=None, route_file=None, end_margin_m=None):
     config = drive_config(root, candidate / "bc")
     data = json.loads(config.read_bytes())
     data["model"] = {"kind": "sac", "directory": str(candidate), "device": "cpu"}
     if route_file is not None:
         data["task"]["route_file"] = str(route_file)
+    if end_margin_m is not None:
+        data["task"]["end_margin_m"] = end_margin_m
     if seed is not None:
         data["model"]["exploration_seed"] = seed
     config.write_text(json.dumps(data))

@@ -96,6 +96,8 @@ uv run --locked fh5 evaluation-review --batch runs/evaluation-001 --ledger runs/
 
 ## 原生 BC/SAC 重复评估入口
 
+局部任务有效完成要求封存遥测实际覆盖路线终点。驾驶配置 `task.end_margin_m` 表示提前停止距离：可显式设为 `0` 以测试完整短段；正数仍会提前停止，不能仅因执行以 `local_end` 结束就记为完赛。默认提前停止设置不变，终点前后的实际可用道路仍须符合该任务已核验范围。
+
 版本 3 沿用完整评估配置，把 `model` 写为 `{"directory":"…","manifest_sha256":"…","kind":"bc","device":"cuda"}`（也支持 `cpu`），并将模型来源中的 `provenance.input_conditions` 原样放入 `conditions.numeric_input_conditions`。它绑定 4K/其他源尺寸、HUD、相机和数值像素等实际采集条件；不能把旧诊断模型改标签作为资格证明。任务必须为版本 2 的自动起跑任务，计划限 1–10 次无参考运行，每次最多 30 秒。
 
 SAC 使用 `kind: "sac"`、`device: "cpu"` 和当前 `policy.json` 的摘要。候选须来自 `native` 或 `mixed` 经验，父 BC 必须非诊断、训练过无参考条件，采集条件取自父 BC；混合来源保持 `mixed`，不改标为纯原生。冻结时同时核对策略权重绑定、父 BC、像素与动作历史以及执行幅度。仅合成经验的 SAC 仍使用版本 2 诊断批次，不能作为版本 3 原生候选。
