@@ -10,8 +10,7 @@
     "device": "cpu",
     "time_mode": "actual"
   },
-  "collector_bundle": "../runs/frozen-collector",
-  "collector_manifest_sha256": "REPLACE_WITH_FROZEN_JSON_SHA256",
+  "collector_bundle": "../runs/collection-001",
   "budget": {
     "cpu_threads": 2,
     "poll_interval_s": 0.25,

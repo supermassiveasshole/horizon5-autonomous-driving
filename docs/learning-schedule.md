@@ -6,7 +6,9 @@
 uv run --locked fh5 collection-bc-train --config configs/collection-learning.example.json --output runs/scheduled-candidate-001
 ```
 
-v2 配置在 `training` 中直接填写数据集路径、种子、更新步数、批量、学习率、设备和时间模式，与采集绑定和资源预算放在同一个文件中。无需单独训练配置或手工计算数据集摘要；省略 `dataset_sha256` 时，启动阶段自动计算并冻结。显式提供的摘要仍须严格匹配。`collector_bundle` 指向 `collection-prepare` 生成的独立环境，哈希绑定其中 `frozen.json`。数据集和采集环境路径均相对于这份配置文件；数据与采集环境的完整性检查保留。输出必须是新目录，并位于输入数据集和采集环境之外。
+v2 配置在 `training` 中直接填写数据集路径、种子、更新步数、批量、学习率、设备和时间模式，与采集绑定和资源预算放在同一个文件中。无需单独训练配置或手工计算数据集摘要；省略 `dataset_sha256` 时，启动阶段自动计算并冻结。`collector_bundle` 指向本轮 `collection-start --output` 的目录，例如 `runs/collection-001`，其中包含 `frozen.json`、进程状态和 `recording/`。复用安装时不要填只有冻结安装的 `runs/collector`；旧版在安装目录直接录制的运行仍可沿用原路径。
+
+省略 `collector_manifest_sha256` 时，启动阶段自动计算该轮 `frozen.json` 的摘要；显式提供的摘要仍作为严格断言，不自动刷新。数据集和采集目录路径均相对于这份配置文件。原生资源检查继续核对清单、worker 和录制 session 的绑定及运行健康，计算摘要不代表采集已核验。输出必须是新目录，并位于输入数据集和采集目录之外。`schedule-config.json` 始终保存完整采集摘要和绝对路径，继续训练使用这个冻结绑定，不重新接受改动后的清单；原请求文件不改写。
 
 旧 v1 配置及已封存运行继续可读：读取时先验证 `training_config_sha256`，按旧训练文件的位置解析数据路径，再归一为同一 v2 结构。新运行只写出 v2，封存配置和 learner 始终包含实际数据摘要；继续训练使用该绑定，不能因原请求省略摘要而接受变化后的数据。手动迁移时，将原训练文件内容放进 `training`，删除 `training_config` 与 `training_config_sha256`，并调整数据相对路径；旧配置和成果无需改写。
 

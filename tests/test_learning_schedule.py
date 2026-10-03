@@ -457,7 +457,7 @@ def test_device_transfer_cannot_dispatch_training_after_budget_or_stop(
     assert summary["candidate"] is None
 
 
-@pytest.mark.parametrize("mismatch", ["session", "worker"])
+@pytest.mark.parametrize("mismatch", [None, "session", "worker"])
 def test_scheduler_binds_actual_collector_session_and_worker_to_its_manifest(tmp_path, mismatch):
     import time
 
@@ -467,7 +467,7 @@ def test_scheduler_binds_actual_collector_session_and_worker_to_its_manifest(tmp
     from fh5.collection_process import CollectionStart
     from fh5.learning_schedule import ScheduledBCTrain
 
-    config, _, _ = configuration(tmp_path)
+    config, training, _ = configuration(tmp_path)
     folder = tmp_path / "collector"
     folder.mkdir()
     installation, _, _ = prepare(folder, seconds=2)
@@ -485,6 +485,57 @@ def test_scheduler_binds_actual_collector_session_and_worker_to_its_manifest(tmp
         run_experiment(CollectionControl(bundle, stop=True))
     assert status.get("complete") and status["process_liveness"] == "exited"
     manifest = bundle / "frozen.json"
+    options = json.loads(config.read_bytes())
+    if mismatch is None:
+        # The normal v2 request names the selected recording, not a copied digest
+        # or the reusable installation (which has no process/recording status).
+        options.pop("training_config")
+        options.pop("training_config_sha256")
+        options.pop("collector_manifest_sha256")
+        options.update(
+            version=2,
+            training=json.loads(training.read_bytes()),
+            collector_bundle=bundle.relative_to(config.parent).as_posix(),
+        )
+        config.write_text(json.dumps(options))
+        original = config.read_bytes()
+        digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
+        summary = run_experiment(ScheduledBCTrain(config, tmp_path / "scheduled")).summary[
+            "learning_schedule"
+        ]
+        assert summary["state"] == "completed"
+        assert summary["steps_completed"] == 3
+        assert summary["config"]["collector_bundle"] == str(bundle.resolve())
+        assert summary["config"]["collector_manifest_sha256"] == digest
+        assert config.read_bytes() == original
+        assert (tmp_path / "scheduled/requested-schedule.json").read_bytes() == original
+        frozen = tmp_path / "scheduled/schedule-config.json"
+        assert json.loads(frozen.read_bytes())["collector_manifest_sha256"] == digest
+        plain = run_experiment(TemporalBCTrain(training, tmp_path / "plain")).summary["temporal_bc"]
+        candidate = json.loads((tmp_path / "scheduled/candidate/report.json").read_bytes())
+        assert [r["prediction"] for r in candidate["decisions"]] == [
+            r["prediction"] for r in plain["decisions"]
+        ]
+        assert summary["diagnostic_only"] and not summary["commands_sent"]
+
+        manifest.write_bytes(manifest.read_bytes() + b" ")
+        from fh5.learning_schedule import ScheduledBCResume
+
+        with pytest.raises(ValueError, match="manifest differs"):
+            run_experiment(
+                ScheduledBCResume(
+                    tmp_path / "scheduled",
+                    tmp_path / "rejected-resume",
+                    summary["learner_checkpoint"]["manifest_sha256"],
+                )
+            )
+        assert not (tmp_path / "rejected-resume").exists()
+        options["collector_manifest_sha256"] = digest
+        config.write_text(json.dumps(options))
+        with pytest.raises(ValueError, match="manifest differs"):
+            run_experiment(ScheduledBCTrain(config, tmp_path / "rejected-new"))
+        assert not (tmp_path / "rejected-new").exists()
+        return
     if mismatch == "worker":
         manifest.write_bytes(manifest.read_bytes() + b" ")
     digest = hashlib.sha256(manifest.read_bytes()).hexdigest()
@@ -496,7 +547,6 @@ def test_scheduler_binds_actual_collector_session_and_worker_to_its_manifest(tmp
     final = json.loads(final_path.read_bytes())
     final["session_sha256"] = hashlib.sha256(session_path.read_bytes()).hexdigest()
     final_path.write_text(json.dumps(final))
-    options = json.loads(config.read_bytes())
     options.update(collector_bundle=str(bundle), collector_manifest_sha256=digest)
     config.write_text(json.dumps(options))
     with pytest.raises(ValueError, match="snapshot differs"):

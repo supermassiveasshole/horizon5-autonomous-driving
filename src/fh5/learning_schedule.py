@@ -71,7 +71,7 @@ def _configuration_schedule(source: VerifiedFile) -> dict[str, Any]:
         version == 1
         and set(config) == shared_fields | {"training_config", "training_config_sha256"}
         or version == 2
-        and set(config) == shared_fields | {"training"}
+        and set(config) | {"collector_manifest_sha256"} == shared_fields | {"training"}
     ):
         raise ValueError("Unsupported learning schedule")
     budget_fields = {
@@ -107,6 +107,10 @@ def _configuration_schedule(source: VerifiedFile) -> dict[str, Any]:
     # not a second hard-coded capacity or duration ceiling.
     if budget["max_gpu_utilization_percent"] > 100:
         raise ValueError("GPU utilization budget must be a percentage from 0 to 100")
+    if "collector_manifest_sha256" not in config:
+        config["collector_manifest_sha256"] = sha256_file(
+            source.path.parent / config["collector_bundle"] / "frozen.json"
+        )
     for key in (
         ("training_config_sha256", "collector_manifest_sha256")
         if version == 1
