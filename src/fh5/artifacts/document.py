@@ -1,4 +1,4 @@
-"""Verified replay metadata with top-level arrays indexed on disk."""
+"""Verified replay metadata with top-level and selected nested arrays indexed on disk."""
 
 from __future__ import annotations
 
@@ -32,11 +32,33 @@ def _index_errors() -> Iterator[None]:
 class ReplayArray(Sequence[Any]):
     """Load individual records while the owning replay document is open."""
 
-    def __init__(self, index: sqlite3.Connection, section: str, length: int) -> None:
+    def __init__(
+        self,
+        index: sqlite3.Connection,
+        section: str,
+        length: int,
+        *,
+        nested_references: bool = False,
+    ) -> None:
         self.database, self.section, self.length = index, section, length
+        self.nested_references = nested_references
 
     def __len__(self) -> int:
         return self.length
+
+    def _decode(self, raw: str, references: str) -> Any:
+        value = json.loads(raw)
+        # References live beside the JSON record, never in source-owned keys.
+        for path, section, length in json.loads(references):
+            child = ReplayArray(self.database, section, length, nested_references=True)
+            if not path:
+                value = child
+            else:
+                parent = value
+                for key in path[:-1]:
+                    parent = parent[key]
+                parent[path[-1]] = child
+        return value
 
     @overload
     def __getitem__(self, key: int) -> Any: ...
@@ -51,23 +73,44 @@ class ReplayArray(Sequence[Any]):
             key += self.length
         if not 0 <= key < self.length:
             raise IndexError(key)
+        columns = "data, refs" if self.nested_references else "data, '[]'"
         with _index_errors():
             row = self.database.execute(
-                "SELECT data FROM records WHERE section = ? AND position = ?", (self.section, key)
+                f"SELECT {columns} FROM records WHERE section = ? AND position = ?",
+                (self.section, key),
             ).fetchone()
-        return json.loads(row[0])
+        return self._decode(row[0], row[1])
 
     def __iter__(self) -> Iterator[Any]:
+        columns = "data, refs" if self.nested_references else "data, '[]'"
         with (
             _index_errors(),
             closing(
                 self.database.execute(
-                    "SELECT data FROM records WHERE section = ? ORDER BY position", (self.section,)
+                    f"SELECT {columns} FROM records WHERE section = ? ORDER BY position",
+                    (self.section,),
                 )
             ) as rows,
         ):
-            for (raw,) in rows:
-                yield json.loads(raw)
+            for raw, references in rows:
+                yield self._decode(raw, references)
+
+
+def _indexed_record(value: Any) -> tuple[str, str]:
+    references = []
+
+    def visit(item: Any, path: tuple[str | int, ...]) -> Any:
+        if isinstance(item, ReplayArray):
+            references.append((path, item.section, len(item)))
+            return None
+        if isinstance(item, dict):
+            return {key: visit(child, (*path, key)) for key, child in item.items()}
+        if isinstance(item, list):
+            return [visit(child, (*path, i)) for i, child in enumerate(item)]
+        return item
+
+    raw = json.dumps(visit(value, ()), ensure_ascii=True)
+    return raw, json.dumps(references)
 
 
 class _JSONInput:
@@ -79,6 +122,7 @@ class _JSONInput:
         self.position = 0
         self.eof = False
         self.decoder = json.JSONDecoder()
+        self.sections = 0
 
     def more(self, characters: int = io.DEFAULT_BUFFER_SIZE) -> None:
         block = self.stream.read(characters)
@@ -140,35 +184,66 @@ class _JSONInput:
                 self.take(",")
         self.take("}")
 
-    def document(self, index: sqlite3.Connection) -> dict[str, Any]:
+    def document(
+        self, index: sqlite3.Connection, nested_arrays: set[tuple[str, ...]]
+    ) -> dict[str, Any]:
         result: dict[str, Any] = {}
         for key in self.object_keys():
             # Match json.loads' last-key-wins semantics, including arrays.
-            index.execute("DELETE FROM records WHERE section = ?", (key,))
+            if not nested_arrays:
+                index.execute("DELETE FROM records WHERE section = ?", (key,))
+            children = {path[1:] for path in nested_arrays if path and path[0] == key}
             if self.peek() == "[":
-                result[key] = self.array(index, key)
+                section = self.section() if nested_arrays else key
+                result[key] = self.array(index, section, children)
             else:
-                result[key] = self.value()
+                result[key] = self.nested(index, children)
         if self.peek():
             raise ValueError("Trailing data after replay JSON")
         return result
 
-    def array(self, index: sqlite3.Connection, section: str) -> ReplayArray:
+    def section(self) -> str:
+        self.sections += 1
+        return str(self.sections)
+
+    def nested(self, index: sqlite3.Connection, paths: set[tuple[str, ...]]) -> Any:
+        if not paths:
+            return self.value()
+        if self.peek() == "{":
+            return {
+                key: self.nested(index, {path[1:] for path in paths if path and path[0] == key})
+                for key in self.object_keys()
+            }
+        if self.peek() == "[":
+            if () in paths:
+                return self.array(index, self.section(), paths)
+            return list(self.array_values(index, paths))
+        return self.value()
+
+    def array_values(self, index: sqlite3.Connection, paths: set[tuple[str, ...]]) -> Iterator[Any]:
         self.take("[")
-        count = 0
+        children = {path[1:] for path in paths if path and path[0] == "*"}
         if self.peek() != "]":
             while True:
-                item = self.value()
-                index.execute(
-                    "INSERT INTO records VALUES (?, ?, ?)",
-                    (section, count, json.dumps(item, ensure_ascii=True)),
-                )
-                count += 1
+                yield self.nested(index, children)
                 if self.peek() != ",":
                     break
                 self.take(",")
         self.take("]")
-        return ReplayArray(index, section, count)
+
+    def array(
+        self, index: sqlite3.Connection, section: str, paths: set[tuple[str, ...]]
+    ) -> ReplayArray:
+        count = 0
+        for item in self.array_values(index, paths):
+            raw, references = (
+                _indexed_record(item) if paths else (json.dumps(item, ensure_ascii=True), "[]")
+            )
+            index.execute(
+                "INSERT INTO records VALUES (?, ?, ?, ?)", (section, count, raw, references)
+            )
+            count += 1
+        return ReplayArray(index, section, count, nested_references=True)
 
     def _discard_string(self) -> None:
         """Validate a discarded string without accumulating or decoding its text."""
@@ -390,18 +465,25 @@ def read_document_paths(source: VerifiedFile, wanted: set[tuple[str, ...]]) -> d
 
 
 @contextmanager
-def replay_document(source: VerifiedFile) -> Iterator[dict[str, Any]]:
-    """Parse only hash-verified private bytes; scope the on-demand array index."""
+def replay_document(
+    source: VerifiedFile, *, nested_arrays: set[tuple[str, ...]] | None = None
+) -> Iterator[dict[str, Any]]:
+    """Index top-level and opted-in nested arrays in hash-verified private bytes.
+
+    Paths name object keys; '*' traverses array elements. Other nested arrays
+    retain their list representation. Proxies are valid only inside this context.
+    """
     with TemporaryDirectory(prefix="fh5-replay-document-") as temporary:
         try:
             with closing(sqlite3.connect(Path(temporary) / "records.sqlite3")) as index:
                 index.execute(
                     "CREATE TABLE records (section TEXT, position INTEGER, data TEXT NOT NULL, "
+                    "refs TEXT NOT NULL, "
                     "PRIMARY KEY (section, position)) WITHOUT ROWID"
                 )
                 with source.snapshot() as frozen:
                     with io.TextIOWrapper(frozen, encoding="utf-8-sig") as text:
-                        document = _JSONInput(text).document(index)
+                        document = _JSONInput(text).document(index, nested_arrays or set())
                 index.commit()
                 yield document
         except sqlite3.Error as error:
@@ -412,21 +494,27 @@ def write_replay_document(path: Path, document: dict[str, Any]) -> None:
     """Write canonical legacy JSON without expanding indexed arrays or the whole text."""
     encoder = json.JSONEncoder(sort_keys=True, allow_nan=False, separators=(",", ":"))
     with path.open("x", encoding="utf-8", newline="\n") as stream:
-        stream.write("{")
-        for number, key in enumerate(sorted(document)):
-            if number:
-                stream.write(",")
-            stream.write(encoder.encode(key) + ":")
-            value = document[key]
-            if isinstance(value, ReplayArray):
+
+        def write(value: Any) -> None:
+            if isinstance(value, dict):
+                stream.write("{")
+                for number, key in enumerate(sorted(value)):
+                    if number:
+                        stream.write(",")
+                    stream.write(encoder.encode(key) + ":")
+                    write(value[key])
+                stream.write("}")
+            elif isinstance(value, (list, tuple, ReplayArray)):
                 stream.write("[")
                 for position, item in enumerate(value):
                     if position:
                         stream.write(",")
-                    stream.writelines(encoder.iterencode(item))
+                    write(item)
                 stream.write("]")
             else:
                 stream.writelines(encoder.iterencode(value))
-        stream.write("}\n")
+
+        write(document)
+        stream.write("\n")
         stream.flush()
         os.fsync(stream.fileno())
