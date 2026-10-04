@@ -261,25 +261,37 @@ def test_optional_counter_encoding_failure_does_not_stop_resource_checks(tmp_pat
     assert summary["events_omitted"] == 3 and summary["events_unverified"] == 0
 
 
-def test_resource_limit_sample_is_retained_with_its_terminal_stop_reason(tmp_path):
+def test_resource_pressure_samples_are_retained_until_explicit_stop(tmp_path):
     request = request_for(tmp_path)
 
-    class MemoryExhausted(BackloggedResources):
+    class MemoryPressure(BackloggedResources):
         def sample(self):
             sample = super().sample()
             sample["process_private_bytes"] = 5 * 1024**3
             return sample
 
-    summary = run_experiment(
-        request, learning_resources=MemoryExhausted(request.output_dir)
-    ).summary["learning_schedule"]
-    assert summary["stop_reason"] == "resource_limit:process_private_bytes"
-    assert summary["sample_count"] == 1
+    resources = MemoryPressure(request.output_dir)
+    result = run_experiment(request, learning_resources=resources)
+    summary = result.summary["learning_schedule"]
+    assert summary["state"] == "stopped" and summary["stop_reason"] == "requested_stop"
+    assert (request.output_dir / "stop.request").is_file() and resources.closed
+    assert summary["sample_count"] == 1103
+    assert summary["pressure_counts"] == {
+        "collection_backlog": 1103,
+        "resource_limit:process_private_bytes": 1103,
+    }
+    assert summary["pauses"] == 1 and summary["wait_s"] > 0
+    assert summary["steps_completed"] == 0 and summary["candidate"] is None
     history = summary["event_history"]
-    assert history["status"] == "complete" and history["records"] == 1
-    with (request.output_dir / history["path"]).open(encoding="utf-8") as stream:
-        event = json.loads(next(stream))
-        assert list(stream) == []
-    assert event["reasons"] == ["resource_limit:process_private_bytes"]
-    assert event["sample"]["process_private_bytes"] == 5 * 1024**3
-    assert summary["events_omitted"] == 0
+    assert history["status"] == "complete" and history["records"] == 1103
+    path = request.output_dir / history["path"]
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == history["sha256"]
+    with path.open(encoding="utf-8") as stream:
+        events = [json.loads(line) for line in stream]
+    assert len(events) == 1103
+    for number, event in enumerate(events, start=1):
+        assert event["reasons"] == ["collection_backlog", "resource_limit:process_private_bytes"]
+        assert event["sample"]["process_private_bytes"] == 5 * 1024**3
+        assert event["sample"]["collector"]["seen_rows"] == number
+    assert summary["events_omitted"] == summary["events_unverified"] == 0
+    assert json.loads(result.report_path.read_bytes()) == summary
