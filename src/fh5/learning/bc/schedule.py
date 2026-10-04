@@ -161,6 +161,7 @@ class LearningSchedule:
             0 <= now - sample["observed_ns"] <= cfg["max_status_age_ms"] * 1_000_000
         ):
             return ["resource_status_stale"]
+        reasons = []
         for field, limit, below in (
             ("process_private_bytes", cfg["max_private_bytes"], False),
             ("free_disk_bytes", cfg["min_free_disk_bytes"], True),
@@ -168,7 +169,7 @@ class LearningSchedule:
             if not number(sample.get(field)) or sample[field] < 0:
                 return ["resource_status_missing"]
             if (sample[field] < limit) if below else (sample[field] > limit):
-                raise ScheduleStopped("resource_limit:" + field)
+                reasons.append("resource_limit:" + field)
         collector = sample.get("collector", {})
         if (
             collector.get("archive_error")
@@ -186,7 +187,6 @@ class LearningSchedule:
             and collector.get("final_status_present") is True
             and collector.get("complete") is True
         )
-        reasons = []
         if not stopped:
             if (
                 collector.get("process_liveness") != "running"

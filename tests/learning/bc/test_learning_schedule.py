@@ -228,7 +228,7 @@ def test_recent_collector_heartbeat_uses_image_age_at_its_actual_poll(tmp_path):
         ("backlog", "resource_wait_timeout"),
         ("stale", "resource_wait_timeout"),
         ("missing", "resource_wait_timeout"),
-        ("private_memory", "resource_limit:process_private_bytes"),
+        ("private_memory", "resource_wait_timeout"),
         ("archive_failed", "collector_failed"),
         ("incomplete_exit", "collector_failed"),
     ],
