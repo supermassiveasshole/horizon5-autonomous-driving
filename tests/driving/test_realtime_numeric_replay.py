@@ -154,6 +154,24 @@ def test_missing_journal_event_fails_even_when_file_hash_is_updated(tmp_path):
     assert "Missing journal" in result["errors"][0]["error"]
 
 
+@pytest.mark.parametrize("field", ["commands", "proposals"])
+def test_replay_rejects_an_unjournaled_null_tail_even_with_a_valid_report_hash(tmp_path, field):
+    record(tmp_path)
+    root = tmp_path / "run"
+    report = json.loads((root / "report.json").read_bytes())
+    report.setdefault(field, []).append(None)
+    payload = json.dumps(report).encode()
+    (root / "report.json").write_bytes(payload)
+    (root / "realtime-manifest.json").write_text(
+        json.dumps({"version": 1, "report_sha256": hashlib.sha256(payload).hexdigest()})
+    )
+    result = run_experiment(
+        RealtimeNumericReplay(root, tmp_path / "rejected.html"), numeric_actor=PixelTimeActor()
+    ).summary["realtime_numeric_replay"]
+    assert not result["verified"]
+    assert "differ from journal" in result["errors"][0]["error"]
+
+
 @pytest.mark.parametrize("change", ["reason", "missing", "duplicate", "after_end"])
 def test_replay_requires_one_original_stop_matching_the_report(tmp_path, change):
     original = record(tmp_path)

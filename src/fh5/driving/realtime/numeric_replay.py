@@ -3,15 +3,17 @@
 from __future__ import annotations
 
 import hashlib
-import html
 import json
 import math
 from bisect import bisect_left
+from contextlib import ExitStack
 from copy import deepcopy
+from itertools import zip_longest
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fh5.artifacts.io import asset, read_json
+from fh5.artifacts.document import ReplayArray, replay_document, write_replay_document
+from fh5.artifacts.io import VerifiedFile, asset, read_json
 from fh5.driving.realtime.model import RealtimeNumericReplay
 from fh5.learning.sac.actions import ActionBounds, ActionSupportUnavailable
 from fh5.learning.sac.context import (
@@ -29,14 +31,23 @@ from fh5.observation.numeric import (
     validate_decision,
 )
 from fh5.observation.recording import numeric_features, read_numeric_frame
+from fh5.reporting.presentation import optional_report
 
 if TYPE_CHECKING:
     from fh5.result import RunResult
 
 
 def read_realtime_recording(
-    root: Path, *, expected_manifest_sha256: str | None = None
+    root: Path, *, expected_manifest_sha256: str | None = None, resources: ExitStack | None = None
 ) -> dict[str, Any]:
+    if resources is None:
+        # Existing consumers retain their ordinary dict/list result. Decode
+        # records one at a time instead of retaining the complete JSON text.
+        with ExitStack() as owned:
+            report = read_realtime_recording(
+                root, expected_manifest_sha256=expected_manifest_sha256, resources=owned
+            )
+            return {key: _materialize(value) for key, value in report.items()}
     manifest = read_json(root / "realtime-manifest.json", expected_sha256=expected_manifest_sha256)
     path = root / "report.json"
     if (
@@ -45,7 +56,12 @@ def read_realtime_recording(
         or not isinstance(manifest.get("report_sha256"), str)
     ):
         raise ValueError("Real-time report hash mismatch or unsupported manifest")
-    report: dict[str, Any] = read_json(path, expected_sha256=manifest["report_sha256"])
+    report = resources.enter_context(
+        replay_document(
+            VerifiedFile(path, manifest["report_sha256"]),
+            nested_arrays={("environment", "source_samples", "records")},
+        )
+    )
     if (
         not isinstance(report, dict)
         or report["version"] != 2
@@ -55,6 +71,14 @@ def read_realtime_recording(
     ):
         raise ValueError("Unsupported real-time numerical recording")
     return report
+
+
+def _materialize(value: Any) -> Any:
+    if isinstance(value, (ReplayArray, list)):
+        return [_materialize(row) for row in value]
+    if isinstance(value, dict):
+        return {key: _materialize(item) for key, item in value.items()}
+    return value
 
 
 def read_realtime_journal(
@@ -126,9 +150,20 @@ def read_realtime_journal(
         and stops[0]["at_ns"] - report["started_ns"] < int(time_limit_s * 1e9)
     ):
         raise ValueError("Recorded time-limit duration is shorter than its request")
-    if [r for _, r in sorted(commands)] != report["commands"]:
+    missing = object()
+    if any(
+        a != b
+        for a, b in zip_longest(
+            (r for _, r in sorted(commands)), report["commands"], fillvalue=missing
+        )
+    ):
         raise ValueError("Recorded commands differ from journal")
-    if [r for _, r in sorted(proposals)] != report.get("proposals", []):
+    if any(
+        a != b
+        for a, b in zip_longest(
+            (r for _, r in sorted(proposals)), report.get("proposals", []), fillvalue=missing
+        )
+    ):
         raise ValueError("Recorded counterfactual proposals differ from journal")
     ids = [d["decision_id"] for d in report["decisions"]]
     if len(ids) != len(set(ids)) or set(ids) != set(events):
@@ -363,6 +398,13 @@ def verify_realtime_decision(
 
 
 def replay_realtime_numeric(request: RealtimeNumericReplay, actor: DecisionActor) -> RunResult:
+    with ExitStack() as resources:
+        return _replay_realtime_numeric(request, actor, resources)
+
+
+def _replay_realtime_numeric(
+    request: RealtimeNumericReplay, actor: DecisionActor, resources: ExitStack
+) -> RunResult:
     from fh5.result import RunResult
 
     path = request.report_path
@@ -385,7 +427,7 @@ def replay_realtime_numeric(request: RealtimeNumericReplay, actor: DecisionActor
         "scope": "frozen numerical prediction reproduction; recorded timing and outcomes only",
     }
     try:
-        report = read_realtime_recording(request.recording_dir)
+        report = read_realtime_recording(request.recording_dir, resources=resources)
         summary.update(
             decisions=report["decisions"],
             commands=report["commands"],
@@ -432,16 +474,17 @@ def replay_realtime_numeric(request: RealtimeNumericReplay, actor: DecisionActor
         if clear is not None:
             clear()
     path.parent.mkdir(parents=True, exist_ok=True)
-    data = json.dumps(summary, indent=2, ensure_ascii=False, allow_nan=False)
-    path.with_suffix(".json").write_text(data + "\n", encoding="utf-8")
-    path.write_text(
-        '<!doctype html><html lang="zh"><meta charset="utf-8"><title>实时记录数值重放</title>'
-        "<style>body{font:16px system-ui;max-width:1100px;margin:32px auto}pre{white-space:pre-wrap}</style>"
-        "<h1>实时记录数值重放</h1><p>仅核对冻结模型的数值输入与预测。原始时间线、跳过和丢弃结果保留；"
-        "不重新执行时序，不发送控制，不证明实机驾驶能力。</p><pre>"
-        + html.escape(data)
-        + "</pre></html>",
-        encoding="utf-8",
+    evidence = path.with_suffix(".json")
+    write_replay_document(evidence, summary)
+    # Preserve the public result's list values after its temporary index closes.
+    # The verified source text and unneeded environment diagnostics are never
+    # copied into this numerical replay result.
+    summary = {key: _materialize(value) for key, value in summary.items()}
+    path = optional_report(
+        path,
+        "实时记录数值重放（仅核对冻结输入与预测，不重新执行时序或发送控制）",
+        summary,
+        fallback=evidence,
     )
     return RunResult(
         {"source_kind": "numeric_diagnostic"}, [], [], {"realtime_numeric_replay": summary}, path

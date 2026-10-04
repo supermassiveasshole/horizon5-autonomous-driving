@@ -2,17 +2,18 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections import Counter
 from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fh5.artifacts.io import asset
+from fh5.artifacts.document import write_replay_document
+from fh5.artifacts.io import asset, encode, sha256_file, write_file
+from fh5.artifacts.json_view import JsonArray, write_json
 from fh5.capture.metrics import percentiles
-from fh5.driving.realtime.model import MAX_REALTIME_REPORT_BYTES, RealtimeConfig
+from fh5.driving.realtime.model import RealtimeConfig
 from fh5.learning.sac.context import PROPOSAL_CONTEXT
+from fh5.reporting.presentation import optional_report
 
 if TYPE_CHECKING:
     from fh5.result import RunResult
@@ -23,8 +24,33 @@ def write_realtime_result(
 ) -> RunResult:
     from fh5.result import RunResult
 
-    decisions = result["decisions"]
     result["configuration"] = {**asdict(config), "pixels": config.pixels.metadata()}
+    try:
+        _add_realtime_metrics(result)
+    except (OSError, MemoryError) as error:
+        result["metrics"] = {
+            "status": "unavailable",
+            "error": f"{type(error).__name__}: {error}",
+        }
+    evidence = directory / "report.json"
+    write_replay_document(evidence, result)
+    if result["version"] == 2:
+        write_file(
+            directory / "realtime-manifest.json",
+            encode({"version": 1, "report_sha256": sha256_file(evidence)}),
+        )
+    path = optional_report(
+        directory / "report.html",
+        "数值决策与动作有效期",
+        result,
+        fallback=evidence,
+        render=lambda path, summary: _write_realtime_html(path, summary, directory),
+    )
+    return RunResult({"source_kind": result["evidence_kind"]}, [], [], {"realtime": result}, path)
+
+
+def _add_realtime_metrics(result: dict[str, Any]) -> None:
+    decisions = result["decisions"]
     accepted = [d for d in decisions if d["status"] == "accepted"]
     sent = {
         c["decision_id"]: c["returned_ns"]
@@ -103,27 +129,21 @@ def write_realtime_result(
                 if start in row and finish in row
             ]
         )
-    payload = (json.dumps(result, indent=2, allow_nan=False) + "\n").encode("utf-8")
-    if result["version"] == 2 and len(payload) > MAX_REALTIME_REPORT_BYTES:
-        result["evidence"].update(exact_replay_eligible=False, reason="replay_report_size_limit")
-        payload = (json.dumps(result, indent=2, allow_nan=False) + "\n").encode("utf-8")
-    (directory / "report.json").write_bytes(payload)
-    if result["version"] == 2:
-        (directory / "realtime-manifest.json").write_text(
-            json.dumps(
-                {"version": 1, "report_sha256": hashlib.sha256(payload).hexdigest()}, indent=2
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-    display = json.loads(json.dumps(result))
-    for row in display["decisions"]:
+
+
+def _write_realtime_html(path: Path, result: dict[str, Any], directory: Path) -> None:
+    def display_decision(original: dict[str, Any]) -> dict[str, Any]:
+        row = dict(original)
         row["preview_urls"] = [
             asset(directory, p).as_uri() if p else None
             for p in (row.get("archive") or {}).get("previews", [])
         ]
-    data = json.dumps(display, ensure_ascii=False, allow_nan=False).replace("<", "\\u003c")
+        return row
+
+    display = dict(result, decisions=JsonArray(map(display_decision, result["decisions"])))
     template = Path(__file__).with_name("realtime-report.html").read_text(encoding="utf-8")
-    path = directory / "report.html"
-    path.write_text(template.replace("/*REALTIME_DATA*/null", data), encoding="utf-8")
-    return RunResult({"source_kind": result["evidence_kind"]}, [], [], {"realtime": result}, path)
+    before, after = template.split("/*REALTIME_DATA*/null")
+    with path.open("w", encoding="utf-8", newline="\n") as stream:
+        stream.write(before)
+        write_json(stream, display, script_safe=True)
+        stream.write(after)

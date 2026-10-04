@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import ExitStack
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, Literal
@@ -192,6 +193,12 @@ class NumericDriveConfiguration:
         }
 
     def _shadow(self, base: Path, entry: dict[str, Any]) -> tuple[dict[str, Any], list[str]]:
+        with ExitStack() as resources:
+            return self._checked_shadow(base, entry, resources)
+
+    def _checked_shadow(
+        self, base: Path, entry: dict[str, Any], resources: ExitStack
+    ) -> tuple[dict[str, Any], list[str]]:
         if (
             not isinstance(entry, dict)
             or not {"directory"} <= set(entry) <= {"directory", "manifest_sha256"}
@@ -203,7 +210,7 @@ class NumericDriveConfiguration:
         digest = hashlib.sha256(raw).hexdigest()
         if "manifest_sha256" in entry and digest != entry["manifest_sha256"]:
             raise ValueError("Shadow evidence manifest changed")
-        report = read_realtime_recording(root, expected_manifest_sha256=digest)
+        report = read_realtime_recording(root, expected_manifest_sha256=digest, resources=resources)
         read_realtime_journal(root, report)
         for row in report["decisions"]:
             if "actor" in row:
@@ -265,30 +272,40 @@ class NumericDriveConfiguration:
             reasons.append("shadow_incomplete")
         if report["stop_reason"] not in ("time_limit", "local_end"):
             reasons.append("shadow_stopped_on_fault")
-        accepted = [d for d in report["decisions"] if d["status"] == "accepted"]
+        accepted_count = 0
+        first_accepted = last_accepted = None
+        timing_outside_budget = False
+        cfg = self.request.config
+        for row in report["decisions"]:
+            if row["status"] != "accepted":
+                continue
+            accepted_count += 1
+            if first_accepted is None:
+                first_accepted = row["decision_ns"]
+            last_accepted = row["decision_ns"]
+            if (
+                row["inference_returned_ns"] > row["deadline_ns"]
+                or not 0
+                <= row["inference_returned_ns"] - row["frames"][-1]["source_time_ns"]
+                <= cfg.max_image_age_ms * 1_000_000
+            ):
+                timing_outside_budget = True
         # Require accepted observations over time, not a single favorable call.
         # The span can include neutral waits; gap metrics remain in the report.
         span = (
-            (accepted[-1]["decision_ns"] - accepted[0]["decision_ns"]) / 1e9
-            if len(accepted) >= 2
+            (last_accepted - first_accepted) / 1e9
+            if accepted_count >= 2 and first_accepted is not None and last_accepted is not None
             else 0
         )
         if span < 1:
             reasons.append("shadow_insufficient_active_interval")
-        cfg = self.request.config
-        if any(
-            d["inference_returned_ns"] > d["deadline_ns"]
-            or not 0
-            <= d["inference_returned_ns"] - d["frames"][-1]["source_time_ns"]
-            <= cfg.max_image_age_ms * 1_000_000
-            for d in accepted
-        ):
+        if timing_outside_budget:
             reasons.append("shadow_timing_outside_runtime_budget")
         return {
             "directory": str(root),
             "manifest_sha256": digest,
             "report_sha256": json.loads(raw)["report_sha256"],
-            "accepted_decisions": len(accepted),
+            "accepted_decisions": accepted_count,
             "active_span_s": span,
             "reasons": reasons,
         }, reasons

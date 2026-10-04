@@ -204,6 +204,49 @@ def test_synthetic_shadow_cannot_qualify_native_driving(tmp_path, numeric_drivin
     assert not report["qualification"]["eligible"]
 
 
+def test_shadow_qualification_checks_originals_when_presentation_is_unavailable(
+    tmp_path, eligible_model, capsys, monkeypatch
+):
+    import fh5.reporting.realtime
+
+    config = drive_config(tmp_path, eligible_model)
+    original_open = Path.open
+
+    def fail_html(path, mode="r", *args, **kwargs):
+        if path.suffix == ".html" and "w" in mode:
+            raise OSError("injected HTML failure")
+        return original_open(path, mode, *args, **kwargs)
+
+    def fail_metrics(values):
+        raise MemoryError("injected optional metrics failure")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "open", fail_html)
+        patch.setattr(fh5.reporting.realtime, "percentiles", fail_metrics)
+        shadow = synthetic_shadow(tmp_path, eligible_model, config, native_file_fixture=True)
+    assert shadow["metrics"]["status"] == "unavailable"
+    assert shadow["presentation"]["status"] == "unavailable"
+    arguments = ["realtime-drive", "--config", str(config), "--output", str(tmp_path / "drive")]
+    assert main(arguments) == 0
+    qualified = json.loads(capsys.readouterr().out)
+    assert qualified["qualification"]["eligible"]
+    assert not qualified["devices_opened"]
+
+    # A valid report hash cannot substitute for the original per-decision
+    # journal, even when optional timing statistics are unavailable.
+    root = tmp_path / "shadow"
+    report = json.loads((root / "report.json").read_text())
+    row = next(row for row in report["decisions"] if row["status"] == "accepted")
+    row["inference_returned_ns"] = row["deadline_ns"] + 1
+    raw = json.dumps(report).encode()
+    (root / "report.json").write_bytes(raw)
+    (root / "realtime-manifest.json").write_text(
+        json.dumps({"version": 1, "report_sha256": hashlib.sha256(raw).hexdigest()})
+    )
+    assert main(arguments) == 2
+    assert "differs from journal" in json.loads(capsys.readouterr().err)["message"]
+
+
 def test_live_option_cannot_bypass_diagnostic_candidate(tmp_path, numeric_driving_model, capsys):
     config = drive_config(tmp_path, numeric_driving_model)
     output = tmp_path / "drive"
