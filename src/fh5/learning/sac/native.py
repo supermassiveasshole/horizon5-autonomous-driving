@@ -130,7 +130,8 @@ class NativeSACSamplingEnvironment:
         expected_conditions: dict[str, Any] | None = None,
     ) -> tuple[NumericDriveConfiguration, dict[str, Any]]:
         """Restart and qualify this exact candidate before opening its driving lease."""
-        from fh5.experiment import run_experiment
+        from fh5.driving.events import run_event
+        from fh5.driving.realtime.runtime import run_realtime
 
         root = start.request.output_dir.parent
 
@@ -177,14 +178,14 @@ class NativeSACSamplingEnvironment:
             if menu.source_kind != "udp" or event_payloads(event_file) != self.event_assets:
                 raise ValueError("Native sampling menu source or frozen assets changed")
             check_stop()
-            prepared = run_experiment(
+            prepared = run_event(
                 EventRun(
                     event_file,
                     root / "ready",
                     operation=self.initial_operation if self.attempts == 0 else "restart_ready",
                     live=True,
                 ),
-                event_environment=_StopMenu(menu, start.stopped),
+                environment=_StopMenu(menu, start.stopped),
             ).summary["event_run"]
             menu.close()
             if prepared["stop_reason"] == "user_stop":
@@ -221,10 +222,10 @@ class NativeSACSamplingEnvironment:
             self.observations.append(shadow)
             if shadow.source_kind != "shadow":
                 raise ValueError("Native sampling requires a read-only shadow adapter")
-            shadow_result = run_experiment(
+            shadow_result = run_realtime(
                 shadow_plan.request,
-                realtime_environment=shadow,
-                numeric_actor_factory=shadow_plan.actor,
+                environment=shadow,
+                factory=shadow_plan.actor,
             ).summary["realtime"]
             if not shadow_result["resources_released"]:
                 raise ValueError("Shadow resources were not released before driving acquisition")

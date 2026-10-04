@@ -22,13 +22,13 @@ def review_imitation(
     bc_manifest: dict[str, Any],
     learning_origins: set[str],
 ) -> tuple[dict[str, Any], dict[str, Any], dict[str, bytes]]:
-    from fh5.experiment import run_experiment
+    from fh5.evaluation.candidate_selection import compare_candidates
 
     if state["phase"] == "exited":
         raise ValueError("Imitation already exited; a new evaluation cannot revive it")
     if len(state["transitions"]) >= 64:
         raise ValueError("Imitation evaluation history exceeds 64 reviews")
-    reviewed = run_experiment(CandidateCompare(comparison, output, registry)).summary[
+    reviewed = compare_candidates(CandidateCompare(comparison, output, registry)).summary[
         "candidate_selection"
     ]
     if reviewed["models"] != {

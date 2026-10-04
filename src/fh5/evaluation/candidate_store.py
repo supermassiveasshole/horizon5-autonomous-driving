@@ -257,7 +257,8 @@ def _qualification_gate(
 
 
 def record_candidate(request: CandidateRecord) -> RunResult:
-    from fh5.experiment import run_experiment
+    from fh5.evaluation.candidate_archive import archive_candidate
+    from fh5.evaluation.candidate_selection import compare_candidates
 
     root = request.store_dir.resolve()
     previous = None
@@ -293,7 +294,7 @@ def record_candidate(request: CandidateRecord) -> RunResult:
     work = root / folder
     work.mkdir(parents=True)
     write_file(work / "request.json", raw)
-    reviewed = run_experiment(
+    reviewed = compare_candidates(
         CandidateCompare(comparison_file, work / "comparison", request.registry_file)
     ).summary["candidate_selection"]
     if reviewed["comparison_sha256"] != config["comparison"]["sha256"]:
@@ -307,7 +308,7 @@ def record_candidate(request: CandidateRecord) -> RunResult:
     roles, gates = {}, {}
     for side, checkpoint in checkpoints.items():
         archive = work / side
-        saved = run_experiment(
+        saved = archive_candidate(
             CandidateArchive(
                 checkpoint, archive, reviewed["models"][side], "Retain candidate selection state"
             )
@@ -400,7 +401,8 @@ def read_candidate_history(request: CandidateHistory) -> RunResult:
 
 
 def rollback_candidate(request: CandidateRollback) -> RunResult:
-    from fh5.experiment import run_experiment
+    from fh5.evaluation.candidate_archive import restore_candidate
+    from fh5.evaluation.candidate_selection import compare_candidates
 
     root = request.store_dir.resolve()
     target = previous = None
@@ -432,7 +434,7 @@ def rollback_candidate(request: CandidateRollback) -> RunResult:
     write_file(work / "request.json", payload)
     role = target["default"]
     restored = work / "verified-default"
-    verified = run_experiment(
+    verified = restore_candidate(
         CandidateRestore(
             asset(root, role["archive"]), restored, role["archive_sha256"], request.reason
         )
@@ -446,7 +448,7 @@ def rollback_candidate(request: CandidateRollback) -> RunResult:
         != qualification["comparison_sha256"]
     ):
         raise ValueError("Rollback comparison changed")
-    reviewed = run_experiment(
+    reviewed = compare_candidates(
         CandidateCompare(comparison, work / "comparison", request.registry_file)
     ).summary["candidate_selection"]
     side = qualification["side"]

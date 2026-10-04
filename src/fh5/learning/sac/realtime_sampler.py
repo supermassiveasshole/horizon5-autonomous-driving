@@ -53,7 +53,8 @@ class _AttemptDrive(StoppingDrive):
 def sample_realtime_attempt(
     environment: SACRealtimeEnvironment, start: SACRealtimeStart
 ) -> tuple[dict[str, Any], Path | None]:
-    from fh5.experiment import run_experiment
+    from fh5.driving.realtime.runtime import run_realtime
+    from fh5.reporting.recording import run_recording_report
     from fh5.telemetry.packet import Packet, Record
 
     root = start.request.output_dir.parent
@@ -79,10 +80,10 @@ def sample_realtime_attempt(
             drive.source_kind == "native"
         ):
             raise ValueError("Asynchronous SAC source and live opt-in disagree")
-        executed = run_experiment(
+        executed = run_realtime(
             start.request,
-            realtime_environment=drive,
-            numeric_actor_factory=lambda: SACSamplingActor(
+            environment=drive,
+            factory=lambda: SACSamplingActor(
                 start.checkpoint,
                 start.request.config.pixels,
                 start.expected_sha256,
@@ -96,7 +97,7 @@ def sample_realtime_attempt(
             commands_sent_to_game=executed["commands_sent_to_game"],
         )
         packets = read_realtime_journal(root / "execution", executed)
-        run_experiment(
+        run_recording_report(
             Record(
                 start.recording_config,
                 root / "recording",

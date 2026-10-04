@@ -212,8 +212,8 @@ def review_execution(
     reference_mode: str,
     output: Path,
 ) -> dict[str, Any]:
+    from fh5.driving.realtime.numeric_replay import replay_realtime_numeric
     from fh5.driving.realtime.observation import ShadowNumericActor
-    from fh5.experiment import run_experiment
 
     result: dict[str, Any] = {
         "status": "missing",
@@ -270,8 +270,8 @@ def review_execution(
                 actor = evaluation_actor(
                     batch_dir / "model", batch["config"]["model"], batch["config"]["runtime"]
                 )
-            replay = run_experiment(
-                RealtimeNumericReplay(root, output), numeric_actor=actor
+            replay = replay_realtime_numeric(
+                RealtimeNumericReplay(root, output), actor=actor
             ).summary["realtime_numeric_replay"]
         result.update(
             replay=output.name,

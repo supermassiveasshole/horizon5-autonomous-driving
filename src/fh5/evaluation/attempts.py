@@ -526,7 +526,7 @@ def _attempt(
 
 
 def review_attempts(request: AttemptReplay) -> RunResult:
-    from fh5.experiment import run_experiment
+    from fh5.reporting.recording import run_recording_report
     from fh5.result import RunResult
     from fh5.telemetry.packet import Replay
 
@@ -540,7 +540,9 @@ def review_attempts(request: AttemptReplay) -> RunResult:
         request, digest, len((request.recording_dir / "packets.jsonl").read_bytes().splitlines())
     )
     request.output_dir.mkdir(parents=True, exist_ok=False)
-    base = run_experiment(Replay(request.recording_dir, request.output_dir / "telemetry.html"))
+    base = run_recording_report(
+        Replay(request.recording_dir, request.output_dir / "telemetry.html")
+    )
     count = base.summary["packet_count"]
     boundaries = sorted(
         {

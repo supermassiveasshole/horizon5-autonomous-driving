@@ -228,7 +228,7 @@ def _forward_m(sample: dict[str, Any], guard: dict[str, Any]) -> float:
 def _run_control(
     request: Control, environment: ControlEnvironment, config: dict[str, Any]
 ) -> RunResult:
-    from fh5.experiment import run_experiment
+    from fh5.reporting.recording import run_recording_report
     from fh5.telemetry.packet import Record
     from fh5.telemetry.packet import decode_packet as _decode
 
@@ -422,7 +422,7 @@ def _run_control(
                     )
                     final_summary.replace(request.output_dir / "control.json")
 
-    return run_experiment(
+    return run_recording_report(
         Record(request.config_file, request.output_dir, environment.source_kind), packets=stream()
     )
 

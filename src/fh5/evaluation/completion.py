@@ -39,7 +39,7 @@ def completed_evaluation(
     request: EvaluationRun, *, expected_native: dict[str, Any] | None = None
 ) -> dict[str, Any]:
     """Recover against parent-authenticated native bindings, never the child's declaration."""
-    from fh5.experiment import run_experiment
+    from fh5.evaluation.prepare import review_evaluation
 
     if request.live != (expected_native is not None):
         raise ValueError("Evaluation recovery requires matching parent native qualification")
@@ -156,7 +156,7 @@ def completed_evaluation(
         raise ValueError("Completed evaluation stop differs from original execution")
     # Re-run inference and menu/recording checks, never just trust completion hashes.
     with TemporaryDirectory(prefix="evaluation-recovery-", dir=root.parent) as temporary:
-        reviewed = run_experiment(
+        reviewed = review_evaluation(
             EvaluationReview(root / "frozen", root / "ledger.json", Path(temporary) / "review")
         ).summary["evaluation"]
     original = _read(root / "review/batch-report.json")[0]

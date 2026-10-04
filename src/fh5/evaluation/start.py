@@ -192,7 +192,7 @@ def review_start(
     recording: RunResult,
     output: Path,
 ) -> dict[str, Any]:
-    from fh5.experiment import run_experiment
+    from fh5.reporting.recording import run_recording_report
     from fh5.telemetry.packet import Replay
 
     task = json.loads(read_bounded(batch_dir / "task.json", 1024**2))
@@ -242,7 +242,7 @@ def review_start(
             raise ValueError("Preparation used an unsupported ready operation")
         observed_config = validate_event_file(directory / "event-config.json")["event_run"]
         output.parent.mkdir(parents=True, exist_ok=True)
-        prepared = run_experiment(Replay(directory, output))
+        prepared = run_recording_report(Replay(directory, output))
         ready, checked = _menu_ready(directory, observed_config, operation, prepared.samples)
         if (
             prepared.metadata["source_kind"] != recording.metadata["source_kind"]

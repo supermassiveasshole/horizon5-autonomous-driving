@@ -154,7 +154,10 @@ def _verify_event_protocol(root: Path, expected: str) -> None:
 
 
 def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -> RunResult:
-    from fh5.experiment import run_experiment
+    from fh5.driving.events import run_event
+    from fh5.driving.realtime.runtime import run_realtime
+    from fh5.evaluation.prepare import review_evaluation
+    from fh5.reporting.recording import run_recording_report
     from fh5.result import RunResult
     from fh5.telemetry.packet import Packet, Record
 
@@ -226,14 +229,14 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
                     menu_environment.close()
                 raise
             preparation.update(
-                run_experiment(
+                run_event(
                     EventRun(
                         event_file,
                         directory / "ready",
                         operation=request.initial_operation if i == 0 else "restart_ready",
                         live=request.live,
                     ),
-                    event_environment=menu_environment,
+                    environment=menu_environment,
                 ).summary["event_run"]
             )
             if (
@@ -271,11 +274,11 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
             except (Exception, KeyboardInterrupt):
                 drive.close()
                 raise
-            executed = run_experiment(
+            executed = run_realtime(
                 RealtimeRun(
                     directory / "execution", config, seconds=request.seconds, live=request.live
                 ),
-                realtime_environment=ReadyHandoff(
+                environment=ReadyHandoff(
                     drive,
                     preparation["ready_state"],
                     event_parameters,
@@ -287,7 +290,7 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
                     if task["version"] == 2
                     else None,
                 ),
-                numeric_actor_factory=lambda: evaluation_actor(
+                factory=lambda: evaluation_actor(
                     root / "frozen/model",
                     batch["config"]["model"],
                     batch["config"]["runtime"],
@@ -300,7 +303,7 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
             )
             summary["commands_sent_to_game"] |= executed["commands_sent_to_game"]
             packets = read_realtime_journal(directory / "execution", executed)
-            run_experiment(
+            run_recording_report(
                 Record(
                     record_config, directory / "recording", "udp" if request.live else "synthetic"
                 ),
@@ -381,7 +384,7 @@ def run_evaluation(request: EvaluationRun, environment: EvaluationEnvironment) -
     )
     reviewed_summary: dict[str, Any] = {}
     try:
-        reviewed_summary = run_experiment(
+        reviewed_summary = review_evaluation(
             EvaluationReview(
                 root / "frozen", root / "ledger.json", root / "review", request.registry_file
             )

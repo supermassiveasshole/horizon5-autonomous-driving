@@ -85,8 +85,8 @@ def _hash(path: Path) -> str:
 
 def run_vision(request: VisionRecord, environment: VisionEnvironment) -> RunResult:
     # Compose the captured images with telemetry through the experiment interface.
-    from fh5.experiment import run_experiment
     from fh5.observation.multimodal import ObservationReplay, freeze_inputs
+    from fh5.reporting.recording import run_recording_report
     from fh5.telemetry.packet import Record
     from fh5.telemetry.recording import write_json as _write_json
 
@@ -202,11 +202,11 @@ def run_vision(request: VisionRecord, environment: VisionEnvironment) -> RunResu
 
     try:
         frozen = freeze_inputs(request.observation_config, request.route_file)
-        result = run_experiment(
+        result = run_recording_report(
             Record(request.config_file, directory, environment.source_kind), packets=observations()
         )
         if frozen:
-            return run_experiment(
+            return run_recording_report(
                 ObservationReplay(
                     directory,
                     directory / "observations.html",

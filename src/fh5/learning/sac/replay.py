@@ -144,7 +144,7 @@ def _observation(
 
 
 def prepare_sac_replay(request: SACReplayPrepare) -> RunResult:
-    from fh5.experiment import run_experiment
+    from fh5.evaluation.rewards import settle_rewards
     from fh5.result import RunResult
 
     raw = read_bounded(request.trace_file, 32 * 1024**2)
@@ -171,7 +171,7 @@ def prepare_sac_replay(request: SACReplayPrepare) -> RunResult:
         raise ValueError("SAC trace exceeds 512 MiB decoded frame budget")
     request.output_dir.mkdir(parents=True)
     (request.output_dir / "frames").mkdir()
-    settled = run_experiment(
+    settled = settle_rewards(
         RewardReplay(
             request.recording_dir,
             request.output_dir / "reward",

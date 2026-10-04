@@ -1,6 +1,6 @@
 # 代码结构与依赖
 
-`fh5.experiment.run_experiment` 是实验运行与行为测试的统一入口。CLI 在 `cli.py` 和 `commands/` 装配具体环境；参数定义集中在 `commands/parser.py`，按工作流分组。包的 `__init__.py` 不加载设备或整套工作流。
+`fh5.experiment.run_experiment` 保留实验运行与行为测试的公共兼容入口，负责请求分发和外部环境的必要检查。内部工作流直接调用所属模块的函数，不再绕回这个分发器。CLI 在 `cli.py` 和 `commands/` 装配具体环境；参数定义集中在 `commands/parser.py`，按工作流分组。包的 `__init__.py` 不加载设备或整套工作流。
 
 | 位置 | 负责什么 |
 |---|---|
@@ -16,12 +16,12 @@
 
 ## 修改应落在哪里
 
-- 纯遥测实现仅依赖标准库、`telemetry.packet` 与 `result.RunResult`。实验入口在得到基础遥测结果后组合控制、路线、视觉证据并生成报告；数据类型不反向导入实验分发器。
+- 纯遥测实现仅依赖标准库、`telemetry.packet` 与 `result.RunResult`。`reporting.recording.run_recording_report` 在得到基础遥测结果后组合控制、路线、视觉证据并生成报告；数据类型不反向导入实验分发器。
 - 数值图像、时间戳与历史有效性属于 `observation.numeric`；录制/推理属于 `observation.recording`。增加一种输入信息先修改其契约和消费者，而不是给类型模块增加工作流分派。
 - 通用文件能力由 `artifacts.io` 维护。训练和评估不从采集工作线程获取 JSON 编码、原子发布或文件写入函数。
 - 采集运行循环负责采样与封存；进程启动、状态和停止请求统一由 `collection.process` 负责。冻结采集包复制完整源码及模板，从自己的安装环境运行。
 - 外部 adapter 与所属能力放在一起，如 `capture.windows`、`driving.windows` 和 `learning.loop.native`。Windows、Torch 和截屏依赖继续按实际使用延迟加载。
-- 编排工作流可以调用其他工作流；底层数据与文件模块不依赖这些编排。现有部分工作流仍借助 `run_experiment` 组合实验，这不代表包依赖已完全无环。
+- 编排工作流直接调用所需能力，如 `collect`、`run_realtime`、`settle_rewards`、`run_sac_training` 和 `review_evaluation`；只传该能力需要的参数。保留必要的局部导入以避免加载环，不增加注册器或通用依赖容器。底层数据与文件模块不依赖这些编排；这不代表所有业务模块之间已经无环。
 
 ## 兼容与验证
 

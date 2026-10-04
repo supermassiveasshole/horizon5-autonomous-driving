@@ -162,7 +162,7 @@ def _compare(
 
 
 def compare_candidates(request: CandidateCompare) -> RunResult:
-    from fh5.experiment import run_experiment
+    from fh5.evaluation.prepare import review_evaluation
     from fh5.result import RunResult
 
     if request.output_dir.exists():
@@ -191,7 +191,7 @@ def compare_candidates(request: CandidateCompare) -> RunResult:
     origins: dict[str, set[str]] = {}
     for side, binding in inputs.items():
         binding.verify()
-        reviews[side] = run_experiment(
+        reviews[side] = review_evaluation(
             EvaluationReview(
                 binding.batch_dir,
                 binding.ledger_file,

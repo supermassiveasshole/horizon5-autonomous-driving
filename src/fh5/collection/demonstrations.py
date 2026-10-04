@@ -245,8 +245,8 @@ def record_demonstration(request: DemonstrationRecord, environment: VisionEnviro
 
 
 def replay_demonstration(request: DemonstrationReplay) -> RunResult:
-    from fh5.experiment import run_experiment
     from fh5.observation.multimodal import ObservationReplay
+    from fh5.reporting.recording import run_recording_report
     from fh5.reporting.telemetry import write_report
     from fh5.telemetry.packet import Replay
 
@@ -258,7 +258,7 @@ def replay_demonstration(request: DemonstrationReplay) -> RunResult:
     base = request.report_path.with_name(request.report_path.stem + "-observations.html")
     config = directory / "observation-config.json"
     reference = directory / "observation-route/route.json"
-    result = run_experiment(
+    result = run_recording_report(
         ObservationReplay(directory, base, reference if reference.exists() else None, config)
         if config.exists()
         else Replay(directory, base)

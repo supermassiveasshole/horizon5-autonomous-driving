@@ -359,7 +359,7 @@ def _settle(
 
 
 def settle_rewards(request: RewardReplay) -> "RunResult":
-    from fh5.experiment import run_experiment
+    from fh5.evaluation.attempts import review_attempts
     from fh5.result import RunResult
 
     task = json.loads(request.task_file.read_text(encoding="utf-8-sig"))
@@ -370,7 +370,7 @@ def settle_rewards(request: RewardReplay) -> "RunResult":
         json.loads(reward_bytes.decode("utf-8-sig")), task.get("max_duration_s")
     )
     request.output_dir.mkdir(parents=True, exist_ok=False)
-    base = run_experiment(
+    base = review_attempts(
         AttemptReplay(
             request.recording_dir,
             request.output_dir / "validity",

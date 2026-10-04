@@ -32,7 +32,7 @@ class TemporalBCPrepare:
 def prepare_temporal(request: TemporalBCPrepare) -> RunResult:
     from PIL import Image
 
-    from fh5.experiment import run_experiment
+    from fh5.reporting.recording import run_recording_report
     from fh5.telemetry.packet import Replay
 
     config = json.loads(request.config_file.read_text(encoding="utf-8"))
@@ -73,7 +73,7 @@ def prepare_temporal(request: TemporalBCPrepare) -> RunResult:
         directory = Path(source["directory"])
         validate_demonstration(directory)
         with tempfile.TemporaryDirectory(prefix="fh5-temporal-boundaries-") as temp:
-            result = run_experiment(Replay(directory, Path(temp) / "report.html"))
+            result = run_recording_report(Replay(directory, Path(temp) / "report.html"))
             boundaries, _ = history_timing(
                 result.samples, result.events, result.summary["vision"]["events"], 2
             )

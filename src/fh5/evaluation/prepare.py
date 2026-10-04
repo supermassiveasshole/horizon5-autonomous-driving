@@ -356,7 +356,7 @@ def _protocol_order(batch: dict[str, Any], metadata: dict[str, Any]) -> str:
 
 
 def review_evaluation(request: EvaluationReview) -> RunResult:
-    from fh5.experiment import run_experiment
+    from fh5.evaluation.attempts import review_attempts
     from fh5.result import RunResult
 
     if request.output_dir.exists():
@@ -413,7 +413,7 @@ def review_evaluation(request: EvaluationReview) -> RunResult:
             evidence = request.ledger_file.parent / proof["file"] if proof else None
             if evidence is not None and _read(evidence)[1] != proof["sha256"]:
                 raise ValueError("Evaluation evidence changed")
-            result = run_experiment(
+            result = review_attempts(
                 AttemptReplay(
                     source,
                     request.output_dir / f"run-{i:04d}",

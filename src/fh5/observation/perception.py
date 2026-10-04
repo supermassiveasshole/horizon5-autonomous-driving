@@ -253,7 +253,7 @@ def replay_perception(request: PerceptionReplay) -> RunResult:
 def run_perception(request: Perception, model: RoadModel) -> RunResult:
     from PIL import Image
 
-    from fh5.experiment import run_experiment
+    from fh5.reporting.recording import run_recording_report
     from fh5.telemetry.packet import Replay
 
     dataset = json.loads(request.dataset_file.read_text(encoding="utf-8-sig"))
@@ -277,7 +277,7 @@ def run_perception(request: Perception, model: RoadModel) -> RunResult:
         if file_hash(source / "vision.jsonl") != clip["vision_sha256"]:
             raise ValueError("Recording does not match frozen dataset")
         if source not in recordings:
-            recordings[source] = run_experiment(
+            recordings[source] = run_recording_report(
                 Replay(source, output / "sources" / f"{len(recordings)}.html")
             )
         visual = recordings[source].summary["vision"]["frames"]

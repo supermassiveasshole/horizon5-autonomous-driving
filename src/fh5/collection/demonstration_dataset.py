@@ -180,7 +180,7 @@ def _future(
 
 
 def export_demonstrations(request: DemonstrationDataset) -> RunResult:
-    from fh5.experiment import run_experiment
+    from fh5.collection.demonstrations import replay_demonstration
     from fh5.reporting.telemetry import write_report
 
     config = json.loads(request.config_file.read_text(encoding="utf-8"))
@@ -192,7 +192,7 @@ def export_demonstrations(request: DemonstrationDataset) -> RunResult:
     first_result = None
     for run_index, entry in enumerate(config["runs"]):
         directory, review = prepared[run_index]
-        result = run_experiment(
+        result = replay_demonstration(
             DemonstrationReplay(directory, request.output_dir / f"run-{run_index}.html")
         )
         if first_result is None:

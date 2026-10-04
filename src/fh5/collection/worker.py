@@ -93,7 +93,7 @@ class SyntheticCollection:
 
 
 def main() -> int:
-    from fh5.experiment import run_experiment
+    from fh5.collection.runtime import collect
 
     root, expected, token = Path(sys.argv[1]).resolve(), sys.argv[2], sys.argv[3]
     state: dict[str, Any] = {
@@ -132,13 +132,13 @@ def main() -> int:
         )
         if manifest["source"] == "synthetic":
             environment = SyntheticCollection(request)
-            result = run_experiment(request, collection_environment=environment)
+            result = collect(request, environment=environment)
         elif manifest["source"] == "native":
             from fh5.collection.live import native_collection_environment
 
             native = native_collection_environment(request, capture, target, manifest["port"])
             try:
-                result = run_experiment(request, collection_environment=native)
+                result = collect(request, environment=native)
             finally:
                 native.close()
         else:

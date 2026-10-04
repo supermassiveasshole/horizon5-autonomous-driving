@@ -29,7 +29,7 @@ def _save(path: Path, value: Any) -> Path:
 
 
 def _record(root: Path, name: str, positions: list[tuple[float, float]], speed: float = 4) -> Path:
-    from fh5.experiment import run_experiment
+    from fh5.reporting.recording import run_recording_report
     from fh5.telemetry.packet import Packet, Record
 
     config = _save(
@@ -53,12 +53,13 @@ def _record(root: Path, name: str, positions: list[tuple[float, float]], speed: 
             Packet(1_000_000_000 + i * 100_000_000, "2026-09-30T00:00:00+00:00", bytes(raw))
         )
     source = root / name
-    run_experiment(Record(config, source), packets=packets)
+    run_recording_report(Record(config, source), packets=packets)
     return source
 
 
 def audit_rewards(request: RewardAudit) -> "RunResult":
-    from fh5.experiment import run_experiment
+    from fh5.evaluation.rewards import settle_rewards
+    from fh5.reporting.recording import run_recording_report
     from fh5.result import RunResult
 
     root = request.output_dir
@@ -88,7 +89,7 @@ def audit_rewards(request: RewardAudit) -> "RunResult":
         ],
     }
     annotations = _save(root / "geometry.json", geometry)
-    run_experiment(BuildRoute(reference, root / "route", 0, 3, annotations_file=annotations))
+    run_recording_report(BuildRoute(reference, root / "route", 0, 3, annotations_file=annotations))
     geometry["checkpoints"] = [
         {
             "id": "gate",
@@ -101,7 +102,7 @@ def audit_rewards(request: RewardAudit) -> "RunResult":
         }
     ]
     gated = _save(root / "gated-geometry.json", geometry)
-    run_experiment(BuildRoute(reference, root / "gated-route", 0, 3, annotations_file=gated))
+    run_recording_report(BuildRoute(reference, root / "gated-route", 0, 3, annotations_file=gated))
     normal = [(0.0, 0.2), (1.0, 0.2), (2.0, 0.2), (3.0, 0.2)]
     cases: dict[str, tuple[list[tuple[float, float]], str | None, int, str]] = {
         "complete": (normal, None, 0, "success"),
@@ -201,7 +202,7 @@ def audit_rewards(request: RewardAudit) -> "RunResult":
                 else [],
             },
         )
-        result = run_experiment(
+        result = settle_rewards(
             RewardReplay(source, root / (name + "-settlement"), task, request.reward_file, evidence)
         )
         if base is None:

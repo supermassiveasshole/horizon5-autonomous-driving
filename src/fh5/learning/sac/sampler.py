@@ -69,7 +69,7 @@ def sample_attempt(
     seed: int,
     stop_requested: Callable[[], bool] | None = None,
 ) -> tuple[dict[str, Any], Path | None]:
-    from fh5.experiment import run_experiment
+    from fh5.reporting.recording import run_recording_report
     from fh5.telemetry.packet import Record
 
     root.mkdir(parents=True, exist_ok=False)
@@ -205,7 +205,7 @@ def sample_attempt(
     recording = root / "recording"
     review = None
     try:
-        run_experiment(Record(config, recording), packets=packets)
+        run_recording_report(Record(config, recording), packets=packets)
         review = environment.finish(recording)
     except Exception as error:
         result.update(stop_reason="sampling_fault", error=f"{type(error).__name__}: {error}")

@@ -256,9 +256,12 @@ class _Loop:
         return bool(decision["admitted"] and not stopped)
 
     def initialize(self) -> bool:
-        from fh5.experiment import run_experiment
+        from fh5.evaluation.candidate_archive import restore_candidate
+        from fh5.evaluation.candidate_store import read_candidate_history
 
-        history = run_experiment(CandidateHistory(self.store, limit=0)).summary["candidate_store"]
+        history = read_candidate_history(CandidateHistory(self.store, limit=0)).summary[
+            "candidate_store"
+        ]
         if history["revision"] != self.config["store"]["revision"]:
             raise ValueError("Learning store revision changed before initialization")
         if history["scope"] != self.state["scope"]:
@@ -279,7 +282,7 @@ class _Loop:
         for role in ("default", "explorer"):
             saved = history[role]
             target = self.root / "initial" / role
-            run_experiment(
+            restore_candidate(
                 CandidateRestore(
                     self.store / saved["archive"],
                     target,
@@ -494,7 +497,7 @@ class _Loop:
         return True
 
     def verify(self) -> None:
-        from fh5.experiment import run_experiment
+        from fh5.evaluation.candidate_store import read_candidate_history
 
         if (
             self.native
@@ -505,7 +508,9 @@ class _Loop:
             _sha(Path(path)) != expected for path, expected in self.state["source_files"].items()
         ):
             raise ValueError("Frozen learning inputs changed")
-        history = run_experiment(CandidateHistory(self.store, limit=0)).summary["candidate_store"]
+        history = read_candidate_history(CandidateHistory(self.store, limit=0)).summary[
+            "candidate_store"
+        ]
         if (
             history["revision"] != self.state["store_revision"]
             or history["scope"] != self.state["scope"]
@@ -685,7 +690,7 @@ class _Loop:
         )
 
     def sample(self, number: int, row: dict[str, Any]) -> bool:
-        from fh5.experiment import run_experiment
+        from fh5.learning.sac.cycle import run_sac_cycle
 
         request = self.sampling_request(number)
         row["sampling_checkpoint_sha256"] = self.state["latest_learner"]["sha256"]
@@ -706,18 +711,18 @@ class _Loop:
         if source is None:
             return False
         if isinstance(request, SACRealtimeCycle):
-            summary = run_experiment(
+            summary = run_sac_cycle(
                 request,
-                sac_realtime_environment=RealtimeSamplingLease(
+                environment=RealtimeSamplingLease(
                     cast(SACRealtimeEnvironment, source), self.save, self.source_kind
                 ),
-                sac_stop_requested=lambda _: self.stopped(),
+                stop_requested=lambda _: self.stopped(),
             ).summary["sac_cycle"]
         else:
-            summary = run_experiment(
+            summary = run_sac_cycle(
                 request,
-                sac_environment=SamplingLease(cast(SACEnvironment, source), self.save),
-                sac_stop_requested=lambda _: self.stopped(),
+                environment=SamplingLease(cast(SACEnvironment, source), self.save),
+                stop_requested=lambda _: self.stopped(),
             ).summary["sac_cycle"]
         self.accept_sampling(row, request.output_dir, summary)
         self.save("learned")
@@ -797,7 +802,7 @@ class _Loop:
         row.pop("update_segments", None)
 
     def resume_updates(self, number: int, row: dict[str, Any]) -> bool:
-        from fh5.experiment import run_experiment
+        from fh5.learning.sac.training import run_sac_training
 
         progress = self.update_progress(number, row)
         if progress.learner != self.state["latest_learner"]:
@@ -806,14 +811,14 @@ class _Loop:
             return False
         output = self.root / f"round-{number:03d}" / f"updates-{progress.segments:03d}"
         self.save("resuming_updates")
-        learned = run_experiment(
+        learned = run_sac_training(
             SACResume(
                 Path(progress.learner["directory"]),
                 output,
                 steps=progress.earned - progress.completed,
                 expected_checkpoint_sha256=progress.learner["sha256"],
             ),
-            sac_stop_requested=lambda _: self.stopped(),
+            stop_requested=lambda _: self.stopped(),
         ).summary["sac_learning"]
         self.accept_updates(number, row, self.update_progress(number, row), "resumed_updates")
         self.save("learned")
@@ -937,7 +942,8 @@ class _Loop:
         return path
 
     def evaluate(self, number: int, row: dict[str, Any]) -> dict[str, Any] | None:
-        from fh5.experiment import run_experiment
+        from fh5.evaluation.prepare import prepare_evaluation, review_evaluation
+        from fh5.evaluation.run import run_evaluation
 
         root = self.root / f"round-{number:03d}"
         basis = _input(self.root, self.state["incumbent"])
@@ -960,7 +966,7 @@ class _Loop:
         else:
             write_file(path, encode(config))
             self.save("preparing_evaluation")
-            run_experiment(EvaluationPrepare(path, batch, self.registry))
+            prepare_evaluation(EvaluationPrepare(path, batch, self.registry))
             digest = _sha(batch / "batch.json")
             row["evaluation_prepared"] = {"batch_sha256": digest, "config_sha256": _sha(path)}
         frozen, _, _ = read_evaluation_batch(batch, digest)
@@ -1004,7 +1010,7 @@ class _Loop:
                 self.native_evaluation_binding(root, row, frozen)
                 self.save("evaluating")
 
-            execution = run_experiment(
+            execution = run_evaluation(
                 EvaluationRun(
                     batch,
                     digest,
@@ -1015,7 +1021,7 @@ class _Loop:
                     initial_operation="restart_ready",
                     live=self.native,
                 ),
-                evaluation_environment=EvaluationLease(
+                environment=EvaluationLease(
                     source,
                     self.save,
                     evaluation_stopped,
@@ -1039,7 +1045,7 @@ class _Loop:
         self.save("reviewing_evaluation")
         ledger_file = self.review_ledger(root, row)
         # Never derive legality from the model or a successful execution summary.
-        row["evaluation"] = run_experiment(
+        row["evaluation"] = review_evaluation(
             EvaluationReview(
                 batch,
                 ledger_file,
@@ -1097,9 +1103,12 @@ class _Loop:
         self.state["rounds_completed"] += 1
 
     def reconcile_commit(self) -> None:
-        from fh5.experiment import run_experiment
+        from fh5.evaluation.candidate_archive import restore_candidate
+        from fh5.evaluation.candidate_store import read_candidate_history
 
-        history = run_experiment(CandidateHistory(self.store, limit=0)).summary["candidate_store"]
+        history = read_candidate_history(CandidateHistory(self.store, limit=0)).summary[
+            "candidate_store"
+        ]
         if history["revision"] == self.state["store_revision"]:
             return
         rows = self.state["rounds"]
@@ -1144,7 +1153,7 @@ class _Loop:
         with TemporaryDirectory(prefix="commit-recovery-", dir=self.root) as temporary:
             for role, learner in (("default", chosen), ("explorer", self.state["latest_learner"])):
                 archive = history[role]
-                restored = run_experiment(
+                restored = restore_candidate(
                     CandidateRestore(
                         self.store / archive["archive"],
                         Path(temporary) / role,
@@ -1173,7 +1182,7 @@ class _Loop:
         self.accept_selection(row, binding, history)
 
     def retain(self, number: int, row: dict[str, Any], binding: dict[str, Any]) -> None:
-        from fh5.experiment import run_experiment
+        from fh5.evaluation.candidate_store import record_candidate
 
         for path, raw in self.retention_files(number, binding).items():
             if path.exists():
@@ -1182,7 +1191,7 @@ class _Loop:
             else:
                 write_file(path, raw)
         self.save("saving_versions")
-        saved = run_experiment(
+        saved = record_candidate(
             CandidateRecord(
                 self.root / f"round-{number:03d}" / "retain.json",
                 self.store,

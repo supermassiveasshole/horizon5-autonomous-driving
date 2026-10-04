@@ -37,7 +37,7 @@ class SACRealtimePrepare:
 
 
 def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActor) -> RunResult:
-    from fh5.experiment import run_experiment
+    from fh5.evaluation.rewards import settle_rewards
     from fh5.result import RunResult
 
     manifest_path = request.execution_dir / "realtime-manifest.json"
@@ -84,7 +84,7 @@ def prepare_realtime_experience(request: SACRealtimePrepare, actor: DecisionActo
         raise ValueError("Asynchronous SAC experience requires direct numerical pixels")
     request.output_dir.mkdir(parents=True)
     (request.output_dir / "frames").mkdir()
-    settled = run_experiment(
+    settled = settle_rewards(
         RewardReplay(
             request.recording_dir,
             request.output_dir / "reward",

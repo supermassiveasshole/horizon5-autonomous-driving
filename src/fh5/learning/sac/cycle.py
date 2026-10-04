@@ -112,7 +112,9 @@ def run_sac_cycle(
     environment: SACEnvironment | SACRealtimeEnvironment,
     stop_requested: Callable[[int], bool] | None = None,
 ) -> RunResult:
-    from fh5.experiment import run_experiment
+    from fh5.learning.sac.realtime_experience import prepare_realtime_experience
+    from fh5.learning.sac.replay import prepare_sac_replay
+    from fh5.learning.sac.training import run_sac_policy_replay, run_sac_training
     from fh5.result import RunResult
 
     root = request.output_dir
@@ -261,7 +263,7 @@ def run_sac_cycle(
                     summary["stop_reason"] = "sampling_fault"
                     break
                 if isinstance(request, SACRealtimeCycle):
-                    prepared = run_experiment(
+                    prepared = prepare_realtime_experience(
                         SACRealtimePrepare(
                             attempt_dir / "recording",
                             attempt_dir / "execution",
@@ -270,7 +272,7 @@ def run_sac_cycle(
                             attempt_dir / "prepared",
                             review,
                         ),
-                        numeric_actor=SACSamplingActor(
+                        actor=SACSamplingActor(
                             checkpoint,
                             actor.pixels,
                             actor.sha,
@@ -278,7 +280,7 @@ def run_sac_cycle(
                         ),
                     ).summary["sac_replay"]
                 else:
-                    prepared = run_experiment(
+                    prepared = prepare_sac_replay(
                         SACReplayPrepare(
                             attempt_dir / "recording",
                             attempt_dir / "trace.json",
@@ -308,7 +310,7 @@ def run_sac_cycle(
                     summary["stop_reason"] = "no_eligible_experience"
                     break
                 candidate = root / f"candidate-{number:03d}"
-                learned = run_experiment(
+                learned = run_sac_training(
                     SACResume(
                         checkpoint,
                         candidate,
@@ -321,7 +323,7 @@ def run_sac_cycle(
                         additions=((replay, prepared["replay_sha256"]),),
                         expected_checkpoint_sha256=actor.sha,
                     ),
-                    sac_stop_requested=lambda _: stopped(),
+                    stop_requested=lambda _: stopped(),
                 ).summary["sac_learning"]
                 # Reload a complete snapshot before making it the next sampling candidate.
                 restored = FrozenSAC(torch, candidate)
@@ -339,7 +341,7 @@ def run_sac_cycle(
                 else:
                     from fh5.learning.sac.training import SACPolicyReplay
 
-                    checked = run_experiment(
+                    checked = run_sac_policy_replay(
                         SACPolicyReplay(
                             candidate,
                             candidate / "experience/replay.json",

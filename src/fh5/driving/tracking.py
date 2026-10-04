@@ -425,7 +425,7 @@ class _Session:
 
 
 def run_tracking(request: TrackingDrive, environment: ControlEnvironment) -> RunResult:
-    from fh5.experiment import run_experiment
+    from fh5.reporting.recording import run_recording_report
     from fh5.telemetry.packet import Record
 
     session = None
@@ -434,7 +434,7 @@ def run_tracking(request: TrackingDrive, environment: ControlEnvironment) -> Run
         root, route = validate_tracking_file(request.config_file)
         session = _Session(request, root["tracking"], route, environment)
         stream = session.stream()
-        return run_experiment(
+        return run_recording_report(
             Record(request.config_file, request.output_dir, environment.source_kind), packets=stream
         )
     finally:
