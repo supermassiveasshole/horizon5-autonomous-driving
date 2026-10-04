@@ -25,13 +25,6 @@ def write_realtime_result(
     from fh5.result import RunResult
 
     result["configuration"] = {**asdict(config), "pixels": config.pixels.metadata()}
-    try:
-        _add_realtime_metrics(result)
-    except (OSError, MemoryError) as error:
-        result["metrics"] = {
-            "status": "unavailable",
-            "error": f"{type(error).__name__}: {error}",
-        }
     evidence = directory / "report.json"
     write_replay_document(evidence, result)
     if result["version"] == 2:
@@ -39,6 +32,13 @@ def write_realtime_result(
             directory / "realtime-manifest.json",
             encode({"version": 1, "report_sha256": sha256_file(evidence)}),
         )
+    try:
+        _add_realtime_metrics(result)
+    except (OSError, MemoryError) as error:
+        result["metrics"] = {
+            "status": "unavailable",
+            "error": f"{type(error).__name__}: {error}",
+        }
     path = optional_report(
         directory / "report.html",
         "数值决策与动作有效期",
@@ -66,10 +66,6 @@ def _add_realtime_metrics(result: dict[str, Any]) -> None:
         elif row["status"] == "accepted" and skip_start is not None:
             longest = max(longest, row["decision_ns"] - skip_start)
             skip_start = None
-        frames = row.get("frames", [])
-        row["adjacent_delta_ms"] = [
-            (b["source_time_ns"] - a["source_time_ns"]) / 1e6 for a, b in zip(frames, frames[1:])
-        ]
     if skip_start is not None:
         longest = max(longest, end - skip_start)
     result["metrics"] = {
@@ -134,6 +130,10 @@ def _add_realtime_metrics(result: dict[str, Any]) -> None:
 def _write_realtime_html(path: Path, result: dict[str, Any], directory: Path) -> None:
     def display_decision(original: dict[str, Any]) -> dict[str, Any]:
         row = dict(original)
+        frames = row.get("frames", [])
+        row["adjacent_delta_ms"] = [
+            (b["source_time_ns"] - a["source_time_ns"]) / 1e6 for a, b in zip(frames, frames[1:])
+        ]
         row["preview_urls"] = [
             asset(directory, p).as_uri() if p else None
             for p in (row.get("archive") or {}).get("previews", [])

@@ -138,6 +138,28 @@ def test_metric_memory_failure_does_not_lose_completed_decisions(tmp_path, monke
     assert checked["verified"] and checked["verified_predictions"] >= 3
 
 
+def test_interrupted_optional_metrics_leave_sealed_exact_replay(tmp_path, monkeypatch):
+    import fh5.reporting.realtime
+
+    root = tmp_path / "recorded"
+
+    def interrupted(values):
+        raise KeyboardInterrupt("interrupted optional percentile calculation")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(fh5.reporting.realtime, "percentiles", interrupted)
+        with pytest.raises(KeyboardInterrupt, match="optional percentile"):
+            record(root, ThreadedGame())
+
+    checked = replay(root, tmp_path / "verified.html").summary["realtime_numeric_replay"]
+    assert checked["verified"] and checked["verified_predictions"] >= 3
+    original = json.loads((root / "report.json").read_bytes())
+    assert checked["decisions"] == original["decisions"]
+    assert checked["commands"] == original["commands"]
+    manifest = json.loads((root / "realtime-manifest.json").read_bytes())
+    assert sha256_file(root / "report.json") == manifest["report_sha256"]
+
+
 @pytest.mark.parametrize("required", ["report.json", "realtime-manifest.json"])
 def test_required_seal_failure_is_reported_and_keeps_original_journal(
     tmp_path, monkeypatch, required
