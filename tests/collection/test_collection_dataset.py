@@ -158,6 +158,13 @@ def rebind_sealed_rows(root, block):
     for name in ("index.json", "final.json"):
         path = root / name
         value = json.loads(path.read_bytes())
+        if "references" in value:
+            # These fixtures deliberately rewrite sealed evidence. Keep the
+            # legacy inline representation instead of leaving a stale prefix hash.
+            reference_file = root / value.pop("references")["file"]
+            value["blocks"] = [
+                json.loads(line) for line in reference_file.read_bytes().splitlines()
+            ]
         ref = next(ref for ref in value["blocks"] if ref["path"] == f"blocks/{block.name}")
         ref["sha256"] = digest
         if name == "final.json":
@@ -437,13 +444,15 @@ def test_snapshot_stays_fixed_while_collector_publishes_later_blocks(tmp_path):
         frozen_count = len(json.loads(before)["sources"][-1]["blocks"])
         deadline = time.monotonic() + 4
         while (
-            len(json.loads((req.output_dir / "index.json").read_bytes())["blocks"]) <= frozen_count
+            json.loads((req.output_dir / "index.json").read_bytes())["references"]["count"]
+            <= frozen_count
             and time.monotonic() < deadline
         ):
             time.sleep(0.02)
         assert worker.is_alive()
         assert (
-            len(json.loads((req.output_dir / "index.json").read_bytes())["blocks"]) > frozen_count
+            json.loads((req.output_dir / "index.json").read_bytes())["references"]["count"]
+            > frozen_count
         )
         result = run_experiment(CollectionDatasetReview(path, tmp_path / "verified.html"))
         assert result.summary["collection_dataset"]["verified"] and path.read_bytes() == before

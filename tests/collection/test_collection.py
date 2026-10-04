@@ -272,6 +272,12 @@ def test_crash_like_missing_final_and_partial_tail_keep_prior_blocks_readable(tm
     (req.output_dir / "final.json").rename(req.output_dir / "final-before-crash.json")
     index_path = req.output_dir / "index.json"
     index = json.loads(index_path.read_bytes())
+    # Keep explicit legacy-v1 coverage using the references actually written.
+    index.pop("references")
+    index["blocks"] = [
+        json.loads(line)
+        for line in (req.output_dir / "block-references.jsonl").read_bytes().splitlines()
+    ]
     index["blocks"].pop()  # Last seal reached disk just before the index update.
     index_path.write_text(json.dumps(index))
     active = req.output_dir / ".partial/999999"
@@ -388,7 +394,7 @@ def test_index_contention_is_tolerated_briefly_but_persistent_failure_is_reporte
             opened.set()
             assert advance.wait(1)
             time.sleep(held_seconds)
-            assert json.load(reader)["blocks"]
+            assert json.load(reader)["references"]["count"] > 0
     finally:
         (req.output_dir / "stop.request").touch()
         thread.join(timeout=3)
@@ -465,6 +471,12 @@ def test_final_cannot_claim_completeness_after_omitting_a_sealed_reference(tmp_p
     run_experiment(req, collection_environment=Stream(input_at(ms) for ms in range(250, 951, 50)))
     final_path = req.output_dir / "final.json"
     final = json.loads(final_path.read_bytes())
+    # A legacy final claiming completion must still include every sealed block.
+    final.pop("references")
+    final["blocks"] = [
+        json.loads(line)
+        for line in (req.output_dir / "block-references.jsonl").read_bytes().splitlines()
+    ]
     final["blocks"].pop()
     final_path.write_text(json.dumps(final))
     result = run_experiment(CollectionReview(req.output_dir, tmp_path / "review.html")).summary[

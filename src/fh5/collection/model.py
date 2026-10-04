@@ -66,9 +66,9 @@ class CollectionConfig:
     block_bytes: int = 64 * 1024**2
     queue_items: int = 256
     queue_bytes: int = 128 * 1024**2
-    max_blocks: int = 4096
-    max_disk_bytes: int = 64 * 1024**3
-    min_free_bytes: int = 2 * 1024**3
+    max_blocks: int | None = None
+    max_disk_bytes: int | None = None
+    min_free_bytes: int = 0
     expected_car_ordinal: int = 2941
     expected_pi: int = 999
     max_age_ms: int = 100
@@ -77,7 +77,7 @@ class CollectionConfig:
         if (
             type(self.seconds) not in (int, float)
             or not math.isfinite(self.seconds)
-            or not 0.1 <= self.seconds <= 12 * 3600
+            or self.seconds <= 0
         ):
             raise ValueError("Invalid continuous collection duration")
         if self.pixels.origin != "direct_numeric":
@@ -89,9 +89,6 @@ class CollectionConfig:
             ("block_bytes", 1024, 256 * 1024**2),
             ("queue_items", 1, 4096),
             ("queue_bytes", 1, 256 * 1024**2),
-            ("max_blocks", 1, 8192),
-            ("max_disk_bytes", 1024, 1024**4),
-            ("min_free_bytes", 0, 1024**4),
             ("expected_car_ordinal", 1, 1_000_000),
             ("expected_pi", 1, 999),
             ("max_age_ms", 1, 250),
@@ -99,6 +96,12 @@ class CollectionConfig:
             value = getattr(self, name)
             if type(value) is not int or not lo <= value <= hi:
                 raise ValueError("Invalid collection bound: " + name)
+        if type(self.min_free_bytes) is not int or self.min_free_bytes < 0:
+            raise ValueError("Invalid collection reserve")
+        for name in ("max_blocks", "max_disk_bytes"):
+            value = getattr(self, name)
+            if value is not None and (type(value) is not int or value < 1):
+                raise ValueError("Invalid collection budget: " + name)
         if self.observation_hz > self.poll_hz:
             raise ValueError("Observation rate exceeds input polling rate")
 

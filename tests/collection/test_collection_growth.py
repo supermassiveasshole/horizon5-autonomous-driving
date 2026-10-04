@@ -44,7 +44,9 @@ def _shift_clocks(value, delta):
             _shift_clocks(item, delta)
 
 
-def _growing_source(root):
+def _growing_source(
+    root, *, attempt_rows=5006, attempt_count=11, clock_offset_ns=0, identity_prefix=""
+):
     """Extend real recorder output with independently timestamped synthetic evidence."""
     recorded = root / "recorded"
     recorded.mkdir()
@@ -70,7 +72,6 @@ def _growing_source(root):
     binding = _digest(source / "session.json")
     # Four initial histories and the following-label boundary are excluded in each
     # attempt; the remaining 5,001 observations exercise the configured reservoir.
-    attempt_rows, attempt_count = 5006, 11
     total = attempt_rows * attempt_count
     refs = []
     for index, first in enumerate(range(0, total, 4096)):
@@ -81,7 +82,7 @@ def _growing_source(root):
         with (block / "rows.jsonl").open("w", encoding="utf-8", newline="\n") as stream:
             for sequence in range(first, last):
                 row = deepcopy(template)
-                _shift_clocks(row, sequence * 50_000_000)
+                _shift_clocks(row, clock_offset_ns + sequence * 50_000_000)
                 row["sequence"] = sequence
                 for frame in row["frames"]:
                     frame["frame_id"] = str(frame["source_time_ns"])
@@ -106,6 +107,7 @@ def _growing_source(root):
         )
     _json(source / "index.json", {"version": 1, "session_sha256": binding, "blocks": refs})
     final = json.loads((req.output_dir / "final.json").read_bytes())
+    final.pop("references", None)  # This fixture deliberately exercises legacy v1 arrays.
     final.update(
         blocks=refs,
         seen_rows=total,
@@ -121,8 +123,8 @@ def _growing_source(root):
         start, end = index * attempt_rows, (index + 1) * attempt_rows
         attempts.append(
             {
-                "id": f"attempt-{index:02d}",
-                "group": f"group-{index:02d}",
+                "id": f"{identity_prefix}attempt-{index:02d}",
+                "group": f"{identity_prefix}group-{index:02d}",
                 "split": "train" if index < 9 else "development" if index == 9 else "evaluation",
                 "start_sequence": start,
                 "end_sequence": end,

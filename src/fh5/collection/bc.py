@@ -6,21 +6,23 @@ import hashlib
 import json
 import math
 from collections import deque
+from collections.abc import Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from itertools import chain
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from fh5.artifacts.document import read_document_fields, write_replay_document
+from fh5.artifacts.document import read_document_fields, replay_document, write_replay_document
 from fh5.artifacts.io import VerifiedFile, asset, encode, read_bounded, sha256_file, write_file
 from fh5.collection.dataset import (
     _config,
     _evidence,
-    _freeze_source,
     _report_destination,
+    _sequence,
     _summary,
     build_snapshot,
+    freeze_sources,
 )
 from fh5.collection.selection import sealed_rows
 from fh5.learning.bc.features import actor_shape
@@ -63,16 +65,18 @@ def _settings(config: dict[str, Any]) -> None:
     ):
         values = config[name]
         if (
-            not isinstance(values, list)
+            not _sequence(values)
             or not 1 <= len(values) <= 16
             or any(
                 type(v) not in (int, float) or not math.isfinite(v) or not 0 <= v <= maximum
                 for v in values
             )
-            or values != sorted(set(values), reverse=descending)
+            or list(values) != sorted(set(values), reverse=descending)
             or (descending and values[-1] != 0)
         ):
             raise ValueError("Invalid causal history or waypoint layout")
+        # These fixed actor layouts remain ordinary lists for observation consumers.
+        config[name] = list(values)
     age = config["max_action_age_ms"]
     if type(age) not in (int, float) or not math.isfinite(age) or not 10 <= age <= 1000:
         raise ValueError("Invalid action history age budget")
@@ -81,7 +85,7 @@ def _settings(config: dict[str, Any]) -> None:
 def _reference(
     config: dict[str, Any],
     base: Path,
-    sources: list[dict[str, Any]],
+    sources: Sequence[dict[str, Any]],
 ) -> tuple[dict[str, VerifiedFile], dict[str, Any]]:
 
     setting = config.get("reference")
@@ -168,29 +172,16 @@ def _actor(
 def prepare_collection_bc(request: CollectionBCPrepare) -> RunResult:
     if request.output_dir.exists():
         raise FileExistsError(request.output_dir)
-    config = read_document_fields(
-        VerifiedFile(request.config_file, sha256_file(request.config_file)),
-        {
-            "version",
-            "dataset",
-            "dataset_sha256",
-            "seed",
-            "sources",
-            "rules",
-            "action_history_offsets_ms",
-            "max_action_age_ms",
-            "waypoint_distances_m",
-            "reference",
-        },
-        reject_unknown=True,
-    )
-    _settings(config)
-    selection_config = {"version": 1, **{k: config[k] for k in ("seed", "sources", "rules")}}
-    _config(selection_config)
-    sources = [_freeze_source(s, request.config_file.parent) for s in config["sources"]]
-    _report_destination(request.output_dir / "report.html", sources)
-    with build_snapshot(selection_config, sources) as (data, index):
-        return _export(request, config, data, index)
+    with replay_document(
+        VerifiedFile(request.config_file, sha256_file(request.config_file))
+    ) as config:
+        _settings(config)
+        selection_config = {"version": 1, **{k: config[k] for k in ("seed", "sources", "rules")}}
+        _config(selection_config)
+        with freeze_sources(config["sources"], request.config_file.parent) as sources:
+            _report_destination(request.output_dir / "report.html", sources)
+            with build_snapshot(selection_config, sources) as (data, index):
+                return _export(request, config, data, index)
 
 
 def _export(
@@ -333,10 +324,10 @@ def _export(
                 },
             )
     coverage = {entry["attempt"]: entry for entry in data["coverage"]}
-    groups = [
-        {
-            **g,
-            "source_ranges": [
+    ranges: dict[str, list[dict[str, Any]]] = {g["id"]: [] for g in data["groups"]}
+    for source in data["sources"]:
+        for attempt in source["review"]["attempts"]:
+            ranges[attempt["group"]].append(
                 {
                     "session_sha256": source["session_sha256"],
                     "start_sequence": attempt["start_sequence"],
@@ -344,10 +335,11 @@ def _export(
                     "first_ns": coverage[attempt["id"]]["first_ns"],
                     "last_ns": coverage[attempt["id"]]["last_ns"],
                 }
-                for source in data["sources"]
-                for attempt in source["review"]["attempts"]
-                if attempt["group"] == g["id"]
-            ],
+            )
+    groups = [
+        {
+            **g,
+            "source_ranges": ranges[g["id"]],
             "evidence_id": hashlib.sha256(
                 encode({"selection": digest, "attempts": g["attempts"]})
             ).hexdigest(),

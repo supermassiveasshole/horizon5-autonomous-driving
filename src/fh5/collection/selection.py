@@ -8,12 +8,14 @@ import random
 from bisect import bisect_right
 from collections import Counter
 from collections.abc import Iterator
+from operator import itemgetter
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from fh5.artifacts.io import asset, read_bounded
 from fh5.collection.demonstrations import _mapped
-from fh5.collection.review import _references, sealed_block_rows
+from fh5.collection.index import validate_reference
+from fh5.collection.review import sealed_block_rows
 from fh5.observation.numeric import PixelContract
 
 if TYPE_CHECKING:
@@ -24,14 +26,19 @@ def sealed_rows(
     source: dict[str, Any], contract: PixelContract
 ) -> Iterator[tuple[str, dict[str, Any]]]:
     root, binding = Path(source["recording"]), source["session_sha256"]
-    refs = _references(
-        {"version": 1, "session_sha256": binding, "blocks": source["blocks"]}, binding
-    )
-    if not refs or list(refs) != sorted(refs):
+    refs = source["blocks"]
+    if not refs:
         raise ValueError("Frozen sealed blocks must be nonempty and ordered")
+    previous_block = -1
     previous = -1
     previous_ns = -1
-    for relative, ref in refs.items():
+    for ref in refs:
+        validate_reference(ref)
+        relative = ref["path"]
+        number = int(relative.removeprefix("blocks/"))
+        if number <= previous_block:
+            raise ValueError("Frozen sealed blocks must be nonempty and ordered")
+        previous_block = number
         block = asset(root, relative)
         raw = read_bounded(block / "manifest.json", 4096)
         manifest = json.loads(raw)
@@ -57,9 +64,12 @@ def sealed_rows(
 
 def _active_interval(attempt: dict[str, Any], sequence: int) -> dict[str, Any] | None:
     intervals = attempt["intervals"]
-    index = bisect_right([i["start_sequence"] for i in intervals], sequence) - 1
+    index = bisect_right(intervals, sequence, key=itemgetter("start_sequence")) - 1
     if index >= 0 and sequence < intervals[index]["end_sequence"]:
-        return dict(intervals[index], index=index)
+        interval = intervals[index]
+        # Evidence is verified when the review is frozen; selection only needs
+        # the identity and labels of this immutable interval.
+        return {"index": index, "quality": interval["quality"], "road_kind": interval["road_kind"]}
     return None
 
 
@@ -185,7 +195,7 @@ def select_source(
             source_faults.append("invalid_human_input")
         if mapped != row["mapped_input"]:
             raise ValueError("Mapped label differs from raw source evidence")
-        position = bisect_right([a["start_sequence"] for a in attempts], seq) - 1
+        position = bisect_right(attempts, seq, key=itemgetter("start_sequence")) - 1
         attempt = (
             attempts[position]
             if position >= 0 and seq < attempts[position]["end_sequence"]

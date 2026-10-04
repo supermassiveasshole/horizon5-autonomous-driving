@@ -75,7 +75,7 @@ def test_durable_collection_index_never_uses_control_only_partial_replacement(
     assert result["archive_error"] is None and result["complete"] is True
     assert result["written_rows"] == 2 and result["sealed_blocks"] == 2
     index = json.loads(index_path.read_bytes())
-    assert len(index["blocks"]) == 2
+    assert index["references"]["count"] == 2
     recovered = run_experiment(CollectionReview(req.output_dir, tmp_path / "review.html"))
     assert recovered.summary["collection"]["verified_blocks"] == 2
     assert recovered.summary["collection"]["complete"] is True
@@ -101,7 +101,7 @@ def test_failed_durable_index_replacement_keeps_previous_state_and_sealed_blocks
     ).summary["collection"]
     assert len(prior_publications) == 1
     assert index_path.read_bytes() == prior_publications[0]
-    assert len(json.loads(index_path.read_bytes())["blocks"]) == 1
+    assert json.loads(index_path.read_bytes())["references"]["count"] == 1
     assert index_path.with_suffix(".tmp").is_file()
     assert result["stop_reason"] == "archive_failure" and result["complete"] is False
     assert "injected durable index publication failure" in result["archive_error"]

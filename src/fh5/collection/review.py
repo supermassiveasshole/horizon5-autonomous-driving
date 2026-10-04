@@ -5,11 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import shutil
 from collections.abc import Iterator
+from contextlib import ExitStack
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
-from fh5.artifacts.io import VerifiedFile, atomic_json, read_bounded
+from fh5.artifacts.document import replay_document
+from fh5.artifacts.io import VerifiedFile, atomic_json, read_bounded, sha256_file
+from fh5.collection.index import BlockReferences, read_references
 from fh5.collection.model import CollectionReview
 from fh5.collection.store import collection_complete
 from fh5.observation.numeric import PixelContract, validate_frame_history
@@ -18,29 +23,6 @@ from fh5.reporting.presentation import optional_report
 
 if TYPE_CHECKING:
     from fh5.result import RunResult
-
-
-def _references(document: dict[str, Any], binding: str) -> dict[str, dict[str, Any]]:
-    if document["version"] != 1 or document["session_sha256"] != binding:
-        raise ValueError("Collection reference document binding differs")
-    blocks = document["blocks"]
-    if not isinstance(blocks, list) or len(blocks) > 8192:
-        raise ValueError("Invalid bounded collection reference list")
-    result = {}
-    for ref in blocks:
-        path, digest, rows = ref["path"], ref["sha256"], ref["rows"]
-        if (
-            not isinstance(path, str)
-            or re.fullmatch(r"blocks/[0-9]{6}", path) is None
-            or path in result
-            or not isinstance(digest, str)
-            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
-            or type(rows) is not int
-            or not 1 <= rows <= 4096
-        ):
-            raise ValueError("Invalid or repeated sealed block reference")
-        result[path] = ref
-    return result
 
 
 def sealed_block_rows(
@@ -78,6 +60,11 @@ def sealed_block_rows(
 
 
 def review_collection(request: CollectionReview) -> RunResult:
+    with ExitStack() as resources:
+        return _review_collection(request, resources)
+
+
+def _review_collection(request: CollectionReview, resources: ExitStack) -> RunResult:
     from fh5.result import RunResult
 
     root = request.recording_dir
@@ -108,7 +95,8 @@ def review_collection(request: CollectionReview) -> RunResult:
     }
     # Snapshot documents before enumerating blocks: a concurrent seal may appear
     # after this index, and is recoverable even before its reference is published.
-    references: dict[str, dict[str, dict[str, Any]]] = {}
+    references: dict[str, BlockReferences] = {}
+    snapshots = Path(resources.enter_context(TemporaryDirectory(prefix="fh5-collection-review-")))
     final = None
     result["final_status_present"] = (root / "final.json").is_file()
     for name in ("final.json", "index.json"):
@@ -117,8 +105,12 @@ def review_collection(request: CollectionReview) -> RunResult:
         if name == "final.json":
             result["final_status_present"] = True
         try:
-            document = json.loads(read_bounded(root / name, 4 * 1024**2))
-            references[name] = _references(document, binding)
+            frozen = snapshots / name
+            with (root / name).open("rb") as origin, frozen.open("xb") as target:
+                shutil.copyfileobj(origin, target)
+            source = VerifiedFile(frozen, sha256_file(frozen))
+            document = resources.enter_context(replay_document(source))
+            references[name] = resources.enter_context(read_references(root, binding, document))
             if name == "final.json":
                 final = document
         except PermissionError as error:
@@ -132,22 +124,23 @@ def review_collection(request: CollectionReview) -> RunResult:
                 result["errors"].append({"file": name, "error": str(error)})
         except (OSError, ValueError, KeyError, TypeError) as error:
             result["errors"].append({"file": name, "error": str(error)})
-    blocks = sorted((root / "blocks").iterdir())
-    if len(blocks) > 8192:
-        raise ValueError("Too many collection blocks")
+    blocks = sorted(
+        (root / "blocks").iterdir(),
+        key=lambda block: (0, int(block.name)) if block.name.isdecimal() else (1, block.name),
+    )
     seen_paths = {"blocks/" + block.name for block in blocks}
     for name, refs in references.items():
-        for missing_path in refs.keys() - seen_paths:
-            result["errors"].append(
-                {"file": name, "error": "Missing sealed block: " + missing_path}
-            )
+        for ref in refs:
+            if ref["path"] not in seen_paths:
+                result["errors"].append(
+                    {"file": name, "error": "Missing sealed block: " + ref["path"]}
+                )
     previous = -1
     for block in blocks:
         try:
             if (
                 not block.is_dir()
-                or len(block.name) != 6
-                or not block.name.isdecimal()
+                or re.fullmatch(r"[0-9]{6,}", block.name) is None
                 or block.is_symlink()
             ):
                 raise ValueError("Unexpected sealed block entry")
@@ -194,7 +187,7 @@ def review_collection(request: CollectionReview) -> RunResult:
         }
         if final.get("complete") is True and (
             not collection_complete(final)
-            or references["final.json"].keys() != seen_paths
+            or len(references["final.json"]) != len(seen_paths)
             or final.get("written_rows") != result["rows"]
             or final.get("seen_rows") != result["rows"]
             or final.get("sealed_blocks") != result["verified_blocks"]

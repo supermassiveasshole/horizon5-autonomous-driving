@@ -128,7 +128,6 @@ def prepare_collection(
     request.config.validate_capture(capture)
     if (
         request.source not in ("native", "synthetic")
-        or (request.source == "synthetic" and request.config.seconds > 60)
         or type(request.port) is not int
         or not 1024 <= request.port <= 65535
     ):

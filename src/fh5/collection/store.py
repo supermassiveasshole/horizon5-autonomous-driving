@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import shutil
 import threading
 import time
@@ -13,6 +14,7 @@ from typing import Any
 
 from fh5.artifacts.io import WriteFile, atomic_json, encode, write_file
 from fh5.collection.file_io import replace_control_file
+from fh5.collection.index import REFERENCE_FILE
 from fh5.collection.model import CollectionConfig, metadata_budget
 from fh5.observation.numeric import NumericFrame
 
@@ -51,7 +53,14 @@ class CollectionArchive:
         self.offered = self.written = self.dropped = 0
         self.disk_bytes = 0
         self.error: str | None = None
-        self.blocks: list[dict[str, Any]] = []
+        self.sealed_blocks = self.reference_count = self.reference_bytes = 0
+        self.reference_hash = hashlib.sha256()
+        self.reference_prefix = {
+            "file": REFERENCE_FILE,
+            "bytes": 0,
+            "sha256": self.reference_hash.hexdigest(),
+            "count": 0,
+        }
         self.progress: dict[str, Any] = {}
         self.partial_rows: list[bytes] = []
         self.partial_bytes = 0
@@ -60,6 +69,7 @@ class CollectionArchive:
         self.partial: Path | None = None
         (root / "blocks").mkdir()
         (root / ".partial").mkdir()
+        write_file(root / REFERENCE_FILE, b"")
         self.worker = threading.Thread(target=self._run, name="fh5-collection-archive", daemon=True)
         self.worker.start()
 
@@ -102,9 +112,9 @@ class CollectionArchive:
             return False
 
     def _open(self) -> None:
-        if len(self.blocks) >= self.config.max_blocks:
-            raise OSError("collection_block_limit")
-        self.partial = self.root / ".partial" / f"{len(self.blocks):06d}"
+        if self.config.max_blocks is not None and self.sealed_blocks >= self.config.max_blocks:
+            raise OSError("collection_block_budget")
+        self.partial = self.root / ".partial" / f"{self.sealed_blocks:06d}"
         self.partial.mkdir()
         (self.partial / "pixels").mkdir()
 
@@ -119,7 +129,7 @@ class CollectionArchive:
             {
                 "version": 1,
                 "session_sha256": self.binding,
-                "index": len(self.blocks),
+                "index": self.sealed_blocks,
                 "row_count": len(self.partial_rows),
                 "first_sequence": self.first,
                 "last_sequence": self.last,
@@ -132,18 +142,35 @@ class CollectionArchive:
             return
         destination = self.root / "blocks" / self.partial.name
         self.partial.rename(destination)
-        self.blocks.append(
+        reference = encode(
             {
                 "path": str(destination.relative_to(self.root)).replace("\\", "/"),
                 "sha256": hashlib.sha256(manifest).hexdigest(),
                 "rows": len(self.partial_rows),
             }
         )
+        self.sealed_blocks += 1
         self.written += len(self.partial_rows)
         self.disk_bytes += self.partial_bytes + len(manifest)
+        with (self.root / REFERENCE_FILE).open("ab") as stream:
+            stream.write(reference)
+            stream.flush()
+            os.fsync(stream.fileno())
+        self.reference_hash.update(reference)
+        self.reference_bytes += len(reference)
+        self.reference_count += 1
+        self.disk_bytes += len(reference)
+        # One assignment keeps close() on a complete prefix even if the worker
+        # is still finishing a seal when its bounded join expires.
+        self.reference_prefix = {
+            "file": REFERENCE_FILE,
+            "bytes": self.reference_bytes,
+            "sha256": self.reference_hash.hexdigest(),
+            "count": self.reference_count,
+        }
         atomic_json(
             self.root / "index.json",
-            {"version": 1, "session_sha256": self.binding, "blocks": self.blocks},
+            {"version": 1, "session_sha256": self.binding, "references": self.references()},
         )
         self.partial, self.partial_rows, self.partial_bytes = None, [], 0
         self.pixel_hashes.clear()
@@ -176,7 +203,9 @@ class CollectionArchive:
         free = shutil.disk_usage(self.root).free
         if free < self.config.min_free_bytes + maximum + 4096:
             raise OSError("collection_disk_reserve")
-        if self.disk_bytes + self.partial_bytes + maximum + 4096 > self.config.max_disk_bytes:
+        if self.config.max_disk_bytes is not None and (
+            self.disk_bytes + self.partial_bytes + maximum + 4096 > self.config.max_disk_bytes
+        ):
             raise OSError("collection_disk_budget")
         if self.partial is None:
             self._open()
@@ -202,7 +231,7 @@ class CollectionArchive:
                 "seen_rows": self.offered,
                 "written_rows": self.written,
                 "dropped_rows": self.dropped,
-                "sealed_blocks": len(self.blocks),
+                "sealed_blocks": self.sealed_blocks,
                 "disk_bytes": self.disk_bytes,
                 "peak_pending_bytes": self.peak_pending_bytes,
                 "pending_bytes": self.pending_bytes,
@@ -264,5 +293,8 @@ class CollectionArchive:
             **self.status(),
             "archive_released": released,
             "unsealed_rows": self.offered - self.written,
-            "blocks": list(self.blocks),
+            "references": self.references(),
         }
+
+    def references(self) -> dict[str, Any]:
+        return dict(self.reference_prefix)

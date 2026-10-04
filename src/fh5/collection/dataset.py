@@ -7,19 +7,21 @@ import json
 import math
 import random
 import re
+import shutil
 import sqlite3
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Generator, Iterator, Sequence
 from contextlib import closing, contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import TYPE_CHECKING, Any
 
-from fh5.artifacts.document import ReplayArray, replay_document
+from fh5.artifacts.document import ReplayArray, replay_document, write_replay_document
 from fh5.artifacts.io import VerifiedFile, encode, read_bounded, sha256_file, write_file
+from fh5.artifacts.json_view import JsonArray, write_json
 from fh5.collection.demonstrations import _profile
-from fh5.collection.review import _references
+from fh5.collection.index import read_references
 from fh5.observation.numeric import PixelContract
 from fh5.reporting.presentation import optional_report
 
@@ -31,6 +33,22 @@ if TYPE_CHECKING:
 class CollectionDatasetReview:
     dataset_file: Path
     report_path: Path
+
+
+REVIEW_ARRAYS: set[tuple[str, ...]] = {
+    ("evidence",),
+    ("independence_evidence",),
+    ("attempts", "*", "intervals"),
+    ("attempts", "*", "related_attempts"),
+    ("attempts", "*", "intervals", "*", "evidence"),
+    ("attempts", "*", "intervals", "*", "reasons"),
+}
+SNAPSHOT_ARRAYS: set[tuple[str, ...]] = {
+    ("config", "sources"),
+    ("sources", "*", "blocks"),
+    ("sources", "*", "review", "attempts"),
+    *(("sources", "*", "review", *path) for path in REVIEW_ARRAYS),
+}
 
 
 class _CollectionIndex:
@@ -49,6 +67,33 @@ class _CollectionIndex:
             "CREATE TABLE identities (kind TEXT, identity TEXT, data TEXT, "
             "PRIMARY KEY (kind, identity)) WITHOUT ROWID"
         )
+        database.execute(
+            "CREATE TABLE relations (owner TEXT, related TEXT, "
+            "PRIMARY KEY (owner, related)) WITHOUT ROWID"
+        )
+
+    def add_attempt(self, attempt: dict[str, Any]) -> None:
+        try:
+            self.database.execute(
+                "INSERT INTO identities VALUES ('attempt', ?, ?)",
+                (attempt["id"], encode(attempt["group"]).decode()),
+            )
+        except sqlite3.IntegrityError as error:
+            raise ValueError("Duplicate attempt identity") from error
+        self.database.executemany(
+            "INSERT OR IGNORE INTO relations VALUES (?, ?)",
+            ((attempt["id"], related) for related in attempt["related_attempts"]),
+        )
+
+    def check_related_attempts(self) -> None:
+        invalid = self.database.execute(
+            "SELECT 1 FROM relations r "
+            "JOIN identities a ON a.kind = 'attempt' AND a.identity = r.owner "
+            "LEFT JOIN identities b ON b.kind = 'attempt' AND b.identity = r.related "
+            "WHERE b.identity IS NULL OR a.data != b.data LIMIT 1"
+        ).fetchone()
+        if invalid is not None:
+            raise ValueError("Related attempts must exist and share one group")
 
     def append(self, section: str, row: dict[str, Any]) -> None:
         self.database.execute(
@@ -97,19 +142,28 @@ class _CollectionIndex:
 
 def _evidence(value: Any) -> bool:
     return (
-        isinstance(value, list)
+        _sequence(value)
         and bool(value)
         and all(isinstance(v, str) and 0 < len(v.strip()) <= 2000 for v in value)
     )
+
+
+def _sequence(value: Any) -> bool:
+    return isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray))
 
 
 def _identifier(value: Any) -> bool:
     return isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.-]{1,80}", value) is not None
 
 
-def _bounds(item: dict[str, Any], lower: int, upper: int) -> tuple[int, int]:
+def _bounds(item: dict[str, Any], lower: int, upper: int | None) -> tuple[int, int]:
     start, end = item["start_sequence"], item["end_sequence"]
-    if type(start) is not int or type(end) is not int or not lower <= start < end <= upper:
+    if (
+        type(start) is not int
+        or type(end) is not int
+        or not lower <= start < end
+        or (upper is not None and end > upper)
+    ):
         raise ValueError("Review intervals must be ordered, disjoint and half-open")
     return start, end
 
@@ -120,23 +174,27 @@ def validate_review(value: dict[str, Any], binding: str) -> None:
         or value.get("session_sha256") != binding
         or type(value.get("conditions_verified")) is not bool
         or not _evidence(value.get("evidence"))
-        or not isinstance(value.get("attempts"), list)
-        or not 1 <= len(value["attempts"]) <= 1000
+        or not _sequence(value.get("attempts"))
+        or not value["attempts"]
     ):
         raise ValueError("Collection review needs bound session, conditions and attempt evidence")
     previous = 0
+    first_group = None
+    independent_groups = False
     for attempt in value["attempts"]:
         if (
             not _identifier(attempt.get("id"))
             or not _identifier(attempt.get("group"))
             or attempt.get("split") not in ("train", "development", "evaluation")
-            or not isinstance(attempt.get("related_attempts"), list)
+            or not _sequence(attempt.get("related_attempts"))
             or not all(_identifier(v) for v in attempt["related_attempts"])
-            or not isinstance(attempt.get("intervals"), list)
-            or len(attempt["intervals"]) > 1000
+            or not _sequence(attempt.get("intervals"))
         ):
             raise ValueError("Invalid attempt identity, split or reviewed intervals")
-        start, end = _bounds(attempt, previous, 10_000_000)
+        if first_group is None:
+            first_group = attempt["group"]
+        independent_groups |= attempt["group"] != first_group
+        start, end = _bounds(attempt, previous, None)
         previous = end
         position = start
         for interval in attempt["intervals"]:
@@ -144,16 +202,14 @@ def validate_review(value: dict[str, Any], binding: str) -> None:
             if (
                 interval.get("quality") not in ("trusted", "failed", "unknown")
                 or not _evidence(interval.get("evidence"))
-                or not isinstance(interval.get("reasons"), list)
+                or not _sequence(interval.get("reasons"))
                 or any(not isinstance(r, str) or not r for r in interval["reasons"])
                 or (interval["quality"] == "trusted" and interval["reasons"])
                 or interval.get("road_kind")
                 not in ("straight", "left_curve", "right_curve", "unknown")
             ):
                 raise ValueError("Reviewed quality needs evidence and explicit road knowledge")
-    if len({a["group"] for a in value["attempts"]}) > 1 and not _evidence(
-        value.get("independence_evidence")
-    ):
+    if independent_groups and not _evidence(value.get("independence_evidence")):
         raise ValueError(
             "Independent attempts in one session require explicit independence evidence"
         )
@@ -165,10 +221,10 @@ def _config(value: dict[str, Any]) -> None:
         or value["version"] != 1
         or type(value["seed"]) is not int
         or not 0 <= value["seed"] < 2**32
-        or not isinstance(value["sources"], list)
-        or not 1 <= len(value["sources"]) <= 100
+        or not _sequence(value["sources"])
+        or not value["sources"]
     ):
-        raise ValueError("Invalid bounded collection dataset configuration")
+        raise ValueError("Invalid collection dataset configuration")
     rules = value["rules"]
     if set(rules) != {
         "max_samples_per_attempt",
@@ -202,56 +258,91 @@ def _config(value: dict[str, Any]) -> None:
         raise ValueError("Invalid action, speed or label-age envelope")
 
 
-def _freeze_source(entry: dict[str, Any], base: Path) -> dict[str, Any]:
+def _review_digest(review: dict[str, Any]) -> str:
+    with TemporaryDirectory(prefix="fh5-collection-review-") as temporary:
+        path = Path(temporary) / "review.json"
+        write_replay_document(path, review)
+        return sha256_file(path)
+
+
+@contextmanager
+def _freeze_source(entry: dict[str, Any], base: Path) -> Iterator[dict[str, Any]]:
     if set(entry) != {"recording", "review"}:
         raise ValueError("Source requires recording and review paths")
     root = (base / entry["recording"]).resolve()
     payload = read_bounded(root / "session.json", 1024**2)
     binding = hashlib.sha256(payload).hexdigest()
-    index = json.loads(read_bounded(root / "index.json", 4 * 1024**2))
-    references = _references(index, binding)
-    if not references:
-        raise ValueError("No published sealed blocks are available")
-    review = json.loads(read_bounded(base / entry["review"], 4 * 1024**2))
-    validate_review(review, binding)
-    return {
-        "recording": str(root),
-        "session_sha256": binding,
-        "blocks": list(references.values()),
-        "review": review,
-        "review_sha256": hashlib.sha256(encode(review)).hexdigest(),
-    }
+    with TemporaryDirectory(prefix="fh5-collection-source-") as temporary:
+        # The producer replaces index.json atomically while collection continues.
+        # Copy one opened version before hashing it, rather than opening two versions.
+        frozen_index = Path(temporary) / "index.json"
+        with (root / "index.json").open("rb") as source, frozen_index.open("xb") as target:
+            shutil.copyfileobj(source, target)
+        review_path = base / entry["review"]
+        with (
+            replay_document(VerifiedFile(frozen_index, sha256_file(frozen_index))) as document,
+            read_references(root, binding, document) as references,
+            replay_document(
+                VerifiedFile(review_path, sha256_file(review_path)), nested_arrays=REVIEW_ARRAYS
+            ) as review,
+        ):
+            if not references:
+                raise ValueError("No published sealed blocks are available")
+            validate_review(review, binding)
+            yield {
+                "recording": str(root),
+                "session_sha256": binding,
+                "blocks": references,
+                "review": review,
+                "review_sha256": _review_digest(review),
+            }
 
 
-def _groups(sources: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    attempts: dict[str, dict[str, Any]] = {}
+@contextmanager
+def freeze_sources(entries: Sequence[dict[str, Any]], base: Path) -> Iterator[ReplayArray]:
+    """Freeze one source at a time, then share one scoped index for all selections."""
+    with TemporaryDirectory(prefix="fh5-collection-sources-") as temporary:
+        path = Path(temporary) / "frozen-sources.json"
+
+        def sources() -> Generator[dict[str, Any]]:
+            for entry in entries:
+                with _freeze_source(entry, base) as source:
+                    yield source
+
+        with (
+            closing(sources()) as values,
+            path.open("x", encoding="utf-8", newline="\n") as stream,
+        ):
+            write_json(stream, {"sources": JsonArray(values)})
+        with replay_document(
+            VerifiedFile(path, sha256_file(path)), nested_arrays=SNAPSHOT_ARRAYS
+        ) as frozen:
+            yield frozen["sources"]
+
+
+def _groups(sources: Sequence[dict[str, Any]], index: _CollectionIndex) -> list[dict[str, Any]]:
     groups: dict[str, dict[str, Any]] = {}
     for source in sources:
         review = source["review"]
         validate_review(review, source["session_sha256"])
-        if hashlib.sha256(encode(review)).hexdigest() != source["review_sha256"]:
+        if _review_digest(review) != source["review_sha256"]:
             raise ValueError("Frozen review changed")
         for attempt in review["attempts"]:
             identifier, group = attempt["id"], attempt["group"]
-            if identifier in attempts:
-                raise ValueError("Duplicate attempt identity")
-            attempts[identifier] = attempt
+            index.add_attempt(attempt)
             value = groups.setdefault(
                 group, {"id": group, "split": attempt["split"], "attempts": []}
             )
             if value["split"] != attempt["split"]:
                 raise ValueError("Related attempt group cannot cross dataset splits")
             value["attempts"].append(identifier)
-    for attempt in attempts.values():
-        for related in attempt["related_attempts"]:
-            if related not in attempts or attempts[related]["group"] != attempt["group"]:
-                raise ValueError("Related attempts must exist and share one group")
+    index.check_related_attempts()
     return sorted(groups.values(), key=lambda g: g["id"])
 
 
 @contextmanager
 def build_snapshot(
-    config: dict[str, Any], sources: list[dict[str, Any]]
+    config: dict[str, Any], sources: Sequence[dict[str, Any]]
 ) -> Iterator[tuple[dict[str, Any], _CollectionIndex]]:
     with TemporaryDirectory(prefix="fh5-collection-dataset-") as temporary:
         try:
@@ -263,12 +354,12 @@ def build_snapshot(
 
 
 def _snapshot(
-    config: dict[str, Any], sources: list[dict[str, Any]], index: _CollectionIndex
+    config: dict[str, Any], sources: Sequence[dict[str, Any]], index: _CollectionIndex
 ) -> dict[str, Any]:
     from fh5.collection.selection import select_source
 
     _config(config)
-    groups = _groups(sources)
+    groups = _groups(sources, index)
     seen = set()
     compatibility = None
     details = []
@@ -371,26 +462,26 @@ def _summary(data: dict[str, Any], digest: str) -> dict[str, Any]:
     }
 
 
+def _same(first: Any, second: Any) -> bool:
+    if isinstance(first, dict) and isinstance(second, dict):
+        return first.keys() == second.keys() and all(_same(first[k], second[k]) for k in first)
+    if _sequence(first) and _sequence(second):
+        return len(first) == len(second) and all(_same(a, b) for a, b in zip(first, second))
+    return bool(first == second)
+
+
 def review_collection_dataset(request: CollectionDatasetReview) -> RunResult:
     from fh5.result import RunResult
 
     path, report = request.dataset_file, request.report_path
     digest = sha256_file(path)
-    with replay_document(VerifiedFile(path, digest)) as data:
+    with replay_document(VerifiedFile(path, digest), nested_arrays=SNAPSHOT_ARRAYS) as data:
         if data.get("kind") != "collection-dataset-snapshot-v1" or data.get("version") != 1:
             raise ValueError("Unsupported collection dataset snapshot")
         _report_destination(report, data["sources"])
-        with build_snapshot(data["config"], list(data["sources"])) as (expected, _):
-            if data.keys() != expected.keys():
+        with build_snapshot(data["config"], data["sources"]) as (expected, _):
+            if not _same(data, expected):
                 raise ValueError("Dataset differs from canonical frozen source reconstruction")
-            for key, value in expected.items():
-                actual = data[key]
-                if isinstance(value, (list, ReplayArray)) and isinstance(actual, ReplayArray):
-                    same = len(value) == len(actual) and all(a == b for a, b in zip(value, actual))
-                else:
-                    same = value == actual
-                if not same:
-                    raise ValueError("Dataset differs from canonical frozen source reconstruction")
         summary = _summary(data, digest)
     write_file(report.with_suffix(".json"), encode(summary))
     report = optional_report(
@@ -403,7 +494,7 @@ def review_collection_dataset(request: CollectionDatasetReview) -> RunResult:
     return RunResult({}, [], [], {"collection_dataset": summary}, report)
 
 
-def _report_destination(report: Path, sources: list[dict[str, Any]]) -> None:
+def _report_destination(report: Path, sources: Sequence[dict[str, Any]]) -> None:
     if report.suffix.lower() != ".html":
         raise ValueError("Dataset report must use an .html path distinct from JSON evidence")
     for path in (report, report.with_suffix(".json")):

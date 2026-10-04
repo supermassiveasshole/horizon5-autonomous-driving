@@ -188,20 +188,32 @@ def test_preparation_accepts_the_configured_reservoir_budget(tmp_path):
         assert current["provenance"]["envelope"]["max_samples_per_attempt"] == 5001
 
 
-def test_unavailable_preparation_index_preserves_sources_for_retry(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("storage", "message"),
+    [
+        ("dataset.sqlite3", "Cannot index collection dataset"),
+        ("records.sqlite3", "Cannot index replay document"),
+    ],
+)
+def test_unavailable_preparation_index_preserves_sources_for_retry(
+    tmp_path, monkeypatch, storage, message
+):
     from fh5.collection.bc import CollectionBCPrepare
 
     config = prepare_inputs(tmp_path)
     output = tmp_path / "prepared"
     attempted = []
+    connect = sqlite3.connect
 
     def unavailable_storage(path, *args, **kwargs):
         attempted.append(Path(path))
-        raise sqlite3.OperationalError("disk I/O error")
+        if Path(path).name == storage:
+            raise sqlite3.OperationalError("disk I/O error")
+        return connect(path, *args, **kwargs)
 
     with monkeypatch.context() as fault:
         fault.setattr(sqlite3, "connect", unavailable_storage)
-        with pytest.raises(OSError, match="Cannot index collection dataset"):
+        with pytest.raises(OSError, match=message):
             run_experiment(CollectionBCPrepare(config, output))
     assert attempted and all(not path.parent.exists() for path in attempted)
     assert not output.exists()
