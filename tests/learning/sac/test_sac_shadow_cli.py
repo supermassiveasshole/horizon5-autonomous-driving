@@ -137,8 +137,16 @@ def test_sac_shadow_predicts_without_commands_and_replays_exactly(
         assert proposals[0]["proposal"] == {"steer_i16": 0, "throttle_u8": 0, "brake_u8": 0}
         accepted = [row for row in report["decisions"] if row["status"] == "accepted"]
         assert accepted
-        assert report["metrics"]["source_to_send_return_ms"]["count"] == 0
-        assert report["metrics"]["source_to_proposal_ms"]["count"] == len(accepted)
+        # Optional statistics are rendered after the replay evidence is sealed.
+        # Check the public display, without requiring derived values in the raw file.
+        html = (root / "report.html").read_text(encoding="utf-8")
+        display, _ = json.JSONDecoder().raw_decode(html.split("const data=", 1)[1])
+        assert display["metrics"]["source_to_send_return_ms"]["count"] == 0
+        assert display["metrics"]["source_to_proposal_ms"]["count"] == len(accepted)
+        assert display["commands"] == report["commands"] == []
+        assert [row["decision_id"] for row in display["decisions"]] == [
+            row["decision_id"] for row in report["decisions"]
+        ]
         for row in accepted:
             assert row["actor"]["actions"] == [None, None, None]
             assert row["actor"]["action_mask"] == [False, False, False]
