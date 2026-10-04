@@ -1,6 +1,6 @@
 # T29 / #31：无历史参考的因果观测验证
 
-日期：2026-09-29。实现依据：[视觉导航规格](../visual-navigation-spec.md)、[GitHub #31](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/31)。使用同一实验运行入口验证，未启动车辆控制或训练。
+日期：2026-09-29。实现依据：[视觉导航规格](../design/visual-navigation-spec.md)、[GitHub #31](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/31)。使用同一实验运行入口验证，未启动车辆控制或训练。
 
 ## 冻结真实 RGB 对照
 

@@ -1,6 +1,6 @@
 # T26 / #27：同步人工示范验收
 
-日期：2026-09-29。依据 [GitHub #27](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/27)及[视觉导航规格](../visual-navigation-spec.md)。公开入口为 `run_experiment` 的 DemonstrationRecord / Replay / Dataset；使用实体手柄，只采集，不发送游戏控制，不训练策略。使用方法见[同步示范](../demonstrations.md)。
+日期：2026-09-29。依据 [GitHub #27](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/27)及[视觉导航规格](../design/visual-navigation-spec.md)。公开入口为 `run_experiment` 的 DemonstrationRecord / Replay / Dataset；使用实体手柄，只采集，不发送游戏控制，不训练策略。使用方法见[同步示范](../guides/capture/demonstrations.md)。
 
 ## 实机输入标定
 

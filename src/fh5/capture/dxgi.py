@@ -1,0 +1,155 @@
+"""Version-locked DXGI adapter. No virtual controller or encoded-image path."""
+
+from __future__ import annotations
+
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, replace
+from typing import Any
+
+from fh5.capture.pipeline import CaptureEvent, RawCapture
+
+
+@dataclass(frozen=True)
+class DXGISettings:
+    device_idx: int = 0
+    output_idx: int = 0
+    expected_client_size: tuple[int, int] = (3840, 2160)
+    condition_id: str = "fh5-chase-far-4k-unverified-v1"
+
+    def __post_init__(self) -> None:
+        if (
+            any(type(v) is not int or v < 0 for v in (self.device_idx, self.output_idx))
+            or len(self.expected_client_size) != 2
+            or any(type(v) is not int or v < 1 for v in self.expected_client_size)
+            or not isinstance(self.condition_id, str)
+            or not self.condition_id
+        ):
+            raise ValueError("Invalid DXGI target settings")
+
+
+@dataclass(frozen=True)
+class ClientArea:
+    window: int
+    monitor: int
+    rect: tuple[int, int, int, int]
+    dpi: int
+
+
+@dataclass(frozen=True)
+class DesktopImage:
+    present_ticks: int
+    accumulated_frames: int
+    protected: bool
+    size: tuple[int, int]
+    bgra: bytes
+    source_texture_size: tuple[int, int]
+
+
+class ClientCaptureGuard:
+    """Share physical-client boundaries across native and diagnostic sources."""
+
+    def __init__(self, settings: DXGISettings, target: Callable[[], ClientArea | None]) -> None:
+        self.settings, self.target = settings, target
+        self.previous: ClientArea | None = None
+
+    def begin(self) -> ClientArea | CaptureEvent:
+        target = self.target()
+        if target is None:
+            boundary = "focus_lost" if self.previous is not None else None
+            self.previous = None
+            return CaptureEvent(
+                time.perf_counter_ns(), boundary=boundary, reason="target_unavailable"
+            )
+        left, top, right, bottom = target.rect
+        if (right - left, bottom - top) != self.settings.expected_client_size:
+            self.previous = None
+            return CaptureEvent(
+                time.perf_counter_ns(),
+                boundary="client_size_mismatch",
+                reason="client_size_mismatch",
+            )
+        return target
+
+    def end(self, target: ClientArea, received_ns: int) -> CaptureEvent:
+        if target != self.target():
+            self.previous = None
+            return CaptureEvent(
+                received_ns, boundary="window_changed_during_capture", reason="capture_discarded"
+            )
+        boundary = (
+            "window_changed" if self.previous is not None and self.previous != target else None
+        )
+        self.previous = target
+        return CaptureEvent(received_ns, boundary=boundary)
+
+
+class DXGIFrames:
+    source_kind = "dxgi"
+
+    def __init__(
+        self,
+        settings: DXGISettings,
+        *,
+        target: Callable[[], ClientArea | None],
+        camera_factory: Callable[[DXGISettings], Any],
+    ) -> None:
+        self.settings, self.camera_factory = settings, camera_factory
+        self.guard = ClientCaptureGuard(settings, target)
+        self.camera: Any = None
+
+    def capture(self) -> CaptureEvent:
+        target = self.guard.begin()
+        if isinstance(target, CaptureEvent):
+            return target
+        left, top, right, bottom = target.rect
+        size = (right - left, bottom - top)
+        if self.camera is None:
+            self.camera = self.camera_factory(self.settings)
+        camera = self.camera
+        x0, y0, x1, y1 = camera.output_rect
+        if target.monitor != camera.monitor or not (
+            x0 <= left < right <= x1 and y0 <= top < bottom <= y1
+        ):
+            raise OSError("FH5 physical client must fit the selected DXGI adapter/output")
+        region = (left - x0, top - y0, right - x0, bottom - y0)
+        image: DesktopImage | None = camera.grab(region)
+        received = time.perf_counter_ns()
+        event = self.guard.end(target, received)
+        if event.reason is not None:
+            return event
+        if image is None:
+            return replace(event, reason="no_new_frame")
+        if image.size != size:
+            raise OSError("DXGI returned pixels that differ from the physical client crop")
+        if image.protected:
+            return CaptureEvent(received, boundary="protected_content", reason="protected_content")
+        layout = {
+            **camera.identity,
+            "condition_id": self.settings.condition_id,
+            "client_size": list(size),
+            "client_rect": list(target.rect),
+            "crop": list(region),
+            "window": target.window,
+            "monitor": target.monitor,
+            "dpi": target.dpi,
+            "source_texture_size": list(image.source_texture_size),
+            "color_space": "DXGI_FORMAT_B8G8R8A8_UNORM; HDR state unverified",
+        }
+        return replace(
+            event,
+            frame=RawCapture(
+                image.present_ticks,
+                camera.mapping,
+                size,
+                image.bgra,
+                layout,
+                time_quality="dxgi_qpc",
+                accumulated_frames=image.accumulated_frames,
+            ),
+        )
+
+    def close(self) -> None:
+        if self.camera is not None:
+            self.camera.release()
+            self.camera = None

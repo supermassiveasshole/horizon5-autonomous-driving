@@ -4,7 +4,7 @@
 
 ## 实验结果
 
-沿用 `run_experiment` 和 CLI 边界。`SACTrain` 从已核验预热检查点出发，`SACPolicyReplay` 以原始数值图像重新计算输入并检查冻结输出；实现契约见 [SAC 学习](../sac-learning.md)。
+沿用 `run_experiment` 和 CLI 边界。`SACTrain` 从已核验预热检查点出发，`SACPolicyReplay` 以原始数值图像重新计算输入并检查冻结输出；实现契约见 [SAC 学习](../guides/sac/sac-learning.md)。
 
 保留原型目录 `runs/t10-sac-20261001/`，使用实际 CPU Torch，分别以种子 7、重复种子 7 和种子 11 完成 200 次 critic/编码器更新、100 次 actor/温度更新：
 

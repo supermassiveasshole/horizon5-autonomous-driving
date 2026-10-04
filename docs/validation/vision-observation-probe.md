@@ -42,7 +42,7 @@
 - `capture-script.py`：`65f6732399f019835aa3075cb2c18e132718578f980d72fbbdfb499dfb92033d`
 - `observations.jsonl`：`a5e31cd1ce53b19820eee7425b2237134703c51f8478abf6fb690cea4ed61765`
 
-后续按 [视觉切片](../vision-observation-slice.md) 处理采集性能、生产回放接入及道路估计评估。本轮无需追加右侧沿边采集；现有 T04 真实走廊验收仍保持未完成。
+后续采集和回放见[彩色录制指南](../guides/capture/vision-recording.md)，道路估计结果见 [T23 验证](t23-perception.md)。本轮无需追加右侧沿边采集；现有 T04 真实走廊验收仍保持未完成。
 
 ## Standards
 
