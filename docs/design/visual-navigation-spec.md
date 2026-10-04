@@ -91,4 +91,4 @@
 
 #26 当前仍要求参考文件，其历史完整观测统计不按新规则重算；该票已完成用户页面确认，并补齐活动采集与冻结回放一致性证据，见 [T25 验证](../validation/t25-observations.md)。补充切片 #31 已实现可选参考及因果动作历史导入，保留旧观测版本与数据，见 [T29 验证](../validation/t29-navigation-observations.md)。
 
-原规格 #1 和旧 ADR 保留历史；[ADR 0005](../adr/0005-visual-navigation-optional-reference.md) 说明本次取舍。本轮不重做已确认范围问卷；GitHub 子票的具体增改和阻塞边已按用户批准草稿发布并核验，见[任务索引](../archive/visual-navigation-tickets.md)。外部项目的数据量、模型表现不作为本项目充分性或迁移能力证据。
+原规格 #1 和旧 ADR 保留历史；[ADR 0005](../adr/0005-visual-navigation-optional-reference.md) 说明本次取舍。本轮不重做已确认范围问卷；GitHub 子票的具体增改和阻塞边已按用户批准草稿发布并核验，见 [#30 及其子任务](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues/30)。外部项目的数据量、模型表现不作为本项目充分性或迁移能力证据。

@@ -14,7 +14,7 @@
 
 - **当前设计**：[PRD](design/PRD.md)、[驾驶学习方案](design/driving-learning-design.md)、[模型策略](design/model-and-driving-strategy.md)、[奖励与有效性](design/reward-and-validity-design.md)、[多模态规格](design/multimodal-learning-spec.md)、[导航规格](design/visual-navigation-spec.md)、[采集方案](design/demonstration-collection-plan.md)、[资源策略](design/resource-policy.md)。
 - **领域与工作约定**：[术语](../CONTEXT.md)、[ADR](adr/)、[代理工作约定](agents/)、[仓库约定](../AGENTS.md)。
-- **证据与历史**：[逐次验证记录](validation/)保留当时结论；[研究资料](research/)提供依据；[范围决定](archive/scope-decisions.md)、[视觉切片快照](archive/vision-observation-slice.md)及[任务发布记录](archive/visual-navigation-tickets.md)保留历史。任务当前状态以 [GitHub Issues](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues) 为准。
+- **证据与历史**：[逐次验证记录](validation/)保留当时结论；[研究资料](research/)提供依据；[范围决定](archive/scope-decisions.md)保留用户决策；[资源审计](validation/resource-limit-audit.md)汇总当前软件验证和剩余边界。任务当前状态以 [GitHub Issues](https://github.com/supermassiveasshole/horizon5-autonomous-driving/issues) 为准。
 
 更新实现时维护对应操作指南；需求及验收以设计文档为准，历史研究与验证记录不自动成为当前能力声明。
 

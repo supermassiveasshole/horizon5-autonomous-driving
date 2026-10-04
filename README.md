@@ -17,6 +17,10 @@ uv run --locked fh5 --help
 
 实体手柄采集按[示范与输入校准](docs/guides/capture/demonstrations.md#采集与校准)准备档案；模型实际控制另需 `control` extra 和 ViGEmBus，见[控制安装](docs/guides/runtime/control.md)。实验使用新的输出目录，`runs/` 不纳入 Git，已有录制、模型和依赖目录保留。
 
+首次实机从[4K 被动采集检查](docs/guides/capture/dxgi-capture.md)开始，核对真实分辨率、追尾远视角、HUD、遥测和实体输入，再按[独立采集指南](docs/guides/capture/continuous-collection.md#冻结与后台运行)新建 v3 采集包，执行启动、状态、停止和封存审核。旧冻结包不随仓库合并自动升级；示例中待核验的条件也不能直接改成已确认。
+
+车辆控制另走[只读配置与实测](docs/guides/runtime/realtime-decisions.md#只读命令) → [独立数值重放](docs/guides/runtime/realtime-decisions.md#独立数值重放) → [短段驾驶资格](docs/guides/runtime/realtime-decisions.md#有界驾驶命令与条件绑定)。已有旧来源模型只可按其契约作诊断，不能据此跳过新候选和当前采集条件的核验。
+
 | 顺序 | 当前操作入口 | 完成后进入下一步的依据 |
 |---|---|---|
 | 1. 采集 | [独立持续采集](docs/guides/capture/continuous-collection.md)：`collection-prepare/start/status/stop/review` | 已封存录制、真实采集条件和输入核验 |
